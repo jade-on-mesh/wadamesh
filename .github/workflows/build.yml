@@ -1,0 +1,56 @@
+# Compile check for work branches: host tests plus a T-Deck firmware build.
+# Releases still come from release.yml (beta_* tags).
+name: build
+
+on:
+  push:
+    branches-ignore: ['main']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  host-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: VOX photo wire format
+        run: |
+          g++ -std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined -I src \
+              -o /tmp/test_vox_wire test/test_vox_wire.cpp
+          /tmp/test_vox_wire
+
+  firmware:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        env: [LilyGo_TDeck_companion_radio_touch, ThinkNode_M9_companion_radio_touch]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            .pio
+          key: pio-${{ runner.os }}-${{ matrix.env }}-${{ hashFiles('platformio.ini') }}
+      - name: Install PlatformIO
+        run: pip install --upgrade platformio
+      - name: Build
+        run: |
+          unset WIFI_SSID WIFI_PWD
+          pio run -e ${{ matrix.env }}
+      - name: Firmware size
+        run: |
+          ls -la .pio/build/${{ matrix.env }}/firmware.bin
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.env }}
+          path: .pio/build/${{ matrix.env }}/firmware*.bin
+          if-no-files-found: warn
