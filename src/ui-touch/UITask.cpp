@@ -132,6 +132,8 @@ static void* wadaMp3Scratch() { return s_wada_mp3_scratch; }
 #include "UsbFilesSession.h"    // USB Files: files.wadamesh.com over the USB cable
 #include "SenderExtField.h"   // host-tested split/rejoin of a sender across the two on-disk fields
 #include "Constellation.h"    // the Constellation screensaver (drawing only; the mesh side is in this file)
+#include "VoxAv1Core.h"      // MeshCore Open TAK photos: AV1 decode (lib/dav1d)
+#include "VoxAv1Job.h"       // ...run on its own task, polled from the LVGL loop
 #if defined(DOC_CAPTURE)
 extern int g_cst_debug;          // Constellation.cpp: profiling knob for capture builds
 #endif
@@ -25985,7 +25987,12 @@ static bool fmIsImage(const char* name) {
   if (!dot) return false;
   return !strcasecmp(dot, ".png")  || !strcasecmp(dot, ".jpg") ||
          !strcasecmp(dot, ".jpeg") || !strcasecmp(dot, ".sjpg") ||
-         !strcasecmp(dot, ".bmp");
+         !strcasecmp(dot, ".bmp")  || !strcasecmp(dot, ".vi1");
+}
+// A MeshCore Open TAK photo payload ([0x01][AV1 OBUs], what VoxWire reassembles).
+static bool fmIsVoxPhoto(const char* name) {
+  const char* dot = name ? strrchr(name, '.') : nullptr;
+  return dot && !strcasecmp(dot, ".vi1");
 }
 #if CAP_SD || defined(TLORA_PAGER)
 static bool fmIsAudio(const char* name) {
@@ -26151,6 +26158,10 @@ static void fmImageRootClickCb(lv_event_t* e) {
 #if CAP_LOCK_SCREEN
 static void fmSetWallpaperCb(lv_event_t* e) {
   if (lv_event_get_code(e) != LV_EVENT_CLICKED || !s_fm_img_path[0]) return;
+  if (fmIsVoxPhoto(s_fm_img_path)) {   // the lock screen can't decode AV1
+    if (g_lv.task) g_lv.task->showAlert(TR("Mesh photos can't be a wallpaper"), 1600);
+    return;
+  }
   char pref[TOUCH_LOCK_WALLPAPER_MAXLEN];
   if (s_fm_img_on_sd) snprintf(pref, sizeof pref, "sd:%s", s_fm_img_path);
   else                snprintf(pref, sizeof pref, "%s", s_fm_img_path);
@@ -26258,6 +26269,63 @@ static void fmOpenAudio(const char* name) {
 }
 #endif  // HAS_TDECK_GT911 || TLORA_PAGER (.wav notification-sound chooser)
 
+static void fmImageShowDecoded(const char* name, uint8_t* rgb, int dw, int dh);
+
+// ---- MeshCore Open TAK photos (.vi1) -----------------------------------------
+// Decoded by VoxAv1Job on a background task; an lv_timer polls it so the viewer
+// is only ever built from the LVGL loop. The alert shown afterwards reports the
+// decode's cost, which is what on-device testing of the decoder needs.
+static lv_timer_t* s_vox_poll_timer = nullptr;
+static char        s_vox_name[64]   = {0};
+
+static void fmVoxPhotoPollCb(lv_timer_t*) {
+  if (VoxAv1Job::state() != VoxAv1Job::kDone) return;
+  lv_timer_del(s_vox_poll_timer);
+  s_vox_poll_timer = nullptr;
+  VoxAv1Image img;
+  VoxAv1Job::Stats st;
+  const VoxAv1Result r = VoxAv1Job::finish(&img, &st);
+  Serial.printf("[VOX] decode %s: %s %dx%d %lu ms @%lu MHz, stack %lu B, heap %lu B\n", s_vox_name,
+                voxAv1ResultText(r), img.width, img.height, (unsigned long)st.decode_ms,
+                (unsigned long)st.cpu_mhz, (unsigned long)st.stack_used, (unsigned long)st.heap_peak);
+  if (r != kVoxAv1Ok) {
+    voxAv1Free(img.pixels);
+    if (g_lv.task) g_lv.task->showAlert(TR(voxAv1ResultText(r)), 2500);
+    return;
+  }
+  // The viewer frees with lvglPsramFree, so hand it a buffer from that allocator.
+  const size_t bytes = (size_t)img.width * img.height * 2;
+  uint8_t* buf = (uint8_t*)lvglPsramAlloc(bytes);
+  if (!buf) {
+    voxAv1Free(img.pixels);
+    if (g_lv.task) g_lv.task->showAlert(TR("Out of memory"), 1500);
+    return;
+  }
+  memcpy(buf, img.pixels, bytes);
+  voxAv1Free(img.pixels);
+  fmImageShowDecoded(s_vox_name, buf, img.width, img.height);
+  char msg[96];
+  snprintf(msg, sizeof msg, "AV1 %dx%d in %lu ms @ %lu MHz\nstack %lu KB, heap %lu KB", img.width, img.height,
+           (unsigned long)st.decode_ms, (unsigned long)st.cpu_mhz,
+           (unsigned long)((st.stack_used + 1023) / 1024), (unsigned long)((st.heap_peak + 1023) / 1024));
+  if (g_lv.task) g_lv.task->showAlert(msg, 3500);
+}
+
+static void fmVoxPhotoStart(const char* name, const uint8_t* payload, size_t len) {
+#if VOX_AV1_AVAILABLE
+  if (!VoxAv1Job::start(payload, len)) {
+    if (g_lv.task) g_lv.task->showAlert(TR("Already decoding a photo"), 1500);
+    return;
+  }
+  snprintf(s_vox_name, sizeof s_vox_name, "%s", name);
+  if (!s_vox_poll_timer) s_vox_poll_timer = lv_timer_create(fmVoxPhotoPollCb, 50, nullptr);
+  if (g_lv.task) g_lv.task->showAlert(TR("Decoding photo..."), 1200);
+#else
+  (void)name; (void)payload; (void)len;
+  if (g_lv.task) g_lv.task->showAlert(TR(voxAv1ResultText(kVoxAv1Unsupported)), 2000);
+#endif
+}
+
 static void fmOpenImage(const char* name) {
   if (!s_fm_fs || !name || !name[0]) return;
   fmMarkSdIo();                          // SD file read -> activity LED
@@ -26279,6 +26347,12 @@ static void fmOpenImage(const char* name) {
   if (!enc) { f.close(); if (g_lv.task) g_lv.task->showAlert(TR("Out of memory"), 1500); return; }
   size_t rd = f.readBytes((char*)enc, sz);
   f.close();
+
+  if (fmIsVoxPhoto(name)) {   // AV1: decoded on its own task, shown when done
+    fmVoxPhotoStart(name, enc, rd);
+    free(enc);
+    return;
+  }
 
   // Decode to a full RGB565 buffer up front (LVGL's line-by-line readers can't
   // feed a scaled/zoomed lv_img — that renders black). Route by magic bytes:
@@ -26305,6 +26379,12 @@ static void fmOpenImage(const char* name) {
     return;
   }
 
+  fmImageShowDecoded(name, rgb, dw, dh);
+}
+
+// Builds the viewer around an already-decoded RGB565 buffer from lvglPsramAlloc
+// (the viewer takes ownership and frees it on close).
+static void fmImageShowDecoded(const char* name, uint8_t* rgb, int dw, int dh) {
   fmImageClose();        // drop any previous viewer (frees its buffer)
   s_fm_img_buf = rgb;    // decoded RGB565 pixels; freed on close
   memset(&s_fm_img_dsc, 0, sizeof s_fm_img_dsc);
