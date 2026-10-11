@@ -21,6 +21,8 @@ jobs:
           g++ -std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined -I src \
               -o /tmp/test_vox_wire test/test_vox_wire.cpp
           /tmp/test_vox_wire
+      - name: VOX photo decoder (bit-exact against libaom, sanitizers on)
+        run: test/build_vox_av1_test.sh /tmp/vox_av1
 
   firmware:
     runs-on: ubuntu-latest
@@ -49,6 +51,12 @@ jobs:
       - name: Firmware size
         run: |
           ls -la .pio/build/${{ matrix.env }}/firmware.bin
+          echo "### ${{ matrix.env }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "firmware.bin: $(stat -c %s .pio/build/${{ matrix.env }}/firmware.bin) bytes" >> "$GITHUB_STEP_SUMMARY"
+          ~/.platformio/packages/toolchain-xtensa-esp32s3/bin/xtensa-esp32s3-elf-size \
+            .pio/build/${{ matrix.env }}/firmware.elf >> "$GITHUB_STEP_SUMMARY" || true
+          ~/.platformio/packages/toolchain-xtensa-esp32s3/bin/xtensa-esp32s3-elf-size -t \
+            .pio/build/${{ matrix.env }}/lib*/libdav1d.a 2>/dev/null | tail -1 >> "$GITHUB_STEP_SUMMARY" || true
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.env }}

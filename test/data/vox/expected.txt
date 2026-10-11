@@ -1,0 +1,11 @@
+# name width height fnv1a64-of-libaom-RGB888 (vox_av1.c decode of the same payload)
+astronaut_2750.vi1 256 256 7beeb00ff3ba0c86
+astronaut_5500.vi1 256 256 ae0ce7b2ff179469
+chelsea_2750.vi1 352 234 a77ab3f075f3a8c3
+chelsea_5500.vi1 288 192 fde704d67ac0fb96
+coffee_2750.vi1 288 192 0f5713e6b91053df
+coffee_5500.vi1 384 256 9f01340542772e5f
+hubble_deep_field_2750.vi1 384 335 1399b0a8055d1f13
+hubble_deep_field_5500.vi1 384 335 72b2b8707ac40563
+rocket_2750.vi1 320 214 4591a6366fd890d5
+rocket_5500.vi1 320 214 ce12f65dd8bb9049
