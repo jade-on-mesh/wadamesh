@@ -330,6 +330,11 @@ protected:
   int searchChannelsByHash(const uint8_t* hash, mesh::GroupChannel dest[], int max_matches) override;
   void onChannelMessageRecv(const mesh::GroupChannel &channel, mesh::Packet *pkt, uint32_t timestamp,
                             const char *text) override;
+  /** GRP_DATA datagrams (channel data, v1.15+). Forwarded live to connected apps as
+   *  RESP_CODE_CHANNEL_DATA_RECV and handed to the UI. Without this override the
+   *  core's default drops them, which broke every app feature built on channel data. */
+  void onChannelDataRecv(const mesh::GroupChannel &channel, mesh::Packet *pkt, uint16_t data_type,
+                         const uint8_t *data, size_t data_len) override;
 
   uint8_t onContactRequest(const ContactInfo &contact, uint32_t sender_timestamp, const uint8_t *data,
                            uint8_t len, uint8_t *reply) override;

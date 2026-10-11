@@ -3506,6 +3506,46 @@ void MyMesh::onChannelMessageRecv(const mesh::GroupChannel &channel, mesh::Packe
 #endif
 }
 
+// Channel data (GRP_DATA). Frame layout matches upstream MeshCore's companion_radio:
+//   [27][snr*4][0][0][channel_idx][path_len | 0xFF if direct][type lo][type hi][data_len][data...]
+// Delivery differs on purpose: upstream queues these behind CMD_SYNC_NEXT_MESSAGE, but here
+// the sync stream is the persistent history ring (128 slots, chat-only filter), and a burst of
+// data chunks (a 36-packet photo) would push unsynced chat out of it. Channel data is live
+// traffic -- transfer chunks and fetch requests that are stale by the time an offline app
+// reconnects -- so it's pushed to connected apps the same way raw data is, and not queued.
+void MyMesh::onChannelDataRecv(const mesh::GroupChannel &channel, mesh::Packet *pkt, uint16_t data_type,
+                               const uint8_t *data, size_t data_len) {
+  const int resolved_idx = findConfiguredChannelIdx(channel);
+  if (resolved_idx < 0 || resolved_idx >= MAX_GROUP_CHANNELS) return;   // not one of our channels
+
+#ifdef DISPLAY_CLASS
+  if (_ui) _ui->onChannelData((uint8_t)resolved_idx, data_type, data, data_len, pkt->isRouteFlood());
+#endif
+
+  if (data_len > MAX_CHANNEL_DATA_LENGTH) {
+    MESH_DEBUG_PRINTLN("onChannelDataRecv: dropping data_len=%d > frame limit %d",
+                       (int)data_len, (int)MAX_CHANNEL_DATA_LENGTH);
+    return;
+  }
+  if (!_serial->isConnected()) return;
+
+  int i = 0;
+  out_frame[i++] = RESP_CODE_CHANNEL_DATA_RECV;
+  out_frame[i++] = (int8_t)(pkt->getSNR() * 4);
+  out_frame[i++] = 0; // reserved1
+  out_frame[i++] = 0; // reserved2
+  out_frame[i++] = (uint8_t)resolved_idx;
+  out_frame[i++] = pkt->isRouteFlood() ? pkt->path_len : 0xFF;
+  out_frame[i++] = (uint8_t)(data_type & 0xFF);
+  out_frame[i++] = (uint8_t)(data_type >> 8);
+  out_frame[i++] = (uint8_t)data_len;
+  if (data_len > 0) {
+    memcpy(&out_frame[i], data, data_len);
+    i += (int)data_len;
+  }
+  _serial->writeFrameToAll(out_frame, i);
+}
+
 uint8_t MyMesh::onContactRequest(const ContactInfo &contact, uint32_t sender_timestamp, const uint8_t *data,
                                  uint8_t len, uint8_t *reply) {
   if (data[0] == REQ_TYPE_GET_TELEMETRY_DATA) {
