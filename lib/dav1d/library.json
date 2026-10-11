@@ -1,0 +1,22 @@
+{
+  "name": "dav1d",
+  "version": "1.5.1",
+  "description": "Vendored dav1d AV1 decoder (VideoLAN), portable C, 8-bit only, no assembly. Decodes MeshCore Open TAK photo messages. Re-vendor with scripts/vendor_dav1d.sh; local changes are in patches/.",
+  "license": "BSD-2-Clause",
+  "build": {
+    "srcDir": ".",
+    "includeDir": "include",
+    "srcFilter": ["-<*>", "+<src/*.c>", "-<src/*_tmpl.c>", "+<src/8bpc/*.c>"],
+    "flags": [
+      "-I gen",
+      "-I .",
+      "-O2",
+      "-DNDEBUG",
+      "-Wno-unused-parameter",
+      "-Wno-missing-field-initializers",
+      "-Wno-sign-compare",
+      "-Wno-maybe-uninitialized"
+    ],
+    "libArchive": true
+  }
+}
