@@ -42,6 +42,9 @@ reduced still-picture header and no AVIF container, 2,750 B ("Standard") or
   output, plus the 221 KB of kept tables.
 - Output is bit-exact with libaom's decode in the app (`vox_av1.c`), converted
   with the same full-range BT.601 formulas, then packed to RGB565.
+- Flash: the decoder is ~285 KB of code at `-O2` (~255 KB at `-Os`). With it,
+  CI's T-Deck `firmware.bin` is 3,855,984 B and the M9's 3,783,184 B, against
+  4,063,232 B app slots: about 200 KB and 280 KB left.
 - Tanmatsu and T-Display P4 builds don't link dav1d yet; `VOX_AV1_AVAILABLE` is
   0 there and opening a photo says it isn't supported.
 
