@@ -57,6 +57,11 @@ jobs:
             .pio/build/${{ matrix.env }}/firmware.elf >> "$GITHUB_STEP_SUMMARY" || true
           ~/.platformio/packages/toolchain-xtensa-esp32s3/bin/xtensa-esp32s3-elf-size -t \
             .pio/build/${{ matrix.env }}/lib*/libdav1d.a 2>/dev/null | tail -1 >> "$GITHUB_STEP_SUMMARY" || true
+          # Also as an annotation, so the numbers are readable from the checks API.
+          BIN=$(stat -c %s .pio/build/${{ matrix.env }}/firmware.bin)
+          DAV=$(~/.platformio/packages/toolchain-xtensa-esp32s3/bin/xtensa-esp32s3-elf-nm -S --size-sort \
+                .pio/build/${{ matrix.env }}/firmware.elf | grep -ciE ' dav1d_' || true)
+          echo "::notice title=${{ matrix.env }} size::firmware.bin ${BIN} bytes; dav1d symbols linked: ${DAV}"
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.env }}
