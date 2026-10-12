@@ -82,7 +82,7 @@ class VoxFetch {
   Method lastMethod(uint32_t sid) const;
   int attempts(uint32_t sid) const;
 
-  // Short human status for a bubble, e.g. "Downloading 12/36".
+  // Short human status for a bubble, e.g. "Downloading 12/36" or "Voice 7s - tap to play".
   const char* statusText(uint32_t sid, char* buf, size_t cap) const;
 
  private:
@@ -91,6 +91,8 @@ class VoxFetch {
     uint32_t sid = 0;
     uint8_t total = 0;
     uint16_t aspect = 0;
+    int packet_bytes = VoxWire::kBytesPerPacket;
+    VoxWire::Kind kind = VoxWire::kImage;
     Status st = kRemote;
     bool has_pub = false;
     uint8_t pub[32] = {0};

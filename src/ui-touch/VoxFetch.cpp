@@ -54,10 +54,10 @@ void VoxFetch::release(Session& s) {
 
 bool VoxFetch::ensureStorage(Session& s) {
   if (s.storage) return true;
-  const size_t n = (size_t)s.total * VoxWire::kBytesPerPacket;
+  const size_t n = (size_t)s.total * (size_t)s.packet_bytes;
   s.storage = (uint8_t*)malloc(n);   // > 4 KB: PSRAM on the device
   if (!s.storage) return false;
-  if (!s.asm_.begin(s.sid, s.total, s.storage, n)) {
+  if (!s.asm_.begin(s.sid, s.total, s.storage, n, s.packet_bytes)) {
     free(s.storage);
     s.storage = nullptr;
     return false;
@@ -67,12 +67,14 @@ bool VoxFetch::ensureStorage(Session& s) {
 
 void VoxFetch::onEnvelope(const VoxWire::Envelope& env, const uint8_t* sender_pub,
                           const char* sender_name, int channel, bool start) {
-  if (env.total < 1 || env.total > VoxWire::kMaxImagePackets) return;
+  if (env.total < 1 || env.total > VoxWire::kMaxClipPackets || env.packetBytes() <= 0) return;
   Session* s = find(env.sid);
   if (!s) {
     s = claim(env.sid);
     s->total = env.total;
     s->aspect = env.aspect;
+    s->packet_bytes = env.packetBytes();
+    s->kind = env.kind;
     s->st = io_.hasPayload(env.sid) ? kComplete : kRemote;
   }
   s->last_touch = io_.nowMs();
@@ -175,7 +177,7 @@ VoxFetch::Method VoxFetch::choose(Session& s) {
 void VoxFetch::attempt(Session& s) {
   const Method m = choose(s);
   if (m == kNone) {
-    fail(s, s.has_pub ? "No route to the sender. Tap to retry." : "Sender isn't a contact. Tap to retry.");
+    fail(s, s.has_pub ? "no route to the sender. Tap to retry." : "the sender isn't a contact. Tap to retry.");
     return;
   }
   s.attempts++;
@@ -217,7 +219,7 @@ void VoxFetch::attempt(Session& s) {
   if (!sent) {
     if (m != kChannel) s.direct_failures++;
     if (s.attempts < kMaxAttempts) attempt(s);
-    else fail(s, "Couldn't send the request. Tap to retry.");
+    else fail(s, "couldn't send the request. Tap to retry.");
     return;
   }
   if (s.st != kReceiving) s.st = kRequesting;
@@ -241,7 +243,7 @@ void VoxFetch::onTimeout(Session& s) {
     attempt(s);
     return;
   }
-  fail(s, got == 0 ? "Photo unavailable right now. Tap to retry." : "Download stalled. Tap to retry.");
+  fail(s, got == 0 ? "unavailable right now. Tap to retry." : "download stalled. Tap to retry.");
 }
 
 void VoxFetch::fail(Session& s, const char* why) {
@@ -292,7 +294,7 @@ void VoxFetch::complete(Session& s) {
     s.note = nullptr;
   } else {
     s.st = kUnavailable;
-    s.note = "Couldn't store the photo. Tap to retry.";
+    s.note = "couldn't store it. Tap to retry.";
   }
   free(s.storage);
   s.storage = nullptr;
@@ -327,10 +329,14 @@ const char* VoxFetch::statusText(uint32_t sid, char* buf, size_t cap) const {
   int got = 0, total = 0;
   const Status st = status(sid, &got, &total);
   const Session* s = find(sid);
+  const bool voice = s && s->kind != VoxWire::kImage;
+  const char* noun = voice ? "Voice" : "Photo";
+  char ready[32];
+  if (voice) snprintf(ready, sizeof ready, "Voice %us - tap to play", (unsigned)s->aspect);
   switch (st) {
     case kUnknown:
     case kRemote:
-      snprintf(buf, cap, "Photo - tap to download");
+      snprintf(buf, cap, "%s", voice ? ready : "Photo - tap to download");
       break;
     case kRequesting:
       snprintf(buf, cap, "%s", !s ? "Requesting..."
@@ -342,10 +348,10 @@ const char* VoxFetch::statusText(uint32_t sid, char* buf, size_t cap) const {
       snprintf(buf, cap, "Downloading %d/%d", got, total);
       break;
     case kComplete:
-      snprintf(buf, cap, "Photo - tap to view");
+      snprintf(buf, cap, "%s", voice ? ready : "Photo - tap to view");
       break;
     case kUnavailable:
-      snprintf(buf, cap, "%s", s && s->note ? s->note : "Photo unavailable. Tap to retry.");
+      snprintf(buf, cap, "%s %s", noun, s && s->note ? s->note : "unavailable. Tap to retry.");
       break;
   }
   return buf;

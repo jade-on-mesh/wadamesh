@@ -1,22 +1,26 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
-// Wire formats for MeshCore Open TAK photo messages (VOX "VI1"), so a wadamesh
-// radio can fetch and show photos sent from that app. Mirrors
+// Wire formats for MeshCore Open TAK photo and voice messages (VOX), so a
+// wadamesh radio can fetch photos and voice clips sent from that app. Mirrors
 // lib/vox/voice_wire.dart in jade-on-mesh/meshcore-open-tak. Pure C++, no
 // Arduino, so it is host-testable (test/test_vox_wire.cpp).
 //
-//   Envelope (ordinary text message, DM or channel):
-//     VI1:{sid}:{mode}:{total}:{aspect}     all fields lowercase base36
+//   Envelope (ordinary text message, DM or channel), all fields lowercase base36:
+//     VE3:{sid}:{mode}:{total}:{seconds}   Codec2 voice (the published VE3 format)
+//     VM1:{sid}:{mode}:{total}:{seconds}   Mimi neural voice (VOX only)
+//     VI1:{sid}:{mode}:{total}:{aspect}    AV1 still image (VOX only)
 //       sid    32-bit session id
-//       mode   40 ("14") = AV1 still image
+//       mode   VE3: Codec2 mode 0..6 (700C, 1200, 2400, 1300, 1400, 1600, 3200);
+//              VM1: 32 ("w"); VI1: 40 ("14")
 //       total  packet count, 1..255
-//       aspect width * 100 / height
+//       last   clip length in whole seconds, or for a photo width * 100 / height
 //
 //   Data packet (raw data on a direct route, or GRP_DATA type 0x5643 on a channel):
 //     [0x56][sid:4 BE][index:1][bytes...]          plain
 //     [0x57][sid:4 BE][index:1][bytes...][salt:1]  salted resend
-//   Every packet but the last carries exactly kBytesPerPacket bytes.
+//   Every packet but the last carries packetBytes(mode): as many whole codec
+//   frames as fit in 156 bytes (156 for photos).
 //
 //   Fetch request (same planes as the data):
 //     [0x72][sid:4 BE][flags:1][requesterKey6:6][count:1][missing indices...]
@@ -25,7 +29,8 @@
 //   Text fetch request (flooded DM when there is no direct route):
 //     VR3:{sid}:{a | m<ranges>}:{requesterKey6 hex}
 //
-// Reassembled payload: [0x01 version][AV1 OBUs, temporal delimiter stripped].
+// Reassembled payload: a photo is [0x01 version][AV1 OBUs, temporal delimiter
+// stripped]; a voice clip is the codec's frames back to back.
 
 #include <stddef.h>
 #include <stdint.h>
@@ -50,14 +55,47 @@ constexpr int      kFetchMinLen       = 13;
 constexpr int      kMaxFetchIndices   = 140;    // keeps a request (and a reply path) inside one packet
 constexpr uint8_t  kImagePayloadVersion = 0x01;
 
-// Largest photo Open TAK sends today is "More detail" (36 packets, 5,500 B). Allow
-// some growth without letting a hostile envelope make us reserve 40 KB.
-constexpr int      kMaxImagePackets   = 64;
+constexpr int      kMimiModeId        = 32;
+
+// Largest clip Open TAK sends today is a "More detail" photo (36 packets) or 20 s
+// of Codec2 3200 (54 packets). Allow some growth without letting a hostile
+// envelope make us reserve 40 KB.
+constexpr int      kMaxClipPackets    = 64;
+constexpr int      kMaxImagePackets   = kMaxClipPackets;
+
+enum Kind : uint8_t { kImage = 0, kCodec2, kMimi };
+
+// Bytes in one codec frame for a wire mode id, or 0 for an unknown mode.
+inline int bytesPerFrame(int mode) {
+  switch (mode) {
+    case 0: return 4;                       // 700C
+    case 1: case 2: return 6;               // 1200, 2400
+    case 3: case 4: return 7;               // 1300, 1400
+    case 5: case 6: return 8;               // 1600, 3200
+    case kMimiModeId: return 11;
+    case kImageModeId: return 1;
+    default: return 0;
+  }
+}
+// Codec bytes in every packet but the last: whole frames that fit in 156.
+inline int packetBytes(int mode) {
+  const int f = bytesPerFrame(mode);
+  return f ? (kBytesPerPacket / f) * f : 0;
+}
+// The CODEC2_MODE_* value for a VE3 wire mode id, or -1.
+inline int codec2Mode(int mode) {
+  static const int8_t ids[7] = {8, 5, 1, 4, 3, 2, 0};   // 700C 1200 2400 1300 1400 1600 3200
+  return mode >= 0 && mode <= 6 ? ids[mode] : -1;
+}
 
 struct Envelope {
-  uint32_t sid;
-  uint8_t  total;    // packets
-  uint16_t aspect;   // width * 100 / height
+  uint32_t sid = 0;
+  uint8_t  total = 0;    // packets
+  uint16_t aspect = 0;   // photo: width * 100 / height; voice: length in seconds
+  uint8_t  mode = kImageModeId;   // wire mode id
+  Kind     kind = kImage;
+  int packetBytes() const { return VoxWire::packetBytes(mode); }
+  uint16_t seconds() const { return kind == kImage ? 0 : aspect; }
 };
 
 inline bool parseBase36(const char* s, size_t n, uint32_t* out) {
@@ -87,11 +125,15 @@ inline int toBase36(uint32_t v, char* out) {
   return n;
 }
 
-// True for a well-formed VI1 photo envelope (surrounding whitespace allowed).
-inline bool parseImageEnvelope(const char* text, Envelope* env) {
+// Parses a VE3 / VM1 / VI1 envelope (surrounding whitespace allowed).
+inline bool parseEnvelope(const char* text, Envelope* env) {
   if (!text) return false;
   while (*text == ' ' || *text == '\t' || *text == '\n' || *text == '\r') text++;
-  if (strncmp(text, "VI1:", 4) != 0) return false;
+  Kind kind;
+  if (strncmp(text, "VI1:", 4) == 0) kind = kImage;
+  else if (strncmp(text, "VE3:", 4) == 0) kind = kCodec2;
+  else if (strncmp(text, "VM1:", 4) == 0) kind = kMimi;
+  else return false;
   const char* p = text + 4;
   uint32_t f[4];
   for (int k = 0; k < 4; k++) {
@@ -102,12 +144,25 @@ inline bool parseImageEnvelope(const char* text, Envelope* env) {
   }
   while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
   if (*p) return false;
-  if (f[1] != (uint32_t)kImageModeId) return false;
+  // The mode must belong to the prefix, as voice_wire.dart checks.
+  if (kind == kImage && f[1] != (uint32_t)kImageModeId) return false;
+  if (kind == kMimi && f[1] != (uint32_t)kMimiModeId) return false;
+  if (kind == kCodec2 && f[1] > 6) return false;
   if (f[2] < 1 || f[2] > (uint32_t)kMaxPackets) return false;
-  if (f[3] > 600) return false;   // VE3's duration range; aspect is clamped to 20..600 by senders
+  if (f[3] > 600) return false;   // VE3's duration range; photo aspect is clamped to 20..600
   env->sid = f[0];
   env->total = (uint8_t)f[2];
   env->aspect = (uint16_t)f[3];
+  env->mode = (uint8_t)f[1];
+  env->kind = kind;
+  return true;
+}
+
+// True for a well-formed VI1 photo envelope.
+inline bool parseImageEnvelope(const char* text, Envelope* env) {
+  Envelope e;
+  if (!parseEnvelope(text, &e) || e.kind != kImage) return false;
+  *env = e;
   return true;
 }
 
@@ -217,14 +272,16 @@ inline int encodeTextFetch(uint32_t sid, const uint8_t key6[6], const uint8_t* m
   return pos;
 }
 
-// Collects one photo's packets into caller-owned storage of
-// total * kBytesPerPacket bytes (PSRAM on the device).
+// Collects one clip's packets into caller-owned storage of
+// total * packet_bytes bytes (PSRAM on the device).
 class Assembly {
  public:
-  bool begin(uint32_t sid, uint8_t total, uint8_t* storage, size_t storage_len) {
-    if (total < 1 || total > kMaxImagePackets) return false;
-    if (!storage || storage_len < (size_t)total * kBytesPerPacket) return false;
-    sid_ = sid; total_ = total; buf_ = storage; last_len_ = -1; have_count_ = 0;
+  bool begin(uint32_t sid, uint8_t total, uint8_t* storage, size_t storage_len,
+             int packet_bytes = kBytesPerPacket) {
+    if (total < 1 || total > kMaxClipPackets) return false;
+    if (packet_bytes < 1 || packet_bytes > kBytesPerPacket) return false;
+    if (!storage || storage_len < (size_t)total * (size_t)packet_bytes) return false;
+    sid_ = sid; total_ = total; buf_ = storage; last_len_ = -1; have_count_ = 0; pb_ = packet_bytes;
     memset(have_, 0, sizeof have_);
     return true;
   }
@@ -233,9 +290,9 @@ class Assembly {
   bool add(const Packet& p) {
     if (!buf_ || p.sid != sid_ || p.index >= total_) return false;
     const bool last = p.index == total_ - 1;
-    if (last ? (p.len < 1 || p.len > kBytesPerPacket) : p.len != kBytesPerPacket) return false;
+    if (last ? (p.len < 1 || p.len > pb_) : p.len != pb_) return false;
     if (have(p.index)) return false;
-    memcpy(buf_ + (size_t)p.index * kBytesPerPacket, p.data, (size_t)p.len);
+    memcpy(buf_ + (size_t)p.index * (size_t)pb_, p.data, (size_t)p.len);
     if (last) last_len_ = p.len;
     have_[p.index >> 3] |= (uint8_t)(1u << (p.index & 7));
     have_count_++;
@@ -258,7 +315,7 @@ class Assembly {
   // The reassembled payload; valid once complete().
   const uint8_t* payload() const { return buf_; }
   size_t payloadLen() const {
-    return complete() ? (size_t)(total_ - 1) * kBytesPerPacket + (size_t)last_len_ : 0;
+    return complete() ? (size_t)(total_ - 1) * (size_t)pb_ + (size_t)last_len_ : 0;
   }
 
  private:
@@ -267,6 +324,7 @@ class Assembly {
   uint8_t* buf_ = nullptr;
   int      last_len_ = -1;
   int      have_count_ = 0;
+  int      pb_ = kBytesPerPacket;
   uint8_t  have_[(kMaxPackets + 7) / 8] = {0};
 };
 

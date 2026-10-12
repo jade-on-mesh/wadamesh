@@ -42,6 +42,21 @@ int main() {
   assert(!parseImageEnvelope("VI1:zzzzzzzz:14:10:46", &env));     // sid too long
   assert(!parseImageEnvelope(nullptr, &env));
 
+  // --- voice envelopes (VE3 Codec2, VM1 Mimi) and per-mode packet sizes
+  assert(parseEnvelope("VE3:79e6a5:1:6:7", &env));            // 1200 bps, 6 packets, 7 s
+  assert(env.kind == kCodec2 && env.mode == 1 && env.total == 6 && env.seconds() == 7);
+  assert(env.packetBytes() == 156 && codec2Mode(env.mode) == 5);
+  assert(parseEnvelope("VM1:79e6a5:w:12:k", &env) && env.kind == kMimi && env.packetBytes() == 154);
+  assert(parseEnvelope("VI1:79e6a5:14:10:46", &env) && env.kind == kImage && env.seconds() == 0);
+  assert(!parseEnvelope("VE3:79e6a5:7:6:7", &env));            // no Codec2 mode 7
+  assert(!parseEnvelope("VE3:79e6a5:w:6:7", &env));            // Mimi id under VE3
+  assert(!parseEnvelope("VM1:79e6a5:1:6:7", &env));            // Codec2 id under VM1
+  assert(!parseImageEnvelope("VE3:79e6a5:1:6:7", &env));
+  const int pb[] = {156, 156, 156, 154, 154, 152, 152};          // voice_wire.dart bytesPerPacket
+  const int c2[] = {8, 5, 1, 4, 3, 2, 0};                         // CODEC2_MODE_* per wire id
+  for (int m = 0; m <= 6; m++) assert(packetBytes(m) == pb[m] && codec2Mode(m) == c2[m]);
+  assert(packetBytes(9) == 0 && codec2Mode(32) == -1);
+
   // --- text fetch request
   char txt[128];
   const uint8_t miss[] = {35, 2, 1, 3, 2};
@@ -137,5 +152,29 @@ int main() {
   assert(!imageObus(badver, 2, &obu_len));
 
   free(payload);
+
+  // --- a 1300 bps clip: 154-byte packets (22 frames of 7 bytes)
+  {
+    const int kPb = 154, kLen = 154 * 3 + 21;
+    uint8_t clip[kLen];
+    for (int i = 0; i < kLen; i++) clip[i] = (uint8_t)(i * 7 + 1);
+    static uint8_t vstore[4 * 154];
+    Assembly v;
+    assert(!v.begin(9, 4, vstore, sizeof vstore, 157));
+    assert(v.begin(9, 4, vstore, sizeof vstore, kPb));
+    for (int i = 3; i >= 0; i--) {
+      uint8_t pkt[kPacketHeaderLen + kPb];
+      const int n = i == 3 ? 21 : kPb;
+      pkt[0] = kPacketMagic; writeSid(9, pkt + 1); pkt[5] = (uint8_t)i;
+      memcpy(pkt + kPacketHeaderLen, clip + i * kPb, (size_t)n);
+      Packet q;
+      assert(parsePacket(pkt, (size_t)(kPacketHeaderLen + n), &q) && v.add(q));
+    }
+    assert(v.complete() && v.payloadLen() == (size_t)kLen && memcmp(v.payload(), clip, kLen) == 0);
+    uint8_t wrong[kPacketHeaderLen + 156] = {kPacketMagic, 0, 0, 0, 9, 0};
+    Assembly w;
+    assert(w.begin(9, 4, vstore, sizeof vstore, kPb));
+    assert(parsePacket(wrong, sizeof wrong, &p) && !w.add(p));   // a 156-byte packet doesn't fit 154
+  }
   return 0;
 }

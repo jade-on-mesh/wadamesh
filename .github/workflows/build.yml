@@ -26,6 +26,8 @@ jobs:
           g++ -std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined -I src \
               -o /tmp/test_vox_fetch test/test_vox_fetch.cpp src/ui-touch/VoxFetch.cpp
           /tmp/test_vox_fetch
+      - name: VOX voice decoder (Codec2, sample-exact against the app's build)
+        run: test/build_vox_voice_test.sh /tmp/vox_voice
       - name: VOX photo decoder (bit-exact against libaom, sanitizers on)
         run: test/build_vox_av1_test.sh /tmp/vox_av1
 

@@ -42,6 +42,7 @@ struct Sim : VoxFetchIo {
   uint8_t sender_pub[32];
   uint8_t self6[6] = {1, 2, 3, 4, 5, 6};
   std::vector<uint8_t> payload;       // what the sender holds
+  int pb = VoxWire::kBytesPerPacket;  // codec bytes per packet
   std::vector<Event> inbox;           // to deliver to the engine
   std::map<uint32_t, std::vector<uint8_t>> store;
   VoxFetch* fetch = nullptr;
@@ -74,7 +75,7 @@ struct Sim : VoxFetchIo {
   // The sender serves `want` (all if empty) as a paced burst on a plane.
   void serve(const std::vector<int>& want, bool on_channel, uint32_t start, bool lossy_link_ok) {
     std::vector<int> idx = want;
-    const int total = (int)((payload.size() + VoxWire::kBytesPerPacket - 1) / VoxWire::kBytesPerPacket);
+    const int total = (int)((payload.size() + pb - 1) / pb);
     if (idx.empty()) for (int i = 0; i < total; i++) idx.push_back(i);
     const uint32_t gap = on_channel ? 4 * air + 150 : 2 * air + 150;
     uint32_t t = start;
@@ -82,9 +83,8 @@ struct Sim : VoxFetchIo {
       t += gap;
       served_packets++;
       if (!lossy_link_ok || rnd() < loss) continue;
-      const size_t off = (size_t)i * VoxWire::kBytesPerPacket;
-      const size_t n = payload.size() - off < (size_t)VoxWire::kBytesPerPacket ? payload.size() - off
-                                                                                : VoxWire::kBytesPerPacket;
+      const size_t off = (size_t)i * pb;
+      const size_t n = payload.size() - off < (size_t)pb ? payload.size() - off : (size_t)pb;
       Event e{t, {}, on_channel ? 2 : -1};
       e.data.push_back(VoxWire::kPacketSaltedMagic);
       uint8_t sid[4];
@@ -193,7 +193,7 @@ void setup(Sim& sim, size_t payload_len) {
 VoxWire::Envelope envFor(const Sim& sim) {
   VoxWire::Envelope e;
   e.sid = kSid;
-  e.total = (uint8_t)((sim.payload.size() + VoxWire::kBytesPerPacket - 1) / VoxWire::kBytesPerPacket);
+  e.total = (uint8_t)((sim.payload.size() + sim.pb - 1) / sim.pb);
   e.aspect = 150;
   return e;
 }
@@ -347,6 +347,21 @@ int main() {
     sim.run(60000);
     assert(gotIt(sim, f));
     assert(f.status(0x1000) == VoxFetch::kUnknown && f.status(0x1000 + 19) == VoxFetch::kRemote);
+  }
+
+  // 12. A Codec2 1300 voice clip: 154-byte packets, voice wording.
+  {
+    Sim sim; setup(sim, 154 * 5 + 40); sim.pb = 154; sim.loss = 0.2; sim.rng = 3;
+    VoxFetch f(sim); sim.fetch = &f;
+    VoxWire::Envelope e;
+    assert(VoxWire::parseEnvelope("VE3:1hjtjb5:3:6:9", &e) && e.sid == kSid && e.packetBytes() == 154);
+    char buf[64];
+    f.onEnvelope(e, sim.sender_pub, nullptr, -1, false);
+    assert(!strcmp(f.statusText(kSid, buf, sizeof buf), "Voice 9s - tap to play"));
+    f.request(kSid);
+    sim.run(300000);
+    assert(gotIt(sim, f) && !strcmp(f.statusText(kSid, buf, sizeof buf), "Voice 9s - tap to play"));
+    printf("voice: %d requests, %d packets served for 6\n", sim.raw_requests, sim.served_packets);
   }
 
   printf("all VoxFetch scenarios pass\n");

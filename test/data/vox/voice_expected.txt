@@ -1,0 +1,10 @@
+# name wire_mode bytes samples fnv1a64-of-PCM (decode by the app's own Codec2 build)
+# Codec2 keeps one process-wide random seed (sine.c) for unvoiced phases, so a
+# decode is only reproducible from a fresh process: each hash below is the first
+# decode in its process, and the test decodes each clip in a forked child.
+# A synthetic 3 s voiced/unvoiced signal (pulse train through sweeping formants),
+# encoded by meshcore-open-tak/third_party/codec2 built as the app builds it.
+voice_1200.c2 1 450 24000 470be8054356d18b
+voice_1300.c2 3 525 24000 faa4a652761a557b
+voice_2400.c2 2 900 24000 9273e8bb4b7168cc
+voice_3200.c2 6 1200 24000 a853826b2b6bc02c
