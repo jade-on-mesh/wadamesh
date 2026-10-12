@@ -7,6 +7,12 @@ on:
     branches-ignore: ['main']
   pull_request:
   workflow_dispatch:
+  # Used by upstream-sync.yml to check a merged upstream release first.
+  workflow_call:
+    inputs:
+      ref:
+        type: string
+        required: true
 
 permissions:
   contents: read
@@ -16,6 +22,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
       - name: VOX photo wire format
         run: |
           g++ -std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined -I src \
@@ -43,6 +51,8 @@ jobs:
         env: [LilyGo_TDeck_companion_radio_touch, ThinkNode_M9_companion_radio_touch]
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
