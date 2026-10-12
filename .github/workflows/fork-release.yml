@@ -58,7 +58,8 @@ jobs:
             echo "skip=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          last=$(git tag -l 'tak_*' | sed 's/^tak_//' | grep -E '^[0-9]+$' | sort -n | tail -1)
+          # No tak_ tags yet is fine (grep finding nothing must not end the step).
+          last=$(git tag -l 'tak_*' | sed 's/^tak_//' | { grep -E '^[0-9]+$' || true; } | sort -n | tail -1)
           tag="tak_$(( ${last:-0} + 1 ))"
           echo "Releasing $tag"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
