@@ -915,7 +915,7 @@ static void buildImport() {
 
 // ---- moving over from the Lua app -----------------------------------------------------------------
 #if CAP_LUA_APPS
-void luaHostAppPath(char* out, size_t cap, const char* rel);
+// luaHostAppFs / luaHostAppPath: declared at file scope in UITask.cpp
 static char s_lua_dir[96];     // <data>/apps/<id>.d
 static char s_lua_sav[96];     // <data>/apps/<id>.sav
 
@@ -966,7 +966,7 @@ static bool findLuaApp(otp::Bytes& sav) {
   fs::FS* fs = luaHostAppFs();
   if (!fs) return false;
   char apps[80];
-  luaHostAppPath(apps, sizeof apps, "/apps");
+  ::luaHostAppPath(apps, sizeof apps, "/apps");
   File root = fs->open(apps);
   if (!root || !root.isDirectory()) return false;
   bool found = false;
