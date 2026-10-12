@@ -1,0 +1,184 @@
+name: upstream-sync
+
+# Keeps this fork current with Wadamesh (ALLFATHER-BV/wadamesh) releases while
+# keeping the fork's changes (Open TAK photos and voice, OTP Messenger, Team).
+#
+# Upstream publishes each release as a fresh snapshot of `main` (a single
+# commit, not a continuation of the last one), so plain `git merge` has no
+# common history to work from. Instead, the branch `upstream-mirror` records
+# upstream's snapshots one after another: each new snapshot becomes a commit
+# on top of the previous one. Merging `upstream-mirror` into `main` is then an
+# ordinary three-way merge of exactly what upstream changed.
+#
+# Once a day: if upstream's `main` has new content, it is added to
+# `upstream-mirror` and merged into a branch `upstream-sync/<release>`; the
+# build workflow (host tests + T-Deck and M9 firmware) runs on the result
+# and, if it passes, `main` is fast-forwarded. Conflicts or a failed build
+# are left as a pull request and an issue.
+#
+# The default Actions token can't push changes to .github/workflows; if an
+# upstream release touches those, add a repo secret SYNC_TOKEN (fine-grained
+# token with Contents and Workflows read/write on this repo).
+
+on:
+  schedule:
+    - cron: "41 13 * * *" # daily, 06:41 Pacific (daylight time)
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+env:
+  UPSTREAM: ALLFATHER-BV/wadamesh
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      release: ${{ steps.merge.outputs.release }}
+      state: ${{ steps.merge.outputs.state }}
+      branch: ${{ steps.merge.outputs.branch }}
+      conflicts: ${{ steps.merge.outputs.conflicts }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.SYNC_TOKEN || github.token }}
+
+      - name: Record upstream's snapshot and merge it
+        id: merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch --quiet --no-tags "https://github.com/$UPSTREAM" \
+            '+refs/heads/main:refs/upstream/main' '+refs/tags/beta_*:refs/upstream-tags/beta_*'
+          git fetch --quiet origin '+refs/heads/upstream-mirror:refs/remotes/origin/upstream-mirror'
+          mirror=$(git rev-parse origin/upstream-mirror)
+          up_tree=$(git rev-parse 'refs/upstream/main^{tree}')
+
+          # Name the release after upstream's newest beta_* tag.
+          rel=$(git for-each-ref --sort=-creatordate --count=1 --format='%(refname:lstrip=2)' refs/upstream-tags)
+          rel=${rel:-$(git log -1 --format=%cs refs/upstream/main)}
+          echo "release=$rel" >> "$GITHUB_OUTPUT"
+          echo "Upstream release: $rel"
+
+          if [ "$(git rev-parse "$mirror^{tree}")" != "$up_tree" ]; then
+            msg="Wadamesh $rel (upstream main $(git rev-parse --short refs/upstream/main))"
+            mirror=$(git commit-tree "$up_tree" -p "$mirror" -m "$msg")
+            if ! git push -q origin "$mirror:refs/heads/upstream-mirror"; then
+              echo "state=blocked" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "upstream-mirror now has $rel."
+          fi
+          if git merge-base --is-ancestor "$mirror" HEAD; then
+            echo "main already has $rel."
+            echo "state=current" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          safe=$(printf '%s' "$rel" | sed 's/[^A-Za-z0-9._-]/-/g')
+          branch="upstream-sync/$safe"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+          open=$(gh api "repos/$GITHUB_REPOSITORY/issues?state=open&per_page=100" \
+                   --jq "[.[] | select(.title == \"Upstream Wadamesh $rel needs a hand\")] | length")
+          if [ "$open" != 0 ] || git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+            echo "$rel is waiting on its pull request or issue."
+            echo "state=waiting" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git checkout -q -b "$branch"
+          if git merge --no-ff --no-edit -m "Merge Wadamesh $rel" "$mirror"; then
+            if git push -q origin "$branch"; then
+              echo "state=merged" >> "$GITHUB_OUTPUT"
+            else
+              echo "state=blocked" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            files=$(git diff --name-only --diff-filter=U | sed 's/^/- `/; s/$/`/' | tr '\n' '|')
+            git merge --abort
+            # The pull request is upstream-mirror itself, so it shows exactly
+            # what conflicts with this fork.
+            echo "conflicts=$files" >> "$GITHUB_OUTPUT"
+            echo "branch=upstream-mirror" >> "$GITHUB_OUTPUT"
+            echo "state=conflict" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: prepare
+    if: needs.prepare.outputs.state == 'merged'
+    uses: ./.github/workflows/build.yml
+    with:
+      ref: ${{ needs.prepare.outputs.branch }}
+
+  promote:
+    needs: [prepare, build]
+    if: needs.prepare.outputs.state == 'merged' && needs.build.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.branch }}
+          fetch-depth: 0
+          token: ${{ secrets.SYNC_TOKEN || github.token }}
+      - name: Fast-forward main
+        env:
+          BRANCH: ${{ needs.prepare.outputs.branch }}
+          REL: ${{ needs.prepare.outputs.release }}
+        run: |
+          set -euo pipefail
+          if ! git push origin "HEAD:refs/heads/main"; then
+            git push -q origin --delete "$BRANCH"
+            echo "::warning::main moved during the sync; the next run tries again."
+            exit 1
+          fi
+          git push -q origin --delete "$BRANCH"
+          echo "### Synced Wadamesh $REL into main (firmware: this run's artifacts)" >> "$GITHUB_STEP_SUMMARY"
+
+  hand-off:
+    needs: [prepare, build]
+    if: >-
+      always() &&
+      (needs.prepare.outputs.state == 'conflict' ||
+       needs.prepare.outputs.state == 'blocked' ||
+       (needs.prepare.outputs.state == 'merged' && needs.build.result != 'success'))
+    runs-on: ubuntu-latest
+    steps:
+      - name: Open a pull request and an issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          STATE: ${{ needs.prepare.outputs.state }}
+          BRANCH: ${{ needs.prepare.outputs.branch }}
+          REL: ${{ needs.prepare.outputs.release }}
+          FILES: ${{ needs.prepare.outputs.conflicts }}
+          RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          title="Upstream Wadamesh $REL needs a hand"
+          if [ "$STATE" = blocked ]; then
+            why="Wadamesh **$REL** changes files under \`.github/workflows\`, which the default Actions token may not push. Add a repo secret \`SYNC_TOKEN\` (fine-grained token with Contents and Workflows read/write on this repo) and run upstream-sync again, or sync this release by hand."
+            gh api "repos/$REPO/issues" -f title="$title" -f body="$why"$'\n\n'"From the [upstream sync]($RUN)." --jq .html_url
+            exit 0
+          elif [ "$STATE" = conflict ]; then
+            why="Wadamesh **$REL** conflicts with this fork's changes in:"$'\n\n'"$(echo "$FILES" | tr '|' '\n')"$'\n\n'"\`upstream-mirror\` holds upstream's releases in order. Merge it into \`main\`, resolving the conflicts and keeping this fork's features."
+          else
+            why="Wadamesh **$REL** merges cleanly into \`$BRANCH\`, but the build (host tests or firmware) failed on the result, so \`main\` was left alone. Fix the branch, then merge this pull request."
+          fi
+          pr=$(gh api "repos/$REPO/pulls?state=open&head=${REPO%%/*}:$BRANCH" --jq '.[0].html_url // empty')
+          if [ -z "$pr" ]; then
+            pr=$(gh api "repos/$REPO/pulls" -f title="Sync Wadamesh $REL" -f head="$BRANCH" -f base=main \
+                   -f body="$why"$'\n\n'"Opened by the [upstream sync]($RUN)." --jq .html_url)
+          fi
+          gh api "repos/$REPO/issues" -f title="$title" -f body="$why"$'\n\n'"Pull request: $pr" --jq .html_url
