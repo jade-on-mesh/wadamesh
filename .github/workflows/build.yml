@@ -54,9 +54,16 @@ jobs:
       - name: Install PlatformIO
         run: pip install --upgrade platformio
       - name: Build
+        shell: bash
         run: |
           unset WIFI_SSID WIFI_PWD
-          pio run -e ${{ matrix.env }}
+          set -o pipefail
+          pio run -e ${{ matrix.env }} 2>&1 | tee build.log
+      - name: Compiler errors as annotations
+        if: failure()
+        shell: bash
+        run: |
+          grep -E "error:|Error |undefined reference" build.log | head -40 | while IFS= read -r l; do echo "::error::${l}"; done
       - name: Firmware size
         run: |
           ls -la .pio/build/${{ matrix.env }}/firmware.bin
