@@ -38,13 +38,16 @@ constexpr uint8_t  kPacketMagic       = 0x56;   // 'V'
 constexpr uint8_t  kPacketSaltedMagic = 0x57;   // 'W'
 constexpr uint8_t  kFetchMagic        = 0x72;   // 'r'
 constexpr uint8_t  kFetchFlagMissing  = 0x01;
+constexpr uint8_t  kFetchFlagSaltOk   = 0x02;   // requester takes salted (0x57) resends
+constexpr uint8_t  kFetchFlagHasPath  = 0x04;   // [len][path] follows: requester -> sender route
+constexpr int      kMaxReplyPathBytes = 8;      // senders ignore longer reply paths
 constexpr uint16_t kChannelDataType   = 0x5643; // 'VC'
 constexpr int      kImageModeId       = 40;
 constexpr int      kBytesPerPacket    = 156;
 constexpr int      kPacketHeaderLen   = 6;
 constexpr int      kMaxPackets        = 255;
 constexpr int      kFetchMinLen       = 13;
-constexpr int      kMaxFetchIndices   = 150;    // keeps a request inside one packet
+constexpr int      kMaxFetchIndices   = 140;    // keeps a request (and a reply path) inside one packet
 constexpr uint8_t  kImagePayloadVersion = 0x01;
 
 // Largest photo Open TAK sends today is "More detail" (36 packets, 5,500 B). Allow
@@ -136,10 +139,14 @@ inline bool parsePacket(const uint8_t* buf, size_t len, Packet* pkt) {
 }
 
 // Binary fetch request. `missing` == nullptr asks for every packet. Indices are
-// written sorted and de-duplicated, capped at kMaxFetchIndices. Returns bytes
-// written, or 0 if `cap` is too small.
+// written sorted and de-duplicated, capped at kMaxFetchIndices. `salt_ok` lets
+// the sender salt resends (0x57). `reply_path` (requester -> sender, 1-byte
+// hashes) asks the sender to answer along the reverse of the route the request
+// took; pass nullptr to let it use its own route to us. Returns bytes written,
+// or 0 if `cap` is too small.
 inline int encodeFetch(uint32_t sid, const uint8_t key6[6], const uint8_t* missing, int n_missing,
-                       uint8_t* out, size_t cap) {
+                       uint8_t* out, size_t cap, bool salt_ok = false,
+                       const uint8_t* reply_path = nullptr, int reply_path_len = 0) {
   uint8_t sorted[kMaxPackets];
   int n = 0;
   if (missing) {
@@ -147,16 +154,32 @@ inline int encodeFetch(uint32_t sid, const uint8_t key6[6], const uint8_t* missi
     for (int i = 0; i < n_missing; i++) if (missing[i] < kMaxPackets) seen[missing[i]] = true;
     for (int v = 0; v < kMaxPackets && n < kMaxFetchIndices; v++) if (seen[v]) sorted[n++] = (uint8_t)v;
   }
-  const size_t need = (size_t)kFetchMinLen + (size_t)n;
+  // A non-null path of length 0 is meaningful: the sender is our direct neighbour.
+  const bool has_path = reply_path != nullptr && reply_path_len >= 0 &&
+                        reply_path_len <= kMaxReplyPathBytes;
+  const size_t need = (size_t)kFetchMinLen + (size_t)n + (has_path ? 1 + (size_t)reply_path_len : 0);
   if (cap < need) return 0;
   out[0] = kFetchMagic;
   writeSid(sid, out + 1);
-  out[5] = missing ? kFetchFlagMissing : 0x00;
+  out[5] = (uint8_t)((missing ? kFetchFlagMissing : 0) | (salt_ok ? kFetchFlagSaltOk : 0) |
+                     (has_path ? kFetchFlagHasPath : 0));
   memcpy(out + 6, key6, 6);
   out[12] = (uint8_t)n;
   if (n) memcpy(out + kFetchMinLen, sorted, (size_t)n);
+  if (has_path) {
+    out[kFetchMinLen + n] = (uint8_t)reply_path_len;
+    if (reply_path_len) memcpy(out + kFetchMinLen + n + 1, reply_path, (size_t)reply_path_len);
+  }
   return (int)need;
 }
+
+// A binary fetch request (data packets start 0x56 / 0x57).
+inline bool isFetchRequest(const uint8_t* buf, size_t len) {
+  return buf && len >= (size_t)kFetchMinLen && buf[0] == kFetchMagic;
+}
+
+// "VR3:" DMs are fetch requests between apps; they never belong in a chat.
+inline bool isControlText(const char* text) { return text && strncmp(text, "VR3:", 4) == 0; }
 
 // VR3 text request. Ranges are written like the Dart side: "m1-3.7". Returns
 // chars written (excluding NUL), or 0 if `cap` is too small.

@@ -62,6 +62,19 @@ int main() {
   for (int i = 0; i < 200; i++) many[i] = (uint8_t)i;
   n = encodeFetch(1, kKey6, many, 200, req, sizeof req);
   assert(n == kFetchMinLen + kMaxFetchIndices && req[12] == kMaxFetchIndices);
+  // Salt + reply path, as meshcore-open-tak's VoxVoiceFetchRequest encodes them.
+  const uint8_t route[] = {0xAB, 0xCD};
+  n = encodeFetch(0x1a2b3c4d, kKey6, miss, 5, req, sizeof req, true, route, 2);
+  const uint8_t want2[] = {0x72, 0x1a, 0x2b, 0x3c, 0x4d, 0x07, 0xa1, 0xb2, 0xc3, 0xd4, 0xe5, 0xf6,
+                           4, 1, 2, 3, 35, 2, 0xAB, 0xCD};
+  assert(n == (int)sizeof want2 && memcmp(req, want2, sizeof want2) == 0);
+  // Direct neighbour: an empty reply path still says "reply the way I came".
+  n = encodeFetch(0x1a2b3c4d, kKey6, nullptr, 0, req, sizeof req, true, route, 0);
+  assert(n == kFetchMinLen + 1 && req[5] == 0x06 && req[13] == 0);
+  uint8_t longpath[9] = {0};
+  n = encodeFetch(1, kKey6, nullptr, 0, req, sizeof req, true, longpath, 9);   // too long: dropped
+  assert(n == kFetchMinLen && req[5] == 0x02);
+  assert(isControlText("VR3:abc:a:a1b2c3d4e5f6") && !isControlText("VI1:x") && !isControlText(nullptr));
   assert(encodeFetch(1, kKey6, nullptr, 0, req, 12) == 0);
 
   // --- packet parsing
