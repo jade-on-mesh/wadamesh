@@ -35163,7 +35163,14 @@ static void discoverJumpToMapHere() {
   goToTab(MAP_TAB_INDEX);
 }
 
+// Team overlay (TeamUI.inc, included with the app drawer far below).
+static void teamDrawMapOverlay(lv_obj_t* parent, double cwx, double cwy);
+static void teamFreeMapOverlay();
+static bool teamMapTap(lv_point_t p);
+static bool teamMapLongPress(lv_point_t p);
+
 static void freeMapMarkers() {
+  teamFreeMapOverlay();
   if (s_map_location_marker) {
     lv_obj_del(s_map_location_marker);
     s_map_location_marker = nullptr;
@@ -35366,6 +35373,9 @@ static void renderMapMarkers() {
 
   // Discover wardriving coverage dots (my logged signal samples), under the route overlay.
   if (s_disc_track_n > 0) discoverDrawCoverage(parent, cwx, cwy);
+
+  // Teammates, their alerts and the team's pins.
+  teamDrawMapOverlay(parent, cwx, cwy);
 
   // Route-replay overlay — drawn last so the path + nodes sit above tiles,
   // link lines and contact markers.
@@ -36744,11 +36754,25 @@ static void shiftMapChildren(int dx, int dy) {
 static void mapCanvasEventCb(lv_event_t* e) {
   const lv_event_code_t code = lv_event_get_code(e);
   if (code != LV_EVENT_PRESSED  && code != LV_EVENT_PRESSING &&
-      code != LV_EVENT_RELEASED && code != LV_EVENT_PRESS_LOST) return;
+      code != LV_EVENT_RELEASED && code != LV_EVENT_PRESS_LOST &&
+      code != LV_EVENT_LONG_PRESSED) return;
   lv_indev_t* indev = lv_indev_get_act();
   if (!indev) return;
   lv_point_t p;
   lv_indev_get_point(indev, &p);
+
+  // Hold still on the map: drop a team pin there (when team mode is on).
+  if (code == LV_EVENT_LONG_PRESSED) {
+    if (!s_map_panning) return;
+    const int ldx = p.x - s_map_pan_anchor.x, ldy = p.y - s_map_pan_anchor.y;
+    if (ldx <= -6 || ldx >= 6 || ldy <= -6 || ldy >= 6) return;
+    s_map_panning = false;
+    const int jx = s_map_pan_last.x - s_map_pan_anchor.x, jy = s_map_pan_last.y - s_map_pan_anchor.y;
+    if (jx || jy) shiftMapChildren(-jx, -jy);
+    if (!teamMapLongPress(p)) return;
+    lv_indev_wait_release(indev);
+    return;
+  }
 
   if (code == LV_EVENT_PRESSED) {
     s_map_pan_anchor    = p;
@@ -36777,6 +36801,7 @@ static void mapCanvasEventCb(lv_event_t* e) {
   // jitter we introduced during PRESSING goes away.
   if (tdx > -6 && tdx < 6 && tdy > -6 && tdy < 6) {
     if (tdx != 0 || tdy != 0) shiftMapChildren(-tdx, -tdy);
+    if (teamMapTap(p)) return;   // a teammate, an alert or a team pin
     // Centralized marker hit-test: find every marker whose center is
     // within 16 px of the tap. One hit → open that contact. Multiple
     // hits (overlapping markers) → open a picker so the user can choose.
@@ -37369,6 +37394,7 @@ static void makeMapTab(lv_obj_t* tab) {
   lv_obj_add_event_cb(s_map_touch, mapCanvasEventCb, LV_EVENT_PRESSING,   nullptr);
   lv_obj_add_event_cb(s_map_touch, mapCanvasEventCb, LV_EVENT_RELEASED,   nullptr);
   lv_obj_add_event_cb(s_map_touch, mapCanvasEventCb, LV_EVENT_PRESS_LOST, nullptr);
+  lv_obj_add_event_cb(s_map_touch, mapCanvasEventCb, LV_EVENT_LONG_PRESSED, nullptr);   // team pin drop
   lv_obj_move_to_index(s_map_touch, 0);   // keep it beneath the buttons/labels
 
   // Overlay controls — siblings of the canvas inside the tab, so they
@@ -52814,10 +52840,13 @@ enum AppDrawerAction {
   APPACT_DISCOVER, APPACT_STORE,
   APPACT_USB_FILES,
   APPACT_OTP,
+  APPACT_TEAM,
   APPACT_LUA_BASE = 100,   // APPACT_LUA_BASE + i = installed Lua app s_lua_inst[i]
 };
 // OTP Messenger (app drawer -> APPACT_OTP): the screens; protocol in OtpCore.cpp.
 #include "OtpMessengerUI.inc"
+// Team (app drawer -> APPACT_TEAM): MeshCore Open TAK team awareness; rules in TeamCore.cpp.
+#include "TeamUI.inc"
 static uint32_t otpUnreadSig() {
   return OtpMessenger::ready() ? ((uint32_t)(OtpMessenger::core().unreadTotal() & 0xFF) << 8) * 0x9E37u : 0u;
 }
@@ -52833,6 +52862,7 @@ static const AppTileDef k_app_tiles[] = {
   { UI_ICON_USER,               "Contacts",  APPACT_CONTACTS,  HUE_PEOPLE },
   { UI_ICON_AT_SIGN,            "Mentions",  APPACT_MENTIONS,  HUE_MSG },
   { UI_ICON_MAP_PIN,            "Map",       APPACT_MAP,       HUE_PLACE },
+  { UI_ICON_USERS,              "Team",      APPACT_TEAM,      HUE_PLACE },   // teammates, SOS, pins, Bloodhound
   { UI_ICON_RADIO,              "Advertise", APPACT_ADVERT,    HUE_RADIO },
   { UI_ICON_SIGNAL,             "Signal",    APPACT_SIGNAL,    HUE_RADIO },
   { UI_ICON_RADAR,              "Discover",  APPACT_DISCOVER,  HUE_RADIO },   // active node-discovery sweep
@@ -53190,6 +53220,7 @@ static void appLaunch(int act, lv_event_t* e) {
   switch (act) {
     case APPACT_MENTIONS:  openMentionsScreen();  return;
     case APPACT_OTP:       otpui::open();         return;   // one-time-pad messenger
+    case APPACT_TEAM:      teamui::pageOpen();    return;   // team awareness
     case APPACT_CMDCENTER: setHomeDrawer(false);  return;   // back to the Home widgets
     case APPACT_SIGNAL:    openSignalInfoPopup(); return;   // signal/traffic + auto-discover settings
     case APPACT_SPECTRUM:  openSpectrumPage();   return;   // swept RF spectrum analyzer (borrows the radio)
@@ -75660,6 +75691,7 @@ void UITask::loop() {
     }
     VoxPhotos::tick();
     OtpMessenger::tick();   // sends, retries, sync checks: whether or not the app is open
+    teamui::loopTick();     // beacons, alert repeats, alarm, Bloodhound, map refresh
     static uint32_t s_vox_voice_seen = 0;   // repaint the bubble when playback starts or ends
     if (s_vox_voice_sid != s_vox_voice_seen) { s_vox_voice_seen = s_vox_voice_sid; g_lv.dirty_timeline = true; }
     const uint32_t v = VoxPhotos::version();

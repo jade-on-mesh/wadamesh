@@ -32,6 +32,8 @@ jobs:
         run: test/build_vox_av1_test.sh /tmp/vox_av1
       - name: OTP Messenger against OTP_3_RC1.lua (both ways, on the firmware's Lua)
         run: test/build_otp_test.sh /tmp/otp
+      - name: Team wire golden bytes and core rules (shared with Open TAK)
+        run: g++ -std=c++17 -Wall -I src test/test_team_wire.cpp src/ui-touch/TeamCore.cpp -o /tmp/team_test && /tmp/team_test
 
   firmware:
     runs-on: ubuntu-latest
