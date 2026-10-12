@@ -1,6 +1,7 @@
-# MeshCore Open TAK photos on wadamesh
+# MeshCore Open TAK photos and voice on wadamesh
 
-Work in progress on the `vox-images` branch: showing the photo messages that
+Work in progress on the `vox-images` branch: showing the photo messages and
+playing the Codec2 voice clips that
 [MeshCore Open TAK](https://github.com/jade-on-mesh/meshcore-open-tak) sends,
 on the radio itself.
 
@@ -59,6 +60,24 @@ reduced still-picture header and no AVIF container, 2,750 B ("Standard") or
   finishes, the photo is decoded on the background task and opens in the image
   viewer by itself; tapping a downloaded photo later opens it again.
 
+## Voice clips
+
+- A `VE3:` (Codec2) message shows as a voice bubble with its length: "Voice 7s
+  - tap to play". A tap downloads it the same way as a photo and plays it as
+  soon as it arrives; later taps play it again, or stop it while it plays.
+- Decoding uses the app's own Codec2 tree (`lib/codec2`, speech codec only,
+  codebooks in flash) and is sample-exact with it (`test/test_vox_voice.cpp`,
+  four modes). Every mode the app can send plays except 700C, compiled out to
+  save 82 KB of flash; the app sends 1200 by default.
+- Playback streams frame by frame through the audio sink Lua apps use, on its
+  own task with a 32 KB internal-RAM stack (Codec2 needs ~22 KB), so it works
+  on boards with a speaker: the T-Deck and the T-LoRa Pager. Notification
+  chimes wait while it plays. Others show the bubble and say there's no speaker.
+- Clips are stored as `/vox_<sid>.ve3`: one byte of wire mode, then the frames.
+- **Mimi** (`VM1:`), the app's default once its model is downloaded, needs a
+  223 MB neural model and can never play on a radio; those bubbles say so. To
+  reach radios, the sender has to use Codec2.
+
 ## The decoder on the device
 
 - dav1d is vendored unmodified apart from `lib/dav1d/patches`:
@@ -80,9 +99,10 @@ reduced still-picture header and no AVIF container, 2,750 B ("Standard") or
   output, plus the 221 KB of kept tables.
 - Output is bit-exact with libaom's decode in the app (`vox_av1.c`), converted
   with the same full-range BT.601 formulas, then packed to RGB565.
-- Flash: the decoder is ~285 KB of code at `-O2` (~255 KB at `-Os`). With it,
-  CI's T-Deck `firmware.bin` is 3,855,984 B and the M9's 3,783,184 B, against
-  4,063,232 B app slots: about 200 KB and 280 KB left.
+- Flash: the AV1 decoder is ~285 KB of code at `-O2` (~255 KB at `-Os`);
+  Codec2 and the voice player add ~75 KB on the T-Deck. As of `4373f43`, CI's
+  T-Deck `firmware.bin` is 3,939,792 B and the M9's 3,794,480 B (no speaker,
+  so no Codec2), against 4,063,232 B app slots: about 120 KB and 265 KB left.
 - Tanmatsu and T-Display P4 builds don't link dav1d yet; `VOX_AV1_AVAILABLE` is
   0 there and opening a photo says it isn't supported.
 
