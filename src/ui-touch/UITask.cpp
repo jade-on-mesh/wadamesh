@@ -52813,8 +52813,15 @@ enum AppDrawerAction {
   APPACT_TERMINAL, APPACT_FILES, APPACT_FILE_TRANSFER, APPACT_SPECTRUM, APPACT_SNAKE, APPACT_VNC, APPACT_REMOTE, APPACT_READER,
   APPACT_DISCOVER, APPACT_STORE,
   APPACT_USB_FILES,
+  APPACT_OTP,
   APPACT_LUA_BASE = 100,   // APPACT_LUA_BASE + i = installed Lua app s_lua_inst[i]
 };
+// OTP Messenger (app drawer -> APPACT_OTP): the screens; protocol in OtpCore.cpp.
+#include "OtpMessengerUI.inc"
+static uint32_t otpUnreadSig() {
+  return OtpMessenger::ready() ? ((uint32_t)(OtpMessenger::core().unreadTotal() & 0xFF) << 8) * 0x9E37u : 0u;
+}
+
 // The drawer's built-in tiles, which are also what an App widget on Home can open.
 // `hue` is the theme's section hue (HUE_*): what you say, where things are, the
 // radio's own tools, the system; kAppHueDanger for Power.
@@ -52822,6 +52829,7 @@ struct AppTileDef { const char* icon; const char* label; uint8_t act; uint8_t hu
 static constexpr uint8_t kAppHueDanger = 0xFF;
 static const AppTileDef k_app_tiles[] = {
   { UI_ICON_MESSAGE_SQUARE,     "Chats",     APPACT_CHATS,     HUE_MSG },
+  { UI_ICON_LOCK,               "OTP Messenger", APPACT_OTP,   HUE_MSG },     // one-time-pad DMs and channels
   { UI_ICON_USER,               "Contacts",  APPACT_CONTACTS,  HUE_PEOPLE },
   { UI_ICON_AT_SIGN,            "Mentions",  APPACT_MENTIONS,  HUE_MSG },
   { UI_ICON_MAP_PIN,            "Map",       APPACT_MAP,       HUE_PLACE },
@@ -53181,6 +53189,7 @@ static void appLaunch(int act, lv_event_t* e) {
 #endif
   switch (act) {
     case APPACT_MENTIONS:  openMentionsScreen();  return;
+    case APPACT_OTP:       otpui::open();         return;   // one-time-pad messenger
     case APPACT_CMDCENTER: setHomeDrawer(false);  return;   // back to the Home widgets
     case APPACT_SIGNAL:    openSignalInfoPopup(); return;   // signal/traffic + auto-discover settings
     case APPACT_SPECTRUM:  openSpectrumPage();   return;   // swept RF spectrum analyzer (borrows the radio)
@@ -53745,8 +53754,8 @@ static void openAppDrawer() {
   // First tile is "Command" (back to the command centre); the rest are the apps.
   const int unread   = g_lv.task ? g_lv.task->getUnreadTotal()        : 0;
   const int mentions = g_lv.task ? g_lv.task->getUnreadMentionCount() : 0;
-  s_appdrawer_badge_sig = ((uint32_t)(unread & 0x7FFF) << 16) | (uint32_t)(mentions & 0xFFFF) |
-                          (s_update_available ? 0x80000000u : 0u);
+  s_appdrawer_badge_sig = (((uint32_t)(unread & 0x7FFF) << 16) | (uint32_t)(mentions & 0xFFFF) |
+                          (s_update_available ? 0x80000000u : 0u)) ^ otpUnreadSig();
   s_appdrawer_live = appTilesLiveMask();
   // The launcher's rows follow the redesign: what you say (teal), where things
   // are (blue), the radio's own tools (amber), then the system (grey). Each hue is
@@ -53759,6 +53768,7 @@ static void openAppDrawer() {
   for (int k = 0; k < kAppTiles; ++k) {
     const AppTileDef& t = k_app_tiles[k];
     const int badge = t.act == APPACT_CHATS ? unread : t.act == APPACT_MENTIONS ? mentions
+                    : t.act == APPACT_OTP ? (OtpMessenger::ready() ? OtpMessenger::core().unreadTotal() : 0)
                     : t.act == APPACT_SETTINGS ? (s_update_available ? -1 : 0) : 0;   // "!" = update
     tiles[k] = { t.icon, TR(k_app_tiles[k].label), t.act, badge, appTileColor(t.hue) };
   }
@@ -55090,9 +55100,9 @@ static void updateGlobalStatusBar() {
   // Rebuild on an actual change of the counts, not every tick, using the same
   // close/open idiom the tile-changing settings already use.
   if (s_appdrawer_root && g_lv.task) {
-    const uint32_t sig = ((uint32_t)(g_lv.task->getUnreadTotal() & 0x7FFF) << 16)
+    const uint32_t sig = (((uint32_t)(g_lv.task->getUnreadTotal() & 0x7FFF) << 16)
                        | (uint32_t)(g_lv.task->getUnreadMentionCount() & 0xFFFF)
-                       | (s_update_available ? 0x80000000u : 0u);
+                       | (s_update_available ? 0x80000000u : 0u)) ^ otpUnreadSig();
     if ((sig != s_appdrawer_badge_sig || appTilesLiveMask() != s_appdrawer_live) && !appDrawerCovered()) {
       // Only when nothing is in front of it. Lua apps and the other tools open
       // OVER the drawer without closing it, deliberately (see appTileCb), and
@@ -75641,8 +75651,15 @@ void UITask::loop() {
   {
     static bool s_vox_store_set = false;
     static uint32_t s_vox_seen = 0, s_vox_paint_ms = 0;
-    if (!s_vox_store_set) { VoxPhotos::setStore(backupInternalFs()); s_vox_store_set = true; }
+    if (!s_vox_store_set) {
+      VoxPhotos::setStore(backupInternalFs());
+      // OTP Messenger keeps its pads and messages on the same internal store.
+      OtpMessenger::begin(backupInternalFs());
+      OtpMessenger::setCallbacks(otpui::toastCb, otpui::incomingCb);
+      s_vox_store_set = true;
+    }
     VoxPhotos::tick();
+    OtpMessenger::tick();   // sends, retries, sync checks: whether or not the app is open
     static uint32_t s_vox_voice_seen = 0;   // repaint the bubble when playback starts or ends
     if (s_vox_voice_sid != s_vox_voice_seen) { s_vox_voice_seen = s_vox_voice_sid; g_lv.dirty_timeline = true; }
     const uint32_t v = VoxPhotos::version();

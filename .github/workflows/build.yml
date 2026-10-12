@@ -30,6 +30,8 @@ jobs:
         run: test/build_vox_voice_test.sh /tmp/vox_voice
       - name: VOX photo decoder (bit-exact against libaom, sanitizers on)
         run: test/build_vox_av1_test.sh /tmp/vox_av1
+      - name: OTP Messenger against OTP_3_RC1.lua (both ways, on the firmware's Lua)
+        run: test/build_otp_test.sh /tmp/otp
 
   firmware:
     runs-on: ubuntu-latest

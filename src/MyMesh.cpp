@@ -1,6 +1,7 @@
 #include "MyMesh.h"
 #ifdef DISPLAY_CLASS
 #include "ui-touch/VoxPhotos.h"   // MeshCore Open TAK photo fetches
+#include "ui-touch/OtpMessenger.h"   // OTP Messenger: one-time-pad DMs/channels, handled in the background
 #endif
 #include <esp_heap_caps.h>
 
@@ -3258,6 +3259,9 @@ void MyMesh::queueMessage(const ContactInfo &from, uint8_t txt_type, mesh::Packe
   // the app (if one is connected) still gets the frame above, the chat doesn't.
   if (VoxWire::isControlText(text)) should_display = false;
   if (txt_type == TXT_TYPE_PLAIN) VoxPhotos::onDirectText(text, from.id.pub_key);
+  // One-time-pad traffic for a contact we share a pad with: OTP Messenger shows
+  // the decrypted text; the chat would only show hex.
+  if (txt_type == TXT_TYPE_PLAIN && OtpMessenger::onDirectText(text, from.id.pub_key)) should_display = false;
   if (should_display && _ui) {
     /* notify BEFORE newMsgFromPub: UITask::newMsg keys on g_last_event to
      * decide channel-thread vs DM-thread. Previously this fired only when
@@ -3489,6 +3493,8 @@ void MyMesh::onChannelMessageRecv(const mesh::GroupChannel &channel, mesh::Packe
 #endif
 #ifdef DISPLAY_CLASS
   if (resolved_idx >= 0) VoxPhotos::onChannelText(text, resolved_idx);
+  // One-time-pad posts on a channel we hold a pad for go to OTP Messenger only.
+  if (resolved_idx >= 0 && OtpMessenger::onChannelText(text, resolved_idx)) return;
   // Get the channel name from the channel index
   // Never hand the UI an empty name: it renders one as a "#unknown" thread, which
   // is what users saw. Only a RESOLVED, configured, actually-named slot names the
