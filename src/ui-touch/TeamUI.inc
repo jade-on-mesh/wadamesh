@@ -165,7 +165,7 @@ static void alarmShow(team::AlertRec& r) {
   snprintf(line, sizeof line, LV_SYMBOL_WARNING " %s", TeamWire::alertName(r.a.type));
   lv_obj_t* t = lv_label_create(s_alarm);
   lv_label_set_text(t, line);
-  lv_obj_set_style_text_font(t, &g_font_20, LV_PART_MAIN);
+  lv_obj_set_style_text_font(t, &lv_font_montserrat_28, LV_PART_MAIN);
   lv_obj_set_style_text_color(t, lv_color_white(), LV_PART_MAIN);
   char who[64], where[48];
   snprintf(who, sizeof who, "%s", r.a.callsign[0] ? r.a.callsign : "Teammate");
