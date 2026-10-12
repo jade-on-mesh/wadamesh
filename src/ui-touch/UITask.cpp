@@ -41759,6 +41759,10 @@ static void openUrlMenu(const char* url) {
 // A tap downloads the photo from its sender (VoxPhotos/VoxFetch) or, once it is
 // here, decodes it on the background task and opens the image viewer.
 static uint32_t s_vox_pending_sid = 0;   // the photo the user is waiting for
+static char     s_vox_pending_title[48] = "";   // its viewer title, "<sender>.vi1"
+
+// Decode a stored photo and open it in the viewer.
+static void voxShowStoredPhoto(uint32_t sid, const char* title);
 
 static void fmVoxPhotoStart(const char* name, const uint8_t* payload, size_t len);
 
@@ -41784,17 +41788,10 @@ static void bubblePhotoTapCb(lv_event_t* e) {
   char sender[UITask::MAX_SENDER_NAME + 1];
   if (!chatMessagePhoto(m, &env, sender, sizeof sender) || m.outgoing) return;
 
+  char title[48];
+  snprintf(title, sizeof title, "%s.vi1", sender[0] ? sender : "photo");
   if (VoxPhotos::status(env.sid) == VoxFetch::kComplete) {
-    uint8_t* payload = nullptr;
-    size_t len = 0;
-    if (!VoxPhotos::load(env.sid, &payload, &len)) {
-      g_lv.task->showAlert(TR("Couldn't read the photo"), 1800);
-      return;
-    }
-    char title[48];
-    snprintf(title, sizeof title, "%s.vi1", sender[0] ? sender : "photo");
-    fmVoxPhotoStart(title, payload, len);
-    free(payload);
+    voxShowStoredPhoto(env.sid, title);
     return;
   }
 
@@ -41805,9 +41802,21 @@ static void bubblePhotoTapCb(lv_event_t* e) {
   const int ch = m.channel && thread >= 0 ? g_lv.task->threadMeshChannelSlot(thread) : -1;
   VoxPhotos::request(env, have_pub ? pub : nullptr, m.channel ? sender : nullptr, ch);
   s_vox_pending_sid = env.sid;
+  snprintf(s_vox_pending_title, sizeof s_vox_pending_title, "%s", title);
   char st[72];
   g_lv.task->showAlert(VoxPhotos::statusText(env.sid, st, sizeof st), 1500);
   g_lv.dirty_timeline = true;
+}
+
+static void voxShowStoredPhoto(uint32_t sid, const char* title) {
+  uint8_t* payload = nullptr;
+  size_t len = 0;
+  if (!VoxPhotos::load(sid, &payload, &len)) {
+    if (g_lv.task) g_lv.task->showAlert(TR("Couldn't read the photo"), 1800);
+    return;
+  }
+  fmVoxPhotoStart(title, payload, len);
+  free(payload);
 }
 
 // Short tap on a chat bubble that contains a URL -> the action menu (re-extract the URL
@@ -75506,8 +75515,10 @@ void UITask::loop() {
       if (s_vox_pending_sid) {
         const VoxFetch::Status st = VoxPhotos::status(s_vox_pending_sid);
         if (st == VoxFetch::kComplete) {
-          showAlert(TR("Photo downloaded - tap it to view"), 2500);
+          // The download the user asked for is in: show it straight away.
+          const uint32_t sid = s_vox_pending_sid;
           s_vox_pending_sid = 0;
+          voxShowStoredPhoto(sid, s_vox_pending_title);
         } else if (st == VoxFetch::kUnavailable) {
           char msg[72];
           showAlert(VoxPhotos::statusText(s_vox_pending_sid, msg, sizeof msg), 2500);

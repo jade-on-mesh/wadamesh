@@ -55,8 +55,9 @@ reduced still-picture header and no AVIF container, 2,750 B ("Standard") or
   (case-insensitive, emoji variation selectors ignored). If none matches, only
   the channel fallback is possible.
 - Finished photos are stored as `/vox_<sid>.vi1` on internal storage, so they
-  survive a reboot and open in Files too. A tap on a downloaded photo decodes
-  it on the background task and opens the image viewer.
+  survive a reboot and open in Files too. When a download you started
+  finishes, the photo is decoded on the background task and opens in the image
+  viewer by itself; tapping a downloaded photo later opens it again.
 
 ## The decoder on the device
 
