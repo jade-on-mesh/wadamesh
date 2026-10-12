@@ -29,6 +29,7 @@ permissions:
   contents: write
   pull-requests: write
   issues: write
+  actions: write
 
 concurrency:
   group: upstream-sync
@@ -132,8 +133,9 @@ jobs:
           ref: ${{ needs.prepare.outputs.branch }}
           fetch-depth: 0
           token: ${{ secrets.SYNC_TOKEN || github.token }}
-      - name: Fast-forward main
+      - name: Fast-forward main and release it to fork devices
         env:
+          GH_TOKEN: ${{ github.token }}
           BRANCH: ${{ needs.prepare.outputs.branch }}
           REL: ${{ needs.prepare.outputs.release }}
         run: |
@@ -144,7 +146,9 @@ jobs:
             exit 1
           fi
           git push -q origin --delete "$BRANCH"
-          echo "### Synced Wadamesh $REL into main (firmware: this run's artifacts)" >> "$GITHUB_STEP_SUMMARY"
+          # A push made with this token starts no workflows, so ask for the release.
+          gh workflow run fork-release.yml --ref main
+          echo "### Synced Wadamesh $REL into main; fork-release publishes it to devices" >> "$GITHUB_STEP_SUMMARY"
 
   hand-off:
     needs: [prepare, build]

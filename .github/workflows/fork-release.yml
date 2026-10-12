@@ -1,0 +1,156 @@
+name: fork-release
+
+# Publishes this fork's firmware as a GitHub release, tak_1, tak_2, ... which
+# is what a fork device's Settings > About checks and installs (see
+# src/ui-touch/ForkUpdateCore.h). Runs for every change to main that touches
+# the firmware, after an upstream sync, or by hand.
+#
+# Each board's app image is signed with the fork's release key (repo secret
+# FORK_SIGNING_KEY, an Ed25519 seed in hex). The device refuses an image whose
+# signature does not check out, so without the secret nothing is published.
+#
+# Upstream's release.yml (beta_* tags, wadamesh.com) is left alone and never
+# runs here: this fork does not push beta_* tags.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "lib/**"
+      - "variants/**"
+      - "boards/**"
+      - "platformio.ini"
+      - "scripts/**"
+      - "*.py"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fork-release
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.n.outputs.tag }}
+      skip: ${{ steps.n.outputs.skip }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Next release number
+        id: n
+        env:
+          HAS_KEY: ${{ secrets.FORK_SIGNING_KEY != '' }}
+        run: |
+          set -euo pipefail
+          if [ "$HAS_KEY" != true ]; then
+            echo "::error::Repo secret FORK_SIGNING_KEY is not set, so no release can be signed."
+            exit 1
+          fi
+          git fetch --quiet --tags origin
+          if git tag --points-at HEAD | grep -q '^tak_'; then
+            echo "This commit is already released as $(git tag --points-at HEAD | grep '^tak_' | head -1)."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          last=$(git tag -l 'tak_*' | sed 's/^tak_//' | grep -E '^[0-9]+$' | sort -n | tail -1)
+          tag="tak_$(( ${last:-0} + 1 ))"
+          echo "Releasing $tag"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+  firmware:
+    needs: plan
+    if: needs.plan.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - env: LilyGo_TDeck_companion_radio_touch
+            board: tdeck
+          - env: ThinkNode_M9_companion_radio_touch
+            board: thinknode-m9
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            .pio
+          key: pio-${{ runner.os }}-${{ matrix.env }}-${{ hashFiles('platformio.ini') }}
+      - name: Install PlatformIO
+        run: pip install --upgrade platformio
+      - name: Build (release tag embedded; no Wi-Fi credentials baked in)
+        env:
+          TAG: ${{ needs.plan.outputs.tag }}
+        run: |
+          set -euo pipefail
+          unset WIFI_SSID WIFI_PWD
+          export PLATFORMIO_BUILD_FLAGS="-DFIRMWARE_RELEASE_TAG='\"${TAG}\"' -DFIRMWARE_VERSION='\"wadamesh-tak ${TAG}\"'"
+          pio run -e "${{ matrix.env }}"
+          pio run -t mergebin -e "${{ matrix.env }}" || echo "::notice::no merged image for ${{ matrix.env }}"
+          mkdir -p dist
+          cp ".pio/build/${{ matrix.env }}/firmware.bin" "dist/wadamesh-${{ matrix.board }}.bin"
+          if [ -f ".pio/build/${{ matrix.env }}/firmware-merged.bin" ]; then
+            cp ".pio/build/${{ matrix.env }}/firmware-merged.bin" "dist/wadamesh-${{ matrix.board }}-merged.bin"
+          fi
+          ls -la dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bins-${{ matrix.board }}
+          path: dist/*
+
+  publish:
+    needs: [plan, firmware]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Sign the app images
+        env:
+          TAG: ${{ needs.plan.outputs.tag }}
+          FORK_SIGNING_KEY: ${{ secrets.FORK_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          pip install --quiet cryptography
+          python3 - <<'PY'
+          import glob, hashlib, os
+          from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+          key = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(os.environ["FORK_SIGNING_KEY"].strip()))
+          tag = os.environ["TAG"]
+          for path in sorted(glob.glob("dist/wadamesh-*.bin")):
+              name = os.path.basename(path)
+              if name.endswith("-merged.bin"):
+                  continue   # USB images are flashed by hand, not installed by the device
+              digest = hashlib.sha256(open(path, "rb").read()).digest()
+              msg = b"wadamesh-fork-v1\n" + tag.encode() + b"\n" + name.encode() + b"\n" + digest
+              open(path + ".sig", "wb").write(key.sign(msg))
+              print("signed", name, digest.hex())
+          PY
+          ls -la dist
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.plan.outputs.tag }}
+        run: |
+          set -euo pipefail
+          base=$(git log -1 --format=%s origin/upstream-mirror 2>/dev/null || true)
+          [ -n "$base" ] || base=$(git fetch -q origin upstream-mirror && git log -1 --format=%s FETCH_HEAD || echo "upstream Wadamesh")
+          notes="Firmware **$TAG** of the jade-on-mesh fork (MeshCore Open TAK photos and voice, OTP Messenger, Team), built from \`$GITHUB_SHA\` on top of $base.
+
+          Fork devices install this from **Settings > About > Install update**. To flash by USB, use a \`-merged.bin\`. Every app image carries a \`.sig\` that the device checks before installing."
+          gh release create "$TAG" dist/* --target "$GITHUB_SHA" --title "wadamesh-tak $TAG" \
+            --notes "$(printf '%s' "$notes" | sed 's/^          //')" --latest
