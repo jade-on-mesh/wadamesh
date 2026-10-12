@@ -36,6 +36,7 @@
 #include "common/intops.h"
 
 #include "src/itx.h"
+#include "src/ext_scratch.h"
 #include "src/itx_1d.h"
 #include "src/scan.h"
 #include "src/tables.h"
@@ -83,7 +84,9 @@ inv_txfm_add_c(pixel *dst, const ptrdiff_t stride, coef *const coeff,
     const int row_clip_max = ~row_clip_min;
     const int col_clip_max = ~col_clip_min;
 
-    int32_t tmp[64 * 64], *c = tmp;
+    SCRATCH_BEGIN();
+    SCRATCH_ARRAY(int32_t, tmp, 64 * 64);
+    int32_t *c = tmp;
     int last_nonzero_col; // in first 1d itx
     if (txtps[1] == IDENTITY && txtps[0] != IDENTITY) {
         last_nonzero_col = imin(sh - 1, eob);

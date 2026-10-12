@@ -34,6 +34,7 @@
 #include "common/intops.h"
 
 #include "src/mc.h"
+#include "src/ext_scratch.h"
 #include "src/tables.h"
 
 #if BITDEPTH == 8
@@ -142,7 +143,9 @@ put_8tap_c(pixel *dst, ptrdiff_t dst_stride,
     if (fh) {
         if (fv) {
             int tmp_h = h + 7;
-            int16_t mid[128 * 135], *mid_ptr = mid;
+            SCRATCH_BEGIN();
+            SCRATCH_ARRAY(int16_t, mid, 128 * 135);
+            int16_t *mid_ptr = mid;
 
             src -= src_stride * 3;
             do {
@@ -255,7 +258,9 @@ prep_8tap_c(int16_t *tmp, const pixel *src, ptrdiff_t src_stride,
     if (fh) {
         if (fv) {
             int tmp_h = h + 7;
-            int16_t mid[128 * 135], *mid_ptr = mid;
+            SCRATCH_BEGIN();
+            SCRATCH_ARRAY(int16_t, mid, 128 * 135);
+            int16_t *mid_ptr = mid;
 
             src -= src_stride * 3;
             do {
@@ -443,7 +448,9 @@ static void put_bilin_c(pixel *dst, ptrdiff_t dst_stride,
 
     if (mx) {
         if (my) {
-            int16_t mid[128 * 129], *mid_ptr = mid;
+            SCRATCH_BEGIN();
+            SCRATCH_ARRAY(int16_t, mid, 128 * 129);
+            int16_t *mid_ptr = mid;
             int tmp_h = h + 1;
 
             do {
@@ -540,7 +547,9 @@ static void prep_bilin_c(int16_t *tmp,
 
     if (mx) {
         if (my) {
-            int16_t mid[128 * 129], *mid_ptr = mid;
+            SCRATCH_BEGIN();
+            SCRATCH_ARRAY(int16_t, mid, 128 * 129);
+            int16_t *mid_ptr = mid;
             int tmp_h = h + 1;
 
             do {

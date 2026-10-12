@@ -36,6 +36,7 @@
 #include "common/intops.h"
 
 #include "src/looprestoration.h"
+#include "src/ext_scratch.h"
 #include "src/tables.h"
 
 // 256 * 1.5 + 3 + 3 = 390
@@ -255,7 +256,8 @@ static void wiener_c(pixel *p, const ptrdiff_t stride,
 {
     // Values stored between horizontal and vertical filtering don't
     // fit in a uint8_t.
-    uint16_t hor[6 * REST_UNIT_STRIDE];
+    SCRATCH_BEGIN();
+    SCRATCH_ARRAY(uint16_t, hor, 6 * REST_UNIT_STRIDE);
     uint16_t *ptrs[7], *rows[6];
     for (int i = 0; i < 6; i++)
         rows[i] = &hor[i * REST_UNIT_STRIDE];
@@ -683,8 +685,9 @@ static void sgr_3x3_c(pixel *dst, const ptrdiff_t stride,
                       const enum LrEdgeFlags edges HIGHBD_DECL_SUFFIX)
 {
 #define BUF_STRIDE (384 + 16)
-    ALIGN_STK_16(int32_t, sumsq_buf, BUF_STRIDE * 3 + 16,);
-    ALIGN_STK_16(coef, sum_buf, BUF_STRIDE * 3 + 16,);
+    SCRATCH_BEGIN();
+    SCRATCH_ARRAY(int32_t, sumsq_buf, BUF_STRIDE * 3 + 16);
+    SCRATCH_ARRAY(coef, sum_buf, BUF_STRIDE * 3 + 16);
     int32_t *sumsq_ptrs[3], *sumsq_rows[3];
     coef *sum_ptrs[3], *sum_rows[3];
     for (int i = 0; i < 3; i++) {
@@ -692,8 +695,8 @@ static void sgr_3x3_c(pixel *dst, const ptrdiff_t stride,
         sum_rows[i] = &sum_buf[i * BUF_STRIDE];
     }
 
-    ALIGN_STK_16(int32_t, A_buf, BUF_STRIDE * 3 + 16,);
-    ALIGN_STK_16(coef, B_buf, BUF_STRIDE * 3 + 16,);
+    SCRATCH_ARRAY(int32_t, A_buf, BUF_STRIDE * 3 + 16);
+    SCRATCH_ARRAY(coef, B_buf, BUF_STRIDE * 3 + 16);
     int32_t *A_ptrs[3];
     coef *B_ptrs[3];
     for (int i = 0; i < 3; i++) {
@@ -828,8 +831,9 @@ static void sgr_5x5_c(pixel *dst, const ptrdiff_t stride,
                       const LooprestorationParams *const params,
                       const enum LrEdgeFlags edges HIGHBD_DECL_SUFFIX)
 {
-    ALIGN_STK_16(int32_t, sumsq_buf, BUF_STRIDE * 5 + 16,);
-    ALIGN_STK_16(coef, sum_buf, BUF_STRIDE * 5 + 16,);
+    SCRATCH_BEGIN();
+    SCRATCH_ARRAY(int32_t, sumsq_buf, BUF_STRIDE * 5 + 16);
+    SCRATCH_ARRAY(coef, sum_buf, BUF_STRIDE * 5 + 16);
     int32_t *sumsq_ptrs[5], *sumsq_rows[5];
     coef *sum_ptrs[5], *sum_rows[5];
     for (int i = 0; i < 5; i++) {
@@ -837,8 +841,8 @@ static void sgr_5x5_c(pixel *dst, const ptrdiff_t stride,
         sum_rows[i] = &sum_buf[i * BUF_STRIDE];
     }
 
-    ALIGN_STK_16(int32_t, A_buf, BUF_STRIDE * 2 + 16,);
-    ALIGN_STK_16(coef, B_buf, BUF_STRIDE * 2 + 16,);
+    SCRATCH_ARRAY(int32_t, A_buf, BUF_STRIDE * 2 + 16);
+    SCRATCH_ARRAY(coef, B_buf, BUF_STRIDE * 2 + 16);
     int32_t *A_ptrs[2];
     coef *B_ptrs[2];
     for (int i = 0; i < 2; i++) {
@@ -1030,16 +1034,17 @@ static void sgr_mix_c(pixel *dst, const ptrdiff_t stride,
                       const LooprestorationParams *const params,
                       const enum LrEdgeFlags edges HIGHBD_DECL_SUFFIX)
 {
-    ALIGN_STK_16(int32_t, sumsq5_buf, BUF_STRIDE * 5 + 16,);
-    ALIGN_STK_16(coef, sum5_buf, BUF_STRIDE * 5 + 16,);
+    SCRATCH_BEGIN();
+    SCRATCH_ARRAY(int32_t, sumsq5_buf, BUF_STRIDE * 5 + 16);
+    SCRATCH_ARRAY(coef, sum5_buf, BUF_STRIDE * 5 + 16);
     int32_t *sumsq5_ptrs[5], *sumsq5_rows[5];
     coef *sum5_ptrs[5], *sum5_rows[5];
     for (int i = 0; i < 5; i++) {
         sumsq5_rows[i] = &sumsq5_buf[i * BUF_STRIDE];
         sum5_rows[i] = &sum5_buf[i * BUF_STRIDE];
     }
-    ALIGN_STK_16(int32_t, sumsq3_buf, BUF_STRIDE * 3 + 16,);
-    ALIGN_STK_16(coef, sum3_buf, BUF_STRIDE * 3 + 16,);
+    SCRATCH_ARRAY(int32_t, sumsq3_buf, BUF_STRIDE * 3 + 16);
+    SCRATCH_ARRAY(coef, sum3_buf, BUF_STRIDE * 3 + 16);
     int32_t *sumsq3_ptrs[3], *sumsq3_rows[3];
     coef *sum3_ptrs[3], *sum3_rows[3];
     for (int i = 0; i < 3; i++) {
@@ -1047,16 +1052,16 @@ static void sgr_mix_c(pixel *dst, const ptrdiff_t stride,
         sum3_rows[i] = &sum3_buf[i * BUF_STRIDE];
     }
 
-    ALIGN_STK_16(int32_t, A5_buf, BUF_STRIDE * 2 + 16,);
-    ALIGN_STK_16(coef, B5_buf, BUF_STRIDE * 2 + 16,);
+    SCRATCH_ARRAY(int32_t, A5_buf, BUF_STRIDE * 2 + 16);
+    SCRATCH_ARRAY(coef, B5_buf, BUF_STRIDE * 2 + 16);
     int32_t *A5_ptrs[2];
     coef *B5_ptrs[2];
     for (int i = 0; i < 2; i++) {
         A5_ptrs[i] = &A5_buf[i * BUF_STRIDE];
         B5_ptrs[i] = &B5_buf[i * BUF_STRIDE];
     }
-    ALIGN_STK_16(int32_t, A3_buf, BUF_STRIDE * 4 + 16,);
-    ALIGN_STK_16(coef, B3_buf, BUF_STRIDE * 4 + 16,);
+    SCRATCH_ARRAY(int32_t, A3_buf, BUF_STRIDE * 4 + 16);
+    SCRATCH_ARRAY(coef, B3_buf, BUF_STRIDE * 4 + 16);
     int32_t *A3_ptrs[4];
     coef *B3_ptrs[4];
     for (int i = 0; i < 4; i++) {

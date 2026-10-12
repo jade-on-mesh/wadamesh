@@ -36,6 +36,7 @@
 
 #if DAV1D_EXTERNAL_ALLOC
 #include "src/mem.h"
+#include "src/ext_scratch.h"
 #endif
 
 enum WedgeDirectionType {
@@ -89,6 +90,15 @@ static const wedge_code_type wedge_codebook_16_heqw[16] = {
 
 #if DAV1D_EXTERNAL_ALLOC
 Dav1dMasks *dav1d_masks_ext;
+
+uint8_t *dav1d_ext_scratch;
+
+/* Must succeed before dav1d_open(): the DSP functions and the wedge init use it. */
+int dav1d_ext_alloc_scratch(void) {
+    if (!dav1d_ext_scratch)
+        dav1d_ext_scratch = dav1d_ext_alloc_aligned(DAV1D_EXT_SCRATCH_SIZE, 64);
+    return dav1d_ext_scratch != NULL;
+}
 
 /* Must succeed before dav1d_open(): dav1d_init_ii_wedge_masks() writes here. */
 int dav1d_ext_alloc_wedge_tables(void) {
@@ -233,7 +243,11 @@ COLD void dav1d_init_ii_wedge_masks(void) {
         [WEDGE_MASTER_LINE_EVEN] = {  1,  4, 11, 27, 46, 58, 62, 63 },
         [WEDGE_MASTER_LINE_VERT] = {  0,  2,  7, 21, 43, 57, 62, 64 },
     };
+#if DAV1D_EXTERNAL_ALLOC
+    uint8_t (*const master)[64 * 64] = (uint8_t (*)[64 * 64])dav1d_ext_scratch;
+#else
     uint8_t master[6][64 * 64];
+#endif
 
     // create master templates
     for (int y = 0, off = 0; y < 64; y++, off += 64)
