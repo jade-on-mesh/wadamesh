@@ -1050,6 +1050,47 @@ public:
   /** Wipe the cached return path for a contact so the next outgoing message
    *  re-floods instead of routing through a stale hop list. Returns false
    *  when the contact isn't in the table any more. */
+  // ---- MeshCore Open TAK photo fetches (src/ui-touch/VoxPhotos.cpp) ----------
+  /** Raw-data packet along a direct path (1-byte hashes: `path_len` bytes). */
+  bool voxSendRaw(const uint8_t* path, uint8_t path_len, const uint8_t* data, size_t len) {
+    mesh::Packet* pkt = createRawData(data, len);
+    if (!pkt) return false;
+    sendDirect(pkt, path, path_len);
+    return true;
+  }
+  /** GRP_DATA datagram flooded on configured channel slot `idx`. */
+  bool voxSendChannelData(int idx, uint16_t type, const uint8_t* data, size_t len) {
+    ChannelDetails cd;
+    if (idx < 0 || idx >= MAX_GROUP_CHANNELS || !getChannel(idx, cd) || !channelSlotConfigured(cd)) return false;
+    return sendGroupData(cd.channel, nullptr, OUT_PATH_UNKNOWN, type, data, (int)len);
+  }
+  /** A contact's route for raw data: packed out_path_len and its bytes. */
+  bool voxContactRoute(const uint8_t pub[32], uint8_t* path, uint8_t* packed_len) {
+    ContactInfo* c = lookupContactByPubKey(pub, PUB_KEY_SIZE);
+    if (!c || c->out_path_len == OUT_PATH_UNKNOWN) return false;
+    *packed_len = c->out_path_len;
+    const int bytes = (c->out_path_len & 0x3F) * ((c->out_path_len >> 6) + 1);
+    memcpy(path, c->out_path, bytes <= MAX_PATH_SIZE ? bytes : MAX_PATH_SIZE);
+    return true;
+  }
+  int voxContactHops(const uint8_t pub[32]) {
+    ContactInfo* c = lookupContactByPubKey(pub, PUB_KEY_SIZE);
+    return (!c || c->out_path_len == OUT_PATH_UNKNOWN) ? -1 : (c->out_path_len & 0x3F);
+  }
+  /** Copy of a contact by full public key. */
+  bool voxContact(const uint8_t pub[32], ContactInfo& out) {
+    ContactInfo* c = lookupContactByPubKey(pub, PUB_KEY_SIZE);
+    if (!c) return false;
+    out = *c;
+    return true;
+  }
+  /** Forget a contact's route in RAM (not saved: the next path exchange
+   *  replaces it), so the next DM to it floods. */
+  void voxForgetRoute(const uint8_t pub[32]) {
+    ContactInfo* c = lookupContactByPubKey(pub, PUB_KEY_SIZE);
+    if (c) { c->out_path_len = OUT_PATH_UNKNOWN; memset(c->out_path, 0, sizeof(c->out_path)); }
+  }
+
   bool uiResetContactPath(const uint8_t pub_key[32]) {
     ContactInfo* slot = lookupContactByPubKey(pub_key, PUB_KEY_SIZE);
     if (!slot) return false;

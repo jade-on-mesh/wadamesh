@@ -1,4 +1,7 @@
 #include "MyMesh.h"
+#ifdef DISPLAY_CLASS
+#include "ui-touch/VoxPhotos.h"   // MeshCore Open TAK photo fetches
+#endif
 #include <esp_heap_caps.h>
 
 #include <Arduino.h> // needed for PlatformIO
@@ -3251,6 +3254,10 @@ void MyMesh::queueMessage(const ContactInfo &from, uint8_t txt_type, mesh::Packe
 #ifdef DISPLAY_CLASS
   // we only want to show text messages on display, not cli data
   bool should_display = txt_type == TXT_TYPE_PLAIN || txt_type == TXT_TYPE_SIGNED_PLAIN;
+  // "VR3:" DMs are photo/voice fetch requests between MeshCore Open TAK apps:
+  // the app (if one is connected) still gets the frame above, the chat doesn't.
+  if (VoxWire::isControlText(text)) should_display = false;
+  if (txt_type == TXT_TYPE_PLAIN) VoxPhotos::onDirectText(text, from.id.pub_key);
   if (should_display && _ui) {
     /* notify BEFORE newMsgFromPub: UITask::newMsg keys on g_last_event to
      * decide channel-thread vs DM-thread. Previously this fired only when
@@ -3481,6 +3488,7 @@ void MyMesh::onChannelMessageRecv(const mesh::GroupChannel &channel, mesh::Packe
   }
 #endif
 #ifdef DISPLAY_CLASS
+  if (resolved_idx >= 0) VoxPhotos::onChannelText(text, resolved_idx);
   // Get the channel name from the channel index
   // Never hand the UI an empty name: it renders one as a "#unknown" thread, which
   // is what users saw. Only a RESOLVED, configured, actually-named slot names the
@@ -3519,6 +3527,7 @@ void MyMesh::onChannelDataRecv(const mesh::GroupChannel &channel, mesh::Packet *
   if (resolved_idx < 0 || resolved_idx >= MAX_GROUP_CHANNELS) return;   // not one of our channels
 
 #ifdef DISPLAY_CLASS
+  if (data_type == VoxWire::kChannelDataType) VoxPhotos::onPayload(data, data_len, resolved_idx);
   if (_ui) _ui->onChannelData((uint8_t)resolved_idx, data_type, data, data_len, pkt->isRouteFlood());
 #endif
 
@@ -3903,6 +3912,9 @@ void MyMesh::discoverUpsert(const uint8_t* pk, uint8_t pklen, uint8_t node_type,
 }
 
 void MyMesh::onRawDataRecv(mesh::Packet *packet) {
+#ifdef DISPLAY_CLASS
+  VoxPhotos::onPayload(packet->payload, packet->payload_len, -1);   // photo packets for this radio
+#endif
   if (packet->payload_len + 4 > sizeof(out_frame)) {
     MESH_DEBUG_PRINTLN("onRawDataRecv(), payload_len too long: %d", packet->payload_len);
     return;

@@ -134,6 +134,7 @@ static void* wadaMp3Scratch() { return s_wada_mp3_scratch; }
 #include "Constellation.h"    // the Constellation screensaver (drawing only; the mesh side is in this file)
 #include "VoxAv1Core.h"      // MeshCore Open TAK photos: AV1 decode (lib/dav1d)
 #include "VoxAv1Job.h"       // ...run on its own task, polled from the LVGL loop
+#include "VoxPhotos.h"        // ...and fetched from the sender (VoxFetch over the mesh)
 #if defined(DOC_CAPTURE)
 extern int g_cst_debug;          // Constellation.cpp: profiling knob for capture builds
 #endif
@@ -26311,6 +26312,9 @@ static void fmVoxPhotoPollCb(lv_timer_t*) {
   }
   memcpy(buf, img.pixels, bytes);
   voxAv1Free(img.pixels);
+  // The viewer's per-image actions key on this path; a .vi1 name keeps them off
+  // (and stops a previous JPEG's path being used by mistake).
+  snprintf(s_fm_img_path, sizeof s_fm_img_path, "%s", s_vox_name);
   fmImageShowDecoded(s_vox_name, buf, img.width, img.height);
   char msg[96];
   snprintf(msg, sizeof msg, "AV1 %dx%d in %lu ms @ %lu MHz\nstack %lu KB, heap %lu KB", img.width, img.height,
@@ -26459,7 +26463,10 @@ static void fmImageShowDecoded(const char* name, uint8_t* rgb, int dw, int dh) {
   lv_obj_set_style_text_font(fll, &g_font_12, LV_PART_MAIN); lv_obj_center(fll);
 
 #if CAP_LOCK_SCREEN
-  // "Set as lock wallpaper" — bottom-left, windowed chrome only.
+  // "Set as lock wallpaper" — bottom-left, windowed chrome only. Not for mesh
+  // photos (.vi1): the lock screen only decodes JPEG.
+  s_fm_img_wall = nullptr;
+  if (!fmIsVoxPhoto(name)) {
   lv_obj_t* wall = lv_btn_create(s_fm_img_root);
   lv_obj_set_height(wall, 30);
   lv_obj_align(wall, LV_ALIGN_BOTTOM_LEFT, 6, -6);
@@ -26472,6 +26479,7 @@ static void fmImageShowDecoded(const char* name, uint8_t* rgb, int dw, int dh) {
   lv_obj_set_style_text_color(wll, lv_color_black(), LV_PART_MAIN);
   lv_obj_center(wll);
   s_fm_img_wall = wall;
+  }
 #endif  // CAP_LOCK_SCREEN (wallpaper button)
 
   // "tap to exit" hint, shown only in full-screen mode.
@@ -40721,6 +40729,17 @@ static void chatParseMessageDisplay(const UITask::UIMessage& m, bool channel_mod
       d.show_text   = body;
     }
   }
+  // A MeshCore Open TAK photo announcement reads as a photo and its download
+  // state, not as the "VI1:..." envelope it is on the wire.
+  char vox_line[96];
+  VoxWire::Envelope vox_env;
+  if (VoxPhotos::parse(d.show_text, &vox_env)) {
+    char st[72];
+    if (m.outgoing) snprintf(st, sizeof st, "%s", TR("Photo sent"));
+    else VoxPhotos::statusText(vox_env.sid, st, sizeof st);
+    snprintf(vox_line, sizeof vox_line, LV_SYMBOL_IMAGE "  %s", st);
+    d.show_text = vox_line;
+  }
   // The label is the sender's nickname when it has one; show_sender (its colour, its
   // identity) stays the name it advertises.
   copyUtf8ReplacingMissingGlyphs(&g_font_12, d.san_sender, sizeof(d.san_sender),
@@ -41736,6 +41755,61 @@ static void openUrlMenu(const char* url) {
 #endif
   mk(TR(LV_SYMBOL_IMAGE "  Create QR"), urlMenuQrCb);
 }
+// ---- MeshCore Open TAK photo bubbles -----------------------------------------
+// A tap downloads the photo from its sender (VoxPhotos/VoxFetch) or, once it is
+// here, decodes it on the background task and opens the image viewer.
+static uint32_t s_vox_pending_sid = 0;   // the photo the user is waiting for
+
+static void fmVoxPhotoStart(const char* name, const uint8_t* payload, size_t len);
+
+static bool chatMessagePhoto(const UITask::UIMessage& m, VoxWire::Envelope* env, char* sender,
+                             size_t sender_cap) {
+  if (sender && sender_cap) sender[0] = '\0';
+  const char* body = m.text;
+  char split_name[UITask::MAX_SENDER_NAME + 1] = "";
+  if (m.channel && (m.sender[0] == '\0' || !strcmp(m.sender, "rx"))) {
+    body = ChannelSenderSplit::split(m.text, split_name, sizeof split_name);
+  }
+  if (!VoxPhotos::parse(body, env)) return false;
+  if (sender && sender_cap) snprintf(sender, sender_cap, "%s", split_name[0] ? split_name : m.sender);
+  return true;
+}
+
+static void bubblePhotoTapCb(lv_event_t* e) {
+  if (lv_event_get_code(e) != LV_EVENT_SHORT_CLICKED || !g_lv.task) return;
+  const int idx = (int)(intptr_t)lv_event_get_user_data(e);
+  UITask::UIMessage m;
+  if (!g_lv.task->getMessageByIndex(idx, m)) return;
+  VoxWire::Envelope env;
+  char sender[UITask::MAX_SENDER_NAME + 1];
+  if (!chatMessagePhoto(m, &env, sender, sizeof sender) || m.outgoing) return;
+
+  if (VoxPhotos::status(env.sid) == VoxFetch::kComplete) {
+    uint8_t* payload = nullptr;
+    size_t len = 0;
+    if (!VoxPhotos::load(env.sid, &payload, &len)) {
+      g_lv.task->showAlert(TR("Couldn't read the photo"), 1800);
+      return;
+    }
+    char title[48];
+    snprintf(title, sizeof title, "%s.vi1", sender[0] ? sender : "photo");
+    fmVoxPhotoStart(title, payload, len);
+    free(payload);
+    return;
+  }
+
+  // Who to ask: the DM thread's contact, or the channel post's author on that channel.
+  const int thread = g_lv.task->activeThreadIdx();
+  uint8_t pub[32];
+  const bool have_pub = !m.channel && thread >= 0 && g_lv.task->getThreadContactPub(thread, pub);
+  const int ch = m.channel && thread >= 0 ? g_lv.task->threadMeshChannelSlot(thread) : -1;
+  VoxPhotos::request(env, have_pub ? pub : nullptr, m.channel ? sender : nullptr, ch);
+  s_vox_pending_sid = env.sid;
+  char st[72];
+  g_lv.task->showAlert(VoxPhotos::statusText(env.sid, st, sizeof st), 1500);
+  g_lv.dirty_timeline = true;
+}
+
 // Short tap on a chat bubble that contains a URL -> the action menu (re-extract the URL
 // from the live message; the ring may have rotated since the bubble was built).
 static void bubbleUrlTapCb(lv_event_t* e) {
@@ -41933,7 +42007,11 @@ static lv_coord_t chatVirtCreateBubble(LvChatPanel* p, int logical_i, int ring_i
   // A short tap on a bubble that carries a URL opens the Open-in-web / Create-QR menu
   // (SHORT_CLICKED so it never double-fires with the long-press action menu). Failed
   // outgoing sends keep their tap-to-resend.
-  if (has_url && !(m.outgoing && m.deliv_state == UITask::DELIV_FAILED))
+  VoxWire::Envelope photo_env;
+  if (!m.outgoing && chatMessagePhoto(m, &photo_env, nullptr, 0))
+    lv_obj_add_event_cb(row, bubblePhotoTapCb, LV_EVENT_SHORT_CLICKED,
+                        reinterpret_cast<void*>(static_cast<intptr_t>(ring_idx)));
+  else if (has_url && !(m.outgoing && m.deliv_state == UITask::DELIV_FAILED))
     lv_obj_add_event_cb(row, bubbleUrlTapCb, LV_EVENT_SHORT_CLICKED,
                         reinterpret_cast<void*>(static_cast<intptr_t>(ring_idx)));
   else if (has_coords && !(m.outgoing && m.deliv_state == UITask::DELIV_FAILED))
@@ -42025,7 +42103,11 @@ static lv_coord_t chatVirtCreateCompactRow(LvChatPanel* p, int logical_i, int ri
                       reinterpret_cast<void*>(static_cast<intptr_t>(ring_idx)));
   double compact_lat = 0.0, compact_lon = 0.0;
   const bool compact_has_coords = chatFirstCoord(m.text, &compact_lat, &compact_lon);
-  if (compact_has_coords && !(m.outgoing && m.deliv_state == UITask::DELIV_FAILED))
+  VoxWire::Envelope compact_photo;
+  if (!m.outgoing && chatMessagePhoto(m, &compact_photo, nullptr, 0))
+    lv_obj_add_event_cb(row, bubblePhotoTapCb, LV_EVENT_SHORT_CLICKED,
+                        reinterpret_cast<void*>(static_cast<intptr_t>(ring_idx)));
+  else if (compact_has_coords && !(m.outgoing && m.deliv_state == UITask::DELIV_FAILED))
     lv_obj_add_event_cb(row, bubbleCoordTapCb, LV_EVENT_SHORT_CLICKED,
                         reinterpret_cast<void*>(static_cast<intptr_t>(ring_idx)));
   if (m.outgoing && m.deliv_state == UITask::DELIV_FAILED)
@@ -75407,6 +75489,32 @@ void UITask::loop() {
 #if !defined(HAS_TANMATSU)
     s_web_rx_nudge = true;   // repeat-heard tag ticked up -> refresh the web chat too
 #endif
+  }
+
+  // MeshCore Open TAK photos: fetch timeouts, and repaint the open chat (at most
+  // once a second) while a photo's download state changes.
+  {
+    static bool s_vox_store_set = false;
+    static uint32_t s_vox_seen = 0, s_vox_paint_ms = 0;
+    if (!s_vox_store_set) { VoxPhotos::setStore(backupInternalFs()); s_vox_store_set = true; }
+    VoxPhotos::tick();
+    const uint32_t v = VoxPhotos::version();
+    if (v != s_vox_seen && (uint32_t)(now - s_vox_paint_ms) >= 1000) {
+      s_vox_seen = v;
+      s_vox_paint_ms = now;
+      g_lv.dirty_timeline = true;
+      if (s_vox_pending_sid) {
+        const VoxFetch::Status st = VoxPhotos::status(s_vox_pending_sid);
+        if (st == VoxFetch::kComplete) {
+          showAlert(TR("Photo downloaded - tap it to view"), 2500);
+          s_vox_pending_sid = 0;
+        } else if (st == VoxFetch::kUnavailable) {
+          char msg[72];
+          showAlert(VoxPhotos::statusText(s_vox_pending_sid, msg, sizeof msg), 2500);
+          s_vox_pending_sid = 0;
+        }
+      }
+    }
   }
 
   bool heavy_ok = !g_lv.defer_heavy_refresh || now >= g_lv.heavy_refresh_at_ms;

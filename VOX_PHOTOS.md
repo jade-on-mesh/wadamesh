@@ -24,8 +24,39 @@ reduced still-picture header and no AVIF container, 2,750 B ("Standard") or
 | Decode + exact Open TAK colour conversion | `src/ui-touch/VoxAv1Core.*`, `test/test_vox_av1.cpp` | done |
 | Background decode task | `src/ui-touch/VoxAv1Job.*` | done, verified on a T-Deck |
 | `.vi1` files open in Files → image viewer | `UITask.cpp` (`fmVoxPhotoStart`) | done, for testing |
-| Fetch client (request, retry, cache) | | next |
-| Photo bubble in chat | | after that |
+| Fetch client (request, retry, store) | `src/ui-touch/VoxFetch.*`, `test/test_vox_fetch.cpp` | done, host-tested |
+| Mesh + storage glue | `src/ui-touch/VoxPhotos.*`, `MyMesh` hooks | done |
+| Photo bubbles in chat | `UITask.cpp` (`chatParseMessageDisplay`, `bubblePhotoTapCb`) | done, needs device testing |
+
+## Photos in chat
+
+- A `VI1:` message shows as a photo bubble instead of its text: "Photo - tap
+  to download", then "Requesting...", "Downloading 12/36", "Photo - tap to
+  view". `VR3:` fetch-request DMs never show in chat (a connected app still
+  gets them).
+- Tapping starts the download. Nothing is fetched until then, so photos cost
+  no airtime unless someone wants them. Packets that arrive anyway (another
+  listener's channel transfer, or the phone app's own fetch through this
+  radio) are kept, and can finish a photo without a request.
+- The fetch follows the app (`voice_service.dart`), so Open TAK senders answer
+  it unchanged:
+  1. **direct**: a binary request over raw data along our route, carrying that
+     route so the sender replies along its reverse; after a silent attempt the
+     next one lets the sender use its own route instead;
+  2. **VR3 DM**: flooded (the route is forgotten in RAM first), so both radios
+     learn a route from the path exchange; the sender answers over raw data;
+  3. **channel**: the request as GRP_DATA `0x5643` on the photo's channel, for
+     channel posts; the sender, or anyone holding the photo, floods it back.
+
+  Timeouts are sized from the radio's airtime and hop count; a re-request asks
+  only for missing packets, and comes as soon as the sender's last packet is
+  in. Up to 15 attempts, or 3 in a row that bring nothing.
+- Channel posts carry only a name; the author is matched to a contact by name
+  (case-insensitive, emoji variation selectors ignored). If none matches, only
+  the channel fallback is possible.
+- Finished photos are stored as `/vox_<sid>.vi1` on internal storage, so they
+  survive a reboot and open in Files too. A tap on a downloaded photo decodes
+  it on the background task and opens the image viewer.
 
 ## The decoder on the device
 
