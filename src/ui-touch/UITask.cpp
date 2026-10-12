@@ -7835,6 +7835,13 @@ static void      buildThemeSettings();           // fwd: defined with the accent
 #ifndef FIRMWARE_RELEASE_TAG
 #define FIRMWARE_RELEASE_TAG ""
 #endif
+// This fork follows its OWN releases (tak_N on jade-on-mesh/wadamesh), never
+// upstream's: see ForkUpdateCore.h. Upstream's names stay for an upstream build.
+#include "ForkUpdateCore.h"
+#ifndef WADA_RELEASE_PREFIX
+#define WADA_RELEASE_PREFIX "beta_"
+#define WADA_UPDATE_SITE "flasher.wadamesh.com"
+#endif
 static lv_obj_t* s_update_badge     = nullptr;   // red "!" over the bottom-bar gear
 static lv_obj_t* s_chat_unread_badge = nullptr;  // red unread-count badge over the bottom-bar Chats icon
 static lv_obj_t* s_tab_indicator    = nullptr;   // thin rounded accent glow bar under the active tab
@@ -8124,7 +8131,7 @@ static void setupRerunCb(lv_event_t* e);  // fwd: "Run setup again" button callb
 // Our release number (the N in "beta_N"); -1 if this isn't a tagged build.
 static int firmwareReleaseN() {
   const char* t = FIRMWARE_RELEASE_TAG;
-  const char* pfx = "beta_";
+  const char* pfx = WADA_RELEASE_PREFIX;
   const size_t pl = strlen(pfx);
   if (strncmp(t, pfx, pl) != 0) return -1;
   if (t[pl] < '0' || t[pl] > '9') return -1;
@@ -8165,18 +8172,18 @@ static void versionCheckUpdateUi() {
     lv_obj_set_style_text_color(s_update_about_lbl, lv_color_hex(COLOR_SUB), LV_PART_MAIN);
   } else if (s_update_available && s_verchk_latest_n >= 0) {
     // Where to get it: the Install button when this install has one, else the flasher.
-    snprintf(b, sizeof b, s_ota_btn ? TR(LV_SYMBOL_DOWNLOAD "  Update available: beta_%d\nYou have beta_%d. Install it below.")
-                                    : TR(LV_SYMBOL_DOWNLOAD "  Update available: beta_%d\nYou have beta_%d. Get it at flasher.wadamesh.com."),
+    snprintf(b, sizeof b, s_ota_btn ? TR(LV_SYMBOL_DOWNLOAD "  Update available: " WADA_RELEASE_PREFIX "%d\nYou have " WADA_RELEASE_PREFIX "%d. Install it below.")
+                                    : TR(LV_SYMBOL_DOWNLOAD "  Update available: " WADA_RELEASE_PREFIX "%d\nYou have " WADA_RELEASE_PREFIX "%d. Get it at " WADA_UPDATE_SITE "."),
              s_verchk_latest_n, my_n);
     lv_obj_set_style_text_color(s_update_about_lbl, lightSurfaceTextColor(0xE2A23A), LV_PART_MAIN);
   } else if (s_verchk_latest_n >= 0) {
-    snprintf(b, sizeof b, TR(LV_SYMBOL_OK "  Up to date (beta_%d)"), my_n);
+    snprintf(b, sizeof b, TR(LV_SYMBOL_OK "  Up to date (" WADA_RELEASE_PREFIX "%d)"), my_n);
     lv_obj_set_style_text_color(s_update_about_lbl, lightSurfaceTextColor(0x6FCF6F), LV_PART_MAIN);
   } else if (s_verchk_ran) {
-    snprintf(b, sizeof b, TR("Firmware beta_%d\nCouldn't reach the update server"), my_n);
+    snprintf(b, sizeof b, TR("Firmware " WADA_RELEASE_PREFIX "%d\nCouldn't reach the update server"), my_n);
     lv_obj_set_style_text_color(s_update_about_lbl, lv_color_hex(COLOR_SUB), LV_PART_MAIN);
   } else {
-    snprintf(b, sizeof b, TR("Firmware beta_%d\nChecking for updates over Wi-Fi…"), my_n);
+    snprintf(b, sizeof b, TR("Firmware " WADA_RELEASE_PREFIX "%d\nChecking for updates over Wi-Fi…"), my_n);
     lv_obj_set_style_text_color(s_update_about_lbl, lv_color_hex(COLOR_SUB), LV_PART_MAIN);
   }
   lv_label_set_text(s_update_about_lbl, b);
@@ -8320,7 +8327,7 @@ static void otaPollTimerCb(lv_timer_t* t) {
   } else {         // error -> show why, leave the button armed to retry, fall back to manual
     if (s_ota_status_lbl) {
       char b[112];
-      snprintf(b, sizeof b, "Update failed: %s\nUse flasher.wadamesh.com instead.",
+      snprintf(b, sizeof b, "Update failed: %s\nUse " WADA_UPDATE_SITE " instead.",
                s_ota_msg[0] ? s_ota_msg : "unknown");
       otaStatusText(b);
     }
@@ -8351,7 +8358,7 @@ static void otaStartInstall(int target_n) {
   if (s_ota_btn) { lv_obj_add_state(s_ota_btn, LV_STATE_DISABLED); lv_obj_clear_flag(s_ota_btn, LV_OBJ_FLAG_CLICKABLE); }
   if (s_ota_status_lbl) {
     char sb[48];
-    snprintf(sb, sizeof sb, "Installing beta_%d...\nDo not power off.", target_n);
+    snprintf(sb, sizeof sb, "Installing " WADA_RELEASE_PREFIX "%d...\nDo not power off.", target_n);
     otaStatusText(sb);
     lv_obj_set_style_text_color(s_ota_status_lbl, lightSurfaceTextColor(0xE2A23A), LV_PART_MAIN);
   }
@@ -8389,7 +8396,7 @@ static void otaPrevPickCb(lv_event_t* e) {
   s_ota_pending_n = v;
   otaPrevModalClose();
   char m[96];
-  snprintf(m, sizeof m, TR("Install beta_%d?\nThis downgrades the firmware and reboots."), v);
+  snprintf(m, sizeof m, TR("Install " WADA_RELEASE_PREFIX "%d?\nThis downgrades the firmware and reboots."), v);
   showConfirm(m, TR("Install"), otaConfirmInstallApply);
 }
 
@@ -8448,7 +8455,7 @@ static void otaPrevVersionsCb(lv_event_t* e) {
     lv_obj_add_event_cb(b, otaPrevPickCb, LV_EVENT_CLICKED, nullptr);
     lv_obj_t* l = lv_label_create(b);
     char bt[16];
-    snprintf(bt, sizeof bt, "beta_%d", v);
+    snprintf(bt, sizeof bt, WADA_RELEASE_PREFIX "%d", v);
     lv_label_set_text(l, bt);
     lv_obj_set_style_text_font(l, &g_font_14, LV_PART_MAIN);
     lv_obj_set_style_text_color(l, lv_color_hex(COLOR_TEXT), LV_PART_MAIN);
@@ -8657,7 +8664,7 @@ static void versionCheckService(unsigned long now) {
     s_verchk_ran  = true;
     {
       static bool pinged = false;
-      if (!pinged && s_verchk_latest_n >= 0 &&
+      if (!pinged && s_verchk_latest_n >= 0 && !WADA_FORK_RELEASES &&
           touchPrefsGetReportPing() && firmwareReleaseN() >= 0) {
         pinged = true;
         reportBuildPing();
@@ -32985,6 +32992,10 @@ static int wifiScanWatchdogSafe(uint32_t cap_ms, uint16_t per_chan_ms = 300) {
 #error "WADA_BOARD_ID: this board has no release artifact name. Add it here AND to scripts/release.sh ENVS, or a self-update fetches another board's firmware and its test reports land under the wrong board."
 #endif
 
+#if WADA_FORK_RELEASES
+#include "ForkUpdate.inc"   // this fork's update check + signed install (GitHub releases)
+#endif
+
 
 // ---- beta test reports -------------------------------------------------------
 // A tester says "this build works on my board" from the device, and that lands in
@@ -33101,6 +33112,11 @@ static const char* const OTA_BIN_NAME = "wadamesh-" WADA_BOARD_ID;
 // cache on the mutable bin. esp_https_ota isn't usable here (no on-device TLS — see tile notes).
 static void otaWorkerRun(WiFiClient& client, HTTPClient& http) {
   s_ota_pct = 0;
+#if WADA_FORK_RELEASES
+  (void)client; (void)http;
+  s_ota_state = forkInstallToSlot(s_ota_target_n, &s_ota_pct, s_ota_msg, sizeof s_ota_msg) ? 2 : 3;
+  return;
+#endif
   char url[176];
   snprintf(url, sizeof url, "http://firmware.wadamesh.com/releases/%s/beta_%d/%s.bin",
            updChannelArchive(), s_ota_target_n, OTA_BIN_NAME);
@@ -33157,8 +33173,18 @@ static void sdFwWorkerRun(WiFiClient& client, HTTPClient& http) {
     snprintf(s_sdfw_msg, sizeof s_sdfw_msg, "can't create /BINS"); s_sdfw_state = 3; return;
   }
   char path[56];
-  snprintf(path, sizeof path, "/BINS/wadamesh-beta_%d-%s.bin",
+  snprintf(path, sizeof path, "/BINS/wadamesh-" WADA_RELEASE_PREFIX "%d-%s.bin",
            s_sdfw_target_n, touchPrefsGetBetaUpdates() ? "beta" : "stable");
+#if WADA_FORK_RELEASES
+  (void)client; (void)http;
+  if (forkSaveToSd(s_sdfw_target_n, path, &s_sdfw_pct, s_sdfw_msg, sizeof s_sdfw_msg)) {
+    snprintf(s_sdfw_msg, sizeof s_sdfw_msg, "%s", path);
+    s_sdfw_state = 2;
+  } else {
+    s_sdfw_state = 3;
+  }
+  return;
+#endif
   char url[176];
   snprintf(url, sizeof url, "http://firmware.wadamesh.com/releases/%s/beta_%d/%s.bin",
            updChannelArchive(), s_sdfw_target_n, OTA_BIN_NAME);
@@ -33325,7 +33351,11 @@ static void tileFetchTaskFn(void* arg) {
     // Firmware update check (one-shot, infrequent). Reuses this worker's stack.
     if (s_verchk_request) {
       s_verchk_request = false;
+#if WADA_FORK_RELEASES
+      s_verchk_latest_n = forkLatestRelease();               // the fork's releases (own TLS task)
+#else
       s_verchk_latest_n = verchkFetchLatest(client, http);   // reuse the worker's client/http
+#endif
       s_verchk_done = true;
       continue;
     }
@@ -38624,7 +38654,11 @@ static void reportBugQrCb(lv_event_t* e) {
   if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
   char url[240];
   snprintf(url, sizeof url,
+#if WADA_FORK_RELEASES
+           "https://github.com/" WADA_FORK_REPO "/issues/new?template=bug.yml"
+#else
            "https://github.com/ALLFATHER-BV/wadamesh/issues/new?template=bug.yml"
+#endif
            "&board=%s&version=%s&diag=heap%%20%uk%%20store%%20%s",
            WADA_BOARD_ID, FIRMWARE_RELEASE_TAG,
            (unsigned)(ESP.getFreeHeap() / 1024),
@@ -38670,9 +38704,11 @@ static void buildAboutSettings() {
     // The beta channel. Outside the OTA-slot gate on purpose: Launcher installs have no
     // Install button, but still want channel-aware update notices and the SD download.
     if (FIRMWARE_OTA_ENV[0] && firmwareReleaseN() >= 0) {
+#if !WADA_FORK_RELEASES   // the fork has one channel: its own releases
       setSwitchRow(c, "Get test builds (beta)",
                    "Unreleased test firmware: newer features, less tested. The update check and Install update both follow it.",
                    touchPrefsGetBetaUpdates(), betaUpdatesToggleCb);
+#endif
 #if CAP_SD && CAP_OTA
       // The Launcher's update path: the latest bin of the channel into /BINS on the card.
       setActionRow(c, LV_SYMBOL_SD_CARD, "Save update bin to SD", nullptr, sdFwSaveToSdCb);
@@ -38686,6 +38722,15 @@ static void buildAboutSettings() {
 #if defined(ESP32) && defined(MULTI_TRANSPORT_COMPANION)
   // Whether this build works on boards we do not own: a report per board per build,
   // which is what a promotion to stable is decided on. Release builds only.
+#if WADA_FORK_RELEASES
+  // Upstream's test reports and install count feed ITS beta matrix; a fork build
+  // has no place there. Bugs in this fork go to the fork's own issues.
+  if (FIRMWARE_OTA_ENV[0] && firmwareReleaseN() >= 0) {
+    lv_obj_t* c = setCard("Report a problem");
+    setActionRow(c, UI_ICON_QR_CODE, "Report a bug", nullptr, reportBugQrCb);
+    setNote(c, "Opens as a QR: scan it and file the issue from your phone, under your own GitHub account.");
+  }
+#else
   if (FIRMWARE_OTA_ENV[0] && firmwareReleaseN() >= 0) {
     lv_obj_t* c = setCard("Test reports");
     const bool done = (touchPrefsGetReportedBeta() == (uint16_t)firmwareReleaseN());
@@ -38697,6 +38742,7 @@ static void buildAboutSettings() {
                  "Tells the matrix how many devices run this build, so a board with no reports can be told apart from a board nobody owns. Sends the board and the version, nothing else.",
                  touchPrefsGetReportPing(), reportPingToggleCb);
   }
+#endif  // WADA_FORK_RELEASES
 #endif
 
   // What is going on inside: the crash report when there is one, the detail pages, and
