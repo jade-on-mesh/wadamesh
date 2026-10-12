@@ -22,7 +22,7 @@ reduced still-picture header and no AVIF container, 2,750 B ("Standard") or
 | Wire format: envelope, packets, fetch requests, reassembly | `src/ui-touch/VoxWire.h`, `test/test_vox_wire.cpp` | done |
 | AV1 decoder (dav1d 1.5.1, 8-bit, no asm) | `lib/dav1d`, `scripts/vendor_dav1d.sh` | done |
 | Decode + exact Open TAK colour conversion | `src/ui-touch/VoxAv1Core.*`, `test/test_vox_av1.cpp` | done |
-| Background decode task | `src/ui-touch/VoxAv1Job.*` | done, needs hardware numbers |
+| Background decode task | `src/ui-touch/VoxAv1Job.*` | done, verified on a T-Deck |
 | `.vi1` files open in Files → image viewer | `UITask.cpp` (`fmVoxPhotoStart`) | done, for testing |
 | Fetch client (request, retry, cache) | | next |
 | Photo bubble in chat | | after that |
@@ -67,4 +67,19 @@ reduced still-picture header and no AVIF container, 2,750 B ("Standard") or
    with the largest free internal-RAM block and free PSRAM at the time.
 
 Worth trying `coffee_5500.vi1` and `astronaut_5500.vi1`: they take the deepest
-stack path. Please report the numbers, along with whether Wi-Fi or BLE was on.
+stack path.
+
+## Measured on a T-Deck (2026-10-11, build `d3c550d`)
+
+| Photo | Size | Decode | Stack | Heap |
+|---|---|---|---|---|
+| `astronaut_5500.vi1` | 256×256 | 3,408 ms | 7 KB | 853 KB |
+| `coffee_5500.vi1` | 384×256 | 3,057 ms | 7 KB | 729 KB |
+| `hubble_deep_field` (both detail levels) | 384×335 | 2,851–3,277 ms | 5 KB | 883–886 KB |
+| `rocket_*.vi1` | 320×214 | 1,928 ms | 5 KB | 669 KB |
+
+All at 240 MHz. Colours and geometry look right. Peak stack is 7 KB of the
+24 KB reserved. Decode takes 2–3.5 s, small next to the minutes a photo takes
+to arrive over LoRa. Images using the self-guided loop filter (astronaut) are
+slowest; that filter's scratch is in PSRAM, so trying the arena in internal RAM
+first is an easy speed experiment.
