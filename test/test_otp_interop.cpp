@@ -343,9 +343,23 @@ int main(int argc, char** argv) {
     checkDmCounters(dm);
   }
 
+  // 3b. plain DMs that merely look like hex are left alone (and cost no pad)
+  printf("hex-looking plain text\n");
+  {
+    const uint32_t m0 = dm->ctr_mine, t0 = dm->ctr_theirs;
+    const size_t n0 = dm->log_n;
+    CHECK(!core.onDirect(kLuaPub, kLuaName, "cafe"));
+    CHECK(!core.onDirect(kLuaPub, kLuaName, "1234"));
+    CHECK(!core.onDirect(kLuaPub, kLuaName, "deadbeefdeadbeefdeadbeef"));   // 24 hex: long enough, not framed
+    CHECK(!core.onDirect(kLuaPub, kLuaName, "8f2c4a90b1d3e5f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f"));
+    CHECK(!core.onDirect(kLuaPub, kLuaName, "z4 is a road"));
+    CHECK(!core.onDirect(kLuaPub, kLuaName, "z3 at noon?"));
+    CHECK(dm->ctr_mine == m0 && dm->ctr_theirs == t0 && dm->log_n == n0);
+  }
+
   // 4. sync check from native
   printf("DM sync check\n");
-  run(11000);   // the Lua app answers a sync check at most every 10 s
+  run(25000);   // the Lua app answers a sync check at most every 10 s (and the hex DMs above prompted one)
   core.requestSyncCheck(*dm);
   run(2000);
   CHECK(dm->sync_ok == 1);
@@ -378,6 +392,14 @@ int main(int argc, char** argv) {
     const otp::Entry* own = nullptr;
     for (int i = ch->log_n - 1; i >= 0; i--) if (ch->log[i].mine) { own = &ch->log[i]; break; }
     CHECK(own && own->state == otp::State::Sent && own->rep == 2);
+  }
+
+  {
+    const uint32_t c0 = ch->ctr;
+    CHECK(!core.onChannel("ops", kLuaName, "cafe"));
+    CHECK(!core.onChannel("ops", kLuaName, "deadbeefdeadbeefdeadbeefdeadbeef"));
+    CHECK(!core.onChannel("ops", kLuaName, "z2 good news"));
+    CHECK(ch->ctr == c0);
   }
 
   // 5. a lost channel post: native must notice the jump and resync

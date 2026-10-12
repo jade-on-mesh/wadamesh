@@ -1542,18 +1542,38 @@ int Core::activeParticipants(Target& t, Participant* out, int max) {
 // =============================================================================
 static bool startsWith(const char* s, const char* p) { return strncmp(s, p, strlen(p)) == 0; }
 
+// Exactly what the senders put on the air, so ordinary words are never taken
+// for control traffic: "z4Cz", "z4Dz", "z4Gz".
 static bool isNack(const char* s) {
-  const size_t n = strlen(s);
-  // "z4%uz$": ...z4<upper>z at the end
-  return n >= 4 && s[n - 1] == 'z' && s[n - 2] >= 'A' && s[n - 2] <= 'Z' && s[n - 3] == '4' && s[n - 4] == 'z';
+  return strlen(s) == 4 && s[0] == 'z' && s[1] == '4' && s[3] == 'z' && (s[2] == 'C' || s[2] == 'D' || s[2] == 'G');
 }
 
-// Is this text OTP traffic at all? (bare even-length hex, or a z2/z3/z4 control)
-static bool looksOtp(const char* s) {
+static bool isB36Run(const char* s, size_t n) {
+  if (!n || n > 7) return false;
+  for (size_t i = 0; i < n; i++) {
+    const char c = s[i];
+    if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'))) return false;
+  }
+  return true;
+}
+
+// "z3s<b36>", "z3S<b36>", "z3p<A|B><b36>:<b36>", "z3P..."
+static bool isSync(const char* s) {
+  if (s[0] != 'z' || s[1] != '3') return false;
+  const char m = s[2];
+  if (m == 's' || m == 'S') return isB36Run(s + 3, strlen(s + 3));
+  if (m != 'p' && m != 'P') return false;
+  if (s[3] != 'A' && s[3] != 'B') return false;
+  const char* colon = strchr(s + 4, ':');
+  return colon && isB36Run(s + 4, (size_t)(colon - s - 4)) && isB36Run(colon + 1, strlen(colon + 1));
+}
+
+// The shortest OTP DM is an encrypted ack: 10 bytes, 20 hex digits.
+static constexpr size_t kMinDmHex = 20;
+
+static bool isDmCipher(const char* s) {
   const size_t n = strlen(s);
-  if (!n) return false;
-  if (startsWith(s, "z3") || startsWith(s, "z2") || isNack(s)) return true;
-  return n % 2 == 0 && n >= 2 && isHexRun(s, n);
+  return n >= kMinDmHex && n % 2 == 0 && isHexRun(s, n);
 }
 
 bool Core::isDupWire(uint64_t h) {
@@ -1563,7 +1583,7 @@ bool Core::isDupWire(uint64_t h) {
 
 bool Core::onDirect(const uint8_t pub[32], const char* sender_name, const char* text) {
   if (!text || !*text) return false;
-  if (!looksOtp(text)) return false;
+  if (!isSync(text) && !isNack(text) && !isDmCipher(text)) return false;
   char hex[9];
   toHex(pub, 4, hex);
   char id[16];
@@ -1596,17 +1616,23 @@ bool Core::onDirect(const uint8_t pub[32], const char* sender_name, const char* 
   if (!hasPad(*t)) return false;
   if (sender_name && *sender_name) snprintf(t->name, sizeof t->name, "%s", sender_name);
   const char* who = t->name;
-  if (startsWith(text, "z3")) { handleSync(*t, text, who); return true; }
+  if (isSync(text)) { handleSync(*t, text, who); return true; }
   if (isNack(text)) { handleNack(*t, text, who); return true; }
-  process(*t, who, text, false, 0);
-  return true;
+  return process(*t, who, text, false, 0);
 }
 
 bool Core::onChannel(const char* channel_name, const char* sender, const char* body) {
   if (!body || !*body || !channel_name) return false;
   while (*channel_name == '#') channel_name++;
   if (isPublicChannel(channel_name)) return false;
-  if (!looksOtp(body)) return false;
+  // Channel ciphertext always carries its offset: "z2<b36>|<hex>".
+  bool framed = false;
+  if (startsWith(body, "z2")) {
+    const char* bar = strchr(body + 2, '|');
+    framed = bar && isB36Run(body + 2, (size_t)(bar - body - 2)) && bar[1] && strlen(bar + 1) % 2 == 0 &&
+             isHexRun(bar + 1, strlen(bar + 1));
+  }
+  if (!framed && !isSync(body) && !isNack(body)) return false;
   if (locked()) {
     if (held_n_ < 12) {
       Held& h = held_[held_n_++];
@@ -1629,19 +1655,12 @@ bool Core::onChannel(const char* channel_name, const char* sender, const char* b
     return false;
   }
   const char* who = (sender && *sender) ? sender : "Them";
-  if (startsWith(body, "z3")) { handleSync(*t, body, who); return true; }
+  if (isSync(body)) { handleSync(*t, body, who); return true; }
   if (isNack(body)) { handleNack(*t, body, who); return true; }
-  bool has_off = false;
+  const char* bar = strchr(body + 2, '|');
   uint32_t off = 0;
-  const char* text = body;
-  if (startsWith(body, "z2")) {
-    const char* bar = strchr(body + 2, '|');
-    if (!bar || bar == body + 2 || !bar[1]) return true;
-    if (!fromBase36(body + 2, (size_t)(bar - body - 2), &off)) return true;
-    has_off = true;
-    text = bar + 1;
-  }
-  process(*t, who, text, has_off, off);
+  if (!fromBase36(body + 2, (size_t)(bar - body - 2), &off)) return true;
+  process(*t, who, bar + 1, true, off);
   return true;
 }
 
@@ -1657,50 +1676,37 @@ void Core::heldReplay() {
   }
 }
 
-void Core::process(Target& t, const char* sender, const char* text_in, bool has_off, uint32_t off) {
-  if (t.kind == Kind::Channel) {
+bool Core::process(Target& t, const char* sender, const char* text, bool has_off, uint32_t off) {
+  const bool dm = t.kind == Kind::Dm;
+  if (!dm) {
     loadPad(t);
     recordParticipant(t, sender, has_off, off);
     if (open_ == &t) notifyChanged(t);
   }
-  // Keep only the hex: a trailing run of an even number of hex digits.
-  size_t n = strlen(text_in);
-  const char* text = text_in;
-  if (!(n % 2 == 0 && isHexRun(text, n))) {
-    size_t k = n;
-    while (k > 0 && hexNibble(text_in[k - 1]) >= 0) k--;
-    const size_t tail = n - k;
-    if (!tail || tail % 2) return;
-    text = text_in + k;
-    n = tail;
-  }
+  const size_t n = strlen(text);
   loadPad(t);
   const uint64_t wh = fnv64(text, n);
+  // A part we already have, sent again because our ack was lost: ack again.
   if (t.imt) {
     for (int i = 0; i < 256; i++) {
-      if (t.imt->wire[i] == wh) { sendAck(t, t.imt->tid, (uint8_t)i); return; }
+      if (t.imt->wire[i] == wh) { sendAck(t, t.imt->tid, (uint8_t)i); return true; }
     }
   }
-  // check_and_remember: the same text for the same target within 3 s
+  // Seen and processed already (mesh retransmission).
+  const uint64_t rkey = fnv64(t.id, strlen(t.id), text, n);
   {
-    const uint64_t key = fnv64(t.id, strlen(t.id), text, n);
     const uint32_t now = io_->nowMs();
     for (auto& r : rmc_)
-      if (r.used && r.key == key && now - r.at < 3000) return;
-    rmc_[rmc_next_] = {key, now, true};
-    rmc_next_ = (rmc_next_ + 1) % 8;
+      if (r.used && r.key == rkey && now - r.at < 3000) return true;
   }
-  if (isDupWire(wh)) return;
+  if (isDupWire(wh)) return true;
   const uint32_t cbytes = (uint32_t)(n / 2);
   const int avail = available(t);
-  if (avail < (int)cbytes) return;
+  if (avail < (int)cbytes) return !dm;   // a DM we cannot cover is not ours to read
   if (avail > kMaxTotalPadBytes) {
     io_->toast("This pad is too large to use safely. Wipe it to keep receiving.");
-    return;
+    return true;
   }
-  if (recent_wire_n_ == 6) { memmove(recent_wire_, recent_wire_ + 1, sizeof(uint64_t) * 5); recent_wire_n_ = 5; }
-  recent_wire_[recent_wire_n_++] = wh;
-
   if (has_off) {
     if (off < t.ctr) {
       addEntry(t, sender, (const uint8_t*)"[channel message lost - collided with another sender]", 53, State::Lost, false);
@@ -1708,7 +1714,7 @@ void Core::process(Target& t, const char* sender, const char* text_in, bool has_
       queueNack(t, 'C', sender);
       requestPrompt(t);
       sendSyncCheck(t, false);
-      return;
+      return true;
     }
     if (off > t.ctr) {
       if (!(t.pending_resync && t.pr_peer_ctr == off && t.pr_kind == Kind::Channel)) {
@@ -1717,54 +1723,71 @@ void Core::process(Target& t, const char* sender, const char* text_in, bool has_
         t.pr_kind = Kind::Channel;
         t.pr_first_ms = io_->nowMs();
       }
-      return;
+      return true;
     }
   }
   Bytes cipher;
-  if (!fromHex(text, n, cipher)) return;
+  if (!fromHex(text, n, cipher)) return !dm;
   Bytes key;
   if (!key.reserve(cbytes + 1) || !keySlice(t, cbytes, false, key.p)) {
+    if (dm) { requestPrompt(t); return false; }
     char msg[80];
     snprintf(msg, sizeof msg, "Decrypt error from %s", sender);
     io_->toast(msg);
     queueNack(t, 'D', sender);
-    return;
+    return true;
   }
   for (uint32_t i = 0; i < cbytes; i++) cipher.p[i] ^= key.p[i];
   const uint8_t* plain = cipher.p;
+  // A DM is taken only if it decrypts to a frame (a part or an ack). Anything
+  // else is a plain DM that happens to be hex, or ciphertext against pad
+  // bytes we are out of step with: leave the pad alone, show the text in
+  // Chats, and let a sync check repair any drift.
+  if (dm) {
+    const bool framed = (cbytes >= kAckMarkerLen + 2 && memcmp(plain, kAckMarker, kAckMarkerLen) == 0) ||
+                        (cbytes >= kChunkMarkerLen + 4 && memcmp(plain, kChunkMarker, kChunkMarkerLen) == 0);
+    if (!framed) { requestPrompt(t); return false; }
+  }
+  {
+    const uint32_t now = io_->nowMs();
+    rmc_[rmc_next_] = {rkey, now, true};
+    rmc_next_ = (rmc_next_ + 1) % 8;
+  }
+  if (recent_wire_n_ == 6) { memmove(recent_wire_, recent_wire_ + 1, sizeof(uint64_t) * 5); recent_wire_n_ = 5; }
+  recent_wire_[recent_wire_n_++] = wh;
   char err[80];
   if (!consume(t, cbytes, false, err, sizeof err)) {
     io_->toast(err);
-    return;
+    return true;
   }
   if (cbytes >= kAckMarkerLen && memcmp(plain, kAckMarker, kAckMarkerLen) == 0) {
-    if (cbytes < kAckMarkerLen + 2) return;
+    if (cbytes < kAckMarkerLen + 2) return true;
     const uint8_t tid = plain[8], idx = plain[9];
     if (psend_.active && psend_.t == &t && psend_.tid == tid && psend_.sctr == idx) {
       psend_.sctr++;
       if (psend_.sctr >= psend_.tot) completeSend();
       else { sendNextChunk(); notifyChanged(t); }
     }
-    return;
+    return true;
   }
   if (cbytes >= kChunkMarkerLen && memcmp(plain, kChunkMarker, kChunkMarkerLen) == 0) {
-    if (cbytes < kChunkMarkerLen + 3) return;
+    if (cbytes < kChunkMarkerLen + 3) return true;
     const uint8_t tid = plain[9], idx = plain[10], tot = plain[11];
     const uint8_t* data = plain + 12;
     const uint32_t dlen = cbytes - 12;
-    if (!dlen || !tot) return;
+    if (!dlen || !tot) return true;
     if (!t.imt || t.imt->tid != tid) {
       imtFree(t.imt);
       t.imt = imtNew();
-      if (!t.imt) return;
+      if (!t.imt) return true;
       t.imt->tid = tid;
       t.imt->tot = tot;
       snprintf(t.imt->sender, sizeof t.imt->sender, "%s", sender);
     }
     Imt* m = t.imt;
-    if (m->completed || m->have[idx]) { sendAck(t, tid, idx); return; }
+    if (m->completed || m->have[idx]) { sendAck(t, tid, idx); return true; }
     m->data[idx] = (uint8_t*)xalloc(dlen);
-    if (!m->data[idx]) return;
+    if (!m->data[idx]) return true;
     memcpy(m->data[idx], data, dlen);
     m->len[idx] = (uint16_t)dlen;
     m->have[idx] = true;
@@ -1776,7 +1799,7 @@ void Core::process(Target& t, const char* sender, const char* text_in, bool has_
       if (finishReassembly(t, sender)) queueNack(t, 'G', sender);
     }
     notifyChanged(t);
-    return;
+    return true;
   }
   if (looksGarbled(plain, cbytes)) {
     addEntry(t, sender, (const uint8_t*)"[decrypted garbage - check the pad is shared correctly]", 55, State::Lost, false);
@@ -1786,7 +1809,7 @@ void Core::process(Target& t, const char* sender, const char* text_in, bool has_
     requestPrompt(t);
     queueNack(t, 'G', sender);
     notifyChanged(t);
-    return;
+    return true;
   }
   Entry* e = addEntry(t, sender, plain, cbytes, State::Received, false);
   if (e) {
@@ -1795,6 +1818,7 @@ void Core::process(Target& t, const char* sender, const char* text_in, bool has_
   }
   requestPrompt(t);
   notifyChanged(t);
+  return true;
 }
 
 // Returns true when the joined message was garbage (the caller nacks it).

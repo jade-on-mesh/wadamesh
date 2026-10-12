@@ -7,11 +7,13 @@
 // byte-for-byte compatible on the air with that app and with MeshCore Open
 // TAK's OTP mode:
 //
-//   DM       bare lowercase hex of (framed ^ pad). Sends are always framed as
+//   DM       bare lowercase hex of (framed ^ pad). Always framed as
 //            "\1MSGCHNK\2"+tid+idx+tot+data and acked with "\1MSGACK\2"+tid+idx
-//            (also encrypted). Unframed plaintext is accepted from senders
-//            that send single-shot messages.
+//            (also encrypted). Only a DM that decrypts to one of those frames
+//            is taken: any other all-hex DM ("cafe", a pasted key) is plain
+//            text, and the pad is not touched.
 //   channel  "z2<offset b36>|<hex>", single packet, after a 0.6-2.2 s jitter.
+//            Bare hex on a channel is plain text.
 //   sync     "z3" + s|S<ctr b36>  (channel)  or  p|P<role><mine b36>:<theirs b36>
 //   nack     "z4" + C|D|G + "z"   (collided, decrypt error, garbled)
 //
@@ -381,7 +383,7 @@ class Core {
   void handleNack(Target& t, const char* text, const char* who);
   void queueNack(Target& t, char reason, const char* who);
   bool sendAck(Target& t, uint8_t tid, uint8_t idx);
-  void process(Target& t, const char* sender, const char* text, bool has_off, uint32_t off);
+  bool process(Target& t, const char* sender, const char* text, bool has_off, uint32_t off);
   bool finishReassembly(Target& t, const char* sender);
   bool sendNextChunk();
   void completeSend();

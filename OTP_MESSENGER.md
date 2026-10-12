@@ -18,12 +18,18 @@ TAK's OTP mode: a native radio, a Lua radio and a phone can share one pad.
 - **DM**: bare lowercase hex of `framed XOR pad`. Every message is framed as
   `\1MSGCHNK\2` + tid + index + total + text, and each part is acknowledged with
   an encrypted `\1MSGACK\2` + tid + index, so the sender sees *Delivered*.
-  Unframed single-shot ciphertext (as other senders may use) is accepted.
+  A DM is only taken as OTP if it is at least 20 hex digits **and decrypts to
+  one of those frames**; the pad is advanced only then. Any other DM that is all
+  hex ("cafe", "1234", a pasted key) is plain text: it goes to Chats and costs
+  no pad. Open TAK frames every OTP DM too (from the `otp-merge` build on), so
+  only its older builds' short unframed DMs are no longer read here.
 - **Channel**: `z2<offset base36>|<hex>`, one packet, sent after a random
-  0.6 to 2.2 s so a competing post can claim the offset first.
+  0.6 to 2.2 s so a competing post can claim the offset first. Bare hex on a
+  channel, without the `z2...|` prefix, is plain text.
 - **Sync check**: `z3s<ctr>` / `z3S<ctr>` (channel), `z3p<role><mine>:<theirs>` /
   `z3P...` (DM), in the clear.
-- **Nack**: `z4C z` collided, `z4Dz` decrypt error, `z4Gz` garbled.
+- **Nack**: exactly `z4Cz` collided, `z4Dz` decrypt error, `z4Gz` garbled.
+  Sync checks are likewise matched exactly, so "z3 at noon?" is just a message.
 
 DM pads are split by role: A sends from the front and reads the peer from the
 back, B the reverse. The role comes from comparing the two public keys, so both
