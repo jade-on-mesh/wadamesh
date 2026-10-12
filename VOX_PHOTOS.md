@@ -29,15 +29,21 @@ reduced still-picture header and no AVIF container, 2,750 B ("Standard") or
 
 ## The decoder on the device
 
-- dav1d is vendored unmodified apart from `lib/dav1d/patches`: every allocation
-  goes through `dav1d_ext_*` (PSRAM first), and ~221 KB of tables upstream keeps
-  in `.bss` (inter-prediction masks, quantizer matrices) move to the heap. They
-  are allocated by the first decode and kept for the next one.
-- Each decode runs on its own task on core 0 at idle priority, with a 64 KB
+- dav1d is vendored unmodified apart from `lib/dav1d/patches`:
+  - every allocation goes through `dav1d_ext_*`, PSRAM first;
+  - ~221 KB of tables upstream keeps in `.bss` (inter-prediction masks,
+    quantizer matrices) move to the heap;
+  - the biggest DSP scratch buffers (self-guided loop filter, inverse
+    transform, motion compensation, up to 34 KB each) move from the stack to
+    one 40 KB PSRAM arena.
+
+  Tables and arena are allocated by the first decode and kept for the next.
+- Each decode runs on its own task on core 0 at idle priority, with a 24 KB
   stack taken from internal RAM only while it runs (this Arduino build can't
-  put task stacks in PSRAM). The host measures ~45 KB of stack at worst, when
-  the encoder used the self-guided loop filter. Boards idling at 80 MHz are
-  raised to 240 MHz for the decode.
+  put task stacks in PSRAM). The host measures ~11 KB of stack at worst,
+  including damaged input. Boards idling at 80 MHz are raised to 240 MHz for
+  the decode. The first device build used a 64 KB stack, which the T-Deck
+  couldn't spare: every photo failed with "Not enough memory".
 - Heap per decode, measured on the host: up to ~0.9 MB including the RGB565
   output, plus the 221 KB of kept tables.
 - Output is bit-exact with libaom's decode in the app (`vox_av1.c`), converted
@@ -57,7 +63,8 @@ reduced still-picture header and no AVIF container, 2,750 B ("Standard") or
    (NASA, SpaceX, and CC0 photos from scikit-image), at both detail levels.
 3. Open one in **Files**. "Decoding photo..." appears, then the viewer, then a
    note with the decode time, clock, stack and heap used. The same line goes
-   to the serial log as `[VOX] decode ...`.
+   to the serial log as `[VOX] decode ...`. A failure shows its reason and code
+   with the largest free internal-RAM block and free PSRAM at the time.
 
 Worth trying `coffee_5500.vi1` and `astronaut_5500.vi1`: they take the deepest
 stack path. Please report the numbers, along with whether Wi-Fi or BLE was on.

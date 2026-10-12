@@ -26285,12 +26285,20 @@ static void fmVoxPhotoPollCb(lv_timer_t*) {
   VoxAv1Image img;
   VoxAv1Job::Stats st;
   const VoxAv1Result r = VoxAv1Job::finish(&img, &st);
-  Serial.printf("[VOX] decode %s: %s %dx%d %lu ms @%lu MHz, stack %lu B, heap %lu B\n", s_vox_name,
-                voxAv1ResultText(r), img.width, img.height, (unsigned long)st.decode_ms,
-                (unsigned long)st.cpu_mhz, (unsigned long)st.stack_used, (unsigned long)st.heap_peak);
+  Serial.printf("[VOX] decode %s: %s (%d) %dx%d %lu ms @%lu MHz, stack %lu/%lu B, heap %lu B, "
+                "internal largest %lu B, PSRAM free %lu B\n", s_vox_name,
+                voxAv1ResultText(r), (int)r, img.width, img.height, (unsigned long)st.decode_ms,
+                (unsigned long)st.cpu_mhz, (unsigned long)st.stack_used, (unsigned long)st.stack_size,
+                (unsigned long)st.heap_peak, (unsigned long)st.internal_largest,
+                (unsigned long)st.psram_free);
   if (r != kVoxAv1Ok) {
     voxAv1Free(img.pixels);
-    if (g_lv.task) g_lv.task->showAlert(TR(voxAv1ResultText(r)), 2500);
+    // The memory picture at the time, so a failure report says which pool ran out.
+    char emsg[160];
+    snprintf(emsg, sizeof emsg, "%s (%d)\ninternal block %lu KB, PSRAM free %lu KB",
+             TR(voxAv1ResultText(r)), (int)r, (unsigned long)(st.internal_largest / 1024),
+             (unsigned long)(st.psram_free / 1024));
+    if (g_lv.task) g_lv.task->showAlert(emsg, 5000);
     return;
   }
   // The viewer frees with lvglPsramFree, so hand it a buffer from that allocator.

@@ -5,6 +5,7 @@
 
 #include <Arduino.h>
 #include <atomic>
+#include <esp_heap_caps.h>
 #include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -15,7 +16,7 @@
 namespace VoxAv1Job {
 namespace {
 
-constexpr uint32_t kStackBytes = 64 * 1024;
+constexpr uint32_t kStackBytes = 24 * 1024;
 
 std::atomic<uint8_t> g_state{kIdle};
 uint8_t* g_payload = nullptr;
@@ -67,13 +68,17 @@ bool start(const uint8_t* payload, size_t len, int max_side) {
   g_img = VoxAv1Image{};
   g_stats = Stats{};
   g_result = kVoxAv1DecodeFailed;
+  g_stats.stack_size = kStackBytes;
+  g_stats.internal_largest =
+      (uint32_t)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  g_stats.psram_free = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
 
   if (xTaskCreatePinnedToCore(decodeTask, "vox_av1", kStackBytes, nullptr, tskIDLE_PRIORITY,
                               nullptr, 0) != pdPASS) {
     // Not enough internal RAM for the decode stack right now.
     voxAv1Free(g_payload);
     g_payload = nullptr;
-    g_result = kVoxAv1NoMemory;
+    g_result = kVoxAv1NoStack;
     g_state.store(kDone);
   }
   return true;

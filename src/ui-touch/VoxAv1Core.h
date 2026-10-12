@@ -27,8 +27,10 @@ enum VoxAv1Result {
   kVoxAv1Unsupported,   // no decoder in this build
   kVoxAv1BadInput,      // not a picture we can read
   kVoxAv1TooLarge,      // larger than the caller's limit
-  kVoxAv1NoMemory,
+  kVoxAv1NoMemory,      // a PSRAM allocation failed
   kVoxAv1DecodeFailed,
+  kVoxAv1NoStack,       // no internal RAM for the decode task's stack (VoxAv1Job)
+  kVoxAv1OpenFailed,    // dav1d_open failed
 };
 
 enum VoxAv1Format {

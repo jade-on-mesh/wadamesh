@@ -17,6 +17,8 @@ const char* voxAv1ResultText(VoxAv1Result r) {
     case kVoxAv1TooLarge:     return "Photo is too large";
     case kVoxAv1NoMemory:     return "Not enough memory for the photo";
     case kVoxAv1DecodeFailed: return "Photo data is damaged";
+    case kVoxAv1NoStack:      return "Not enough internal RAM to start the decoder";
+    case kVoxAv1OpenFailed:   return "The photo decoder failed to start";
   }
   return "error";
 }
@@ -106,6 +108,7 @@ void* dav1d_ext_realloc(void* p, size_t sz) {
 #include <dav1d/dav1d.h>
 
 extern "C" int dav1d_ext_alloc_wedge_tables(void);
+extern "C" int dav1d_ext_alloc_scratch(void);
 extern "C" int dav1d_ext_alloc_qm_tables(void);
 
 namespace {
@@ -161,8 +164,10 @@ VoxAv1Result voxAv1Decode(const uint8_t* obus, size_t len, VoxAv1Format format,
   if (!obus || len < 1 || len > 256 * 1024 || !out) return kVoxAv1BadInput;
   *out = VoxAv1Image{};
 
-  // Tables upstream keeps in .bss; allocated once, kept for the next photo.
-  if (!dav1d_ext_alloc_wedge_tables() || !dav1d_ext_alloc_qm_tables()) return kVoxAv1NoMemory;
+  // Allocated by the first photo and kept for the next: the tables upstream keeps
+  // in .bss, and the 40 KB arena that keeps dav1d's big DSP buffers off the stack.
+  if (!dav1d_ext_alloc_scratch() || !dav1d_ext_alloc_wedge_tables() || !dav1d_ext_alloc_qm_tables())
+    return kVoxAv1NoMemory;
 
   // The sender strips the 2-byte temporal delimiter; dav1d wants it back.
   uint8_t* tu = (uint8_t*)voxAv1Alloc(len + 2);
@@ -180,7 +185,7 @@ VoxAv1Result voxAv1Decode(const uint8_t* obus, size_t len, VoxAv1Format format,
   s.frame_size_limit = (unsigned)max_side * (unsigned)max_side;
 
   Dav1dContext* c = nullptr;
-  if (dav1d_open(&c, &s) < 0) { voxAv1Free(tu); return kVoxAv1NoMemory; }
+  if (dav1d_open(&c, &s) < 0) { voxAv1Free(tu); return kVoxAv1OpenFailed; }
 
   VoxAv1Result res = kVoxAv1DecodeFailed;
   Dav1dData d;

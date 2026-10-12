@@ -7,9 +7,9 @@
 //  - Core 0 at idle priority: anything else that wants the CPU gets it first,
 //    and the core-0 idle task still runs, so the 5 s task watchdog stays fed
 //    however long a decode takes.
-//  - 64 KB stack from internal RAM for the duration of the decode only. dav1d's
-//    self-guided loop filter keeps ~34 KB of scratch on the stack and the host
-//    measures ~45 KB peak; this build can't place task stacks in PSRAM.
+//  - 24 KB stack from internal RAM for the duration of the decode only (this
+//    build can't place task stacks in PSRAM). dav1d's big DSP buffers live in a
+//    PSRAM arena instead (lib/dav1d/patches); the host measures ~11 KB peak.
 //  - Boards that idle at 80 MHz are lifted to 240 MHz for the decode.
 //
 // Poll from the UI loop; LVGL objects must only be touched there.
@@ -28,6 +28,9 @@ struct Stats {
   uint32_t stack_used = 0;    // bytes of the decode task's stack touched
   uint32_t heap_peak = 0;     // decoder heap high-water during this decode
   uint32_t cpu_mhz = 0;       // clock the decode ran at
+  uint32_t stack_size = 0;    // bytes reserved for the decode task
+  uint32_t internal_largest = 0;  // largest free internal-RAM block when the decode started
+  uint32_t psram_free = 0;        // free PSRAM when the decode started
 };
 
 // Starts decoding `payload` (a whole photo payload: [0x01][AV1 OBUs]). The bytes
