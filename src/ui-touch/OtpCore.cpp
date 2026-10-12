@@ -2179,6 +2179,156 @@ void Core::tick() {
 }
 
 // =============================================================================
+// moving over from the Lua app
+// =============================================================================
+namespace {
+// Value of `key` in the Lua store text ("key=value" lines), or false.
+bool savGet(const char* sav, size_t n, const char* key, Bytes& out) {
+  const size_t kl = strlen(key);
+  size_t i = 0;
+  while (i < n) {
+    size_t e = i;
+    while (e < n && sav[e] != '\n') e++;
+    if (e - i > kl && sav[i + kl] == '=' && !memcmp(sav + i, key, kl)) {
+      out.assign(sav + i + kl + 1, (uint32_t)(e - i - kl - 1));
+      return true;
+    }
+    i = e + 1;
+  }
+  return false;
+}
+// The Lua app's dec_str for "ENC2:<hex>": raw bytes, or false.
+bool luaDec(const uint8_t key[32], const char* v, size_t n, Bytes& out) {
+  if (n < 5 || memcmp(v, "ENC2:", 5) != 0) return out.assign(v, (uint32_t)n);
+  Bytes raw;
+  if (!fromHex(v + 5, n - 5, raw) || raw.n < 24) return false;
+  uint8_t enc_key[32], mac_key[32];
+  hmacSha256(key, 32, (const uint8_t*)"otp3-enc", 8, enc_key);
+  hmacSha256(key, 32, (const uint8_t*)"otp3-mac", 8, mac_key);
+  const uint8_t* nonce = raw.p;
+  const uint8_t* tag = raw.p + 8;
+  const uint8_t* body = raw.p + 24;
+  const uint32_t bn = raw.n - 24;
+  Bytes mac_in;
+  mac_in.append(nonce, 8);
+  mac_in.append(body, bn);
+  uint8_t expect[32];
+  hmacSha256(mac_key, 32, mac_in.p, mac_in.n, expect);
+  uint8_t diff = 0;
+  for (int i = 0; i < 16; i++) diff |= (uint8_t)(expect[i] ^ tag[i]);
+  if (diff) return false;
+  if (!out.reserve(bn + 1)) return false;
+  keystream(enc_key, nonce, 8, body, out.p, bn);
+  out.n = bn;
+  out.p[bn] = 0;
+  return true;
+}
+}  // namespace
+
+bool Core::luaNeedsPassphrase(const char* sav, size_t n) {
+  Bytes salt;
+  return savGet(sav, n, "otp3_prot_salt", salt) && salt.n > 0;
+}
+
+int Core::importLua(const char* sav, size_t n, const LuaSource& src, const char* pass, char* err, size_t cap) {
+  if (locked()) { snprintf(err, cap, "Unlock first"); return -1; }
+  uint8_t lkey[32];
+  bool have_lkey = false;
+  Bytes salt, check;
+  if (savGet(sav, n, "otp3_prot_salt", salt) && salt.n) {
+    if (!pass || !*pass) { snprintf(err, cap, "The Lua app is passphrase-protected"); return -1; }
+    savGet(sav, n, "otp3_prot_check", check);
+    if (!deriveKey(pass, (const char*)salt.p, lkey)) { snprintf(err, cap, "Bad salt"); return -1; }
+    char tag[65];
+    checkTag(lkey, tag);
+    if (check.n != 64 || memcmp(check.p, tag, 64) != 0) { snprintf(err, cap, "Wrong passphrase for the Lua app"); return -1; }
+    have_lkey = true;
+  }
+  int moved = 0;
+  size_t i = 0;
+  while (i < n) {
+    size_t e = i;
+    while (e < n && sav[e] != '\n') e++;
+    const char* line = sav + i;
+    const size_t ln = e - i;
+    i = e + 1;
+    if (ln < 9 || memcmp(line, "padmeta_", 8) != 0) continue;
+    const char* eq = (const char*)memchr(line, '=', ln);
+    if (!eq) continue;
+    char sid[64];
+    const size_t sl = (size_t)(eq - line - 8);
+    if (sl >= sizeof sid) continue;
+    memcpy(sid, line + 8, sl);
+    sid[sl] = 0;
+    Bytes meta;
+    meta.assign(eq + 1, (uint32_t)(ln - (size_t)(eq - line) - 1));
+    // Which conversation?
+    Target* t = nullptr;
+    if (!strncmp(sid, "dm_", 3) && strlen(sid) == 11) {
+      uint8_t pub[32];
+      char name[kMaxNameLen + 1];
+      if (!src.findContact(src.ctx, sid + 3, pub, name, sizeof name)) continue;
+      t = dmTarget(pub, name);
+    } else if (!strncmp(sid, "ch_", 3)) {
+      char name[kMaxNameLen + 1];
+      if (!src.findChannel(src.ctx, sid + 3, name, sizeof name)) continue;
+      t = channelTarget(name);
+    }
+    if (!t) continue;
+    loadPad(*t);
+    if (t->pad.n) continue;   // never overwrite a pad this app already holds
+    // The pad: a file in the app's folder, else (older builds) the store.
+    char fname[96];
+    snprintf(fname, sizeof fname, "otp3pad_%s.hex", sid);
+    Bytes stored, hex;
+    bool ok = src.readFile(src.ctx, fname, stored) && stored.n;
+    if (!ok) {
+      char key[96];
+      snprintf(key, sizeof key, "otp3pad_%s", sid);
+      ok = savGet(sav, n, key, stored) && stored.n;
+    }
+    if (!ok) continue;
+    Bytes plain;
+    if (stored.n >= 5 && !memcmp(stored.p, "ENC2:", 5)) {
+      if (!have_lkey || !luaDec(lkey, (const char*)stored.p, stored.n, plain)) continue;
+      // enc_pad wraps the RAW bytes (dec_pad turns them back into hex)
+      t->pad.swap(plain);
+    } else {
+      if (!fromHex((const char*)stored.p, stored.n, hex)) continue;
+      t->pad.swap(hex);
+    }
+    // Counters exactly as the Lua app left them.
+    Bytes mplain;
+    if (meta.n >= 5 && !memcmp(meta.p, "ENC2:", 5)) {
+      if (!have_lkey || !luaDec(lkey, (const char*)meta.p, meta.n, mplain)) continue;
+    } else {
+      mplain.assign(meta.p, meta.n);
+    }
+    const char* s = (const char*)mplain.p;
+    uint32_t a = 0, b = 0;
+    t->ctr = t->ctr_mine = t->ctr_theirs = 0;
+    if (t->kind == Kind::Channel && !strncmp(s, "C2|", 3)) {
+      s += 3;
+      if (parseU(s, &a)) t->ctr = a;
+    } else if (t->kind == Kind::Dm && !strncmp(s, "D2|", 3) && (s[3] == 'A' || s[3] == 'B')) {
+      t->role = s[3];
+      s += 5;
+      if (parseU(s, &a) && *s++ == '|' && parseU(s, &b)) { t->ctr_mine = a; t->ctr_theirs = b; }
+    } else {
+      t->pad.release();
+      continue;   // a legacy pad the Lua app itself refused to use
+    }
+    t->legacy = t->read_failed = false;
+    t->hex_dirty = true;
+    savePad(*t);
+    markKeep(*t);
+    notifyChanged(*t);
+    moved++;
+  }
+  return moved;
+}
+
+// =============================================================================
 // view helpers
 // =============================================================================
 const char* Core::statusWord(Target& t, const Entry& e, char* buf, size_t cap) {

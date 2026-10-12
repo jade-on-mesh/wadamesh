@@ -416,6 +416,52 @@ int main(int argc, char** argv) {
     CHECK(lstr("(function() local l = chat_log_for('ch:bad'); return l[#l].fail end)()") == "G");
   }
 
+  // 6b. moving the Lua app's pads (and their counters) over to the native app
+  printf("import from the Lua app\n");
+  {
+    std::string sav = lstr("(function() local t = {} for k, v in pairs(STORE) do t[#t + 1] = k .. '=' .. tostring(v) end return table.concat(t, '\\n') end)()");
+    otp::Core::LuaSource src;
+    src.ctx = nullptr;
+    src.readFile = [](void*, const char* name, Bytes& out) -> bool {
+      lua_getglobal(L, "FILES");
+      lua_getfield(L, -1, name);
+      size_t n = 0;
+      const char* v = lua_tolstring(L, -1, &n);
+      const bool ok = v != nullptr;
+      if (ok) out.assign(v, (uint32_t)n);
+      lua_pop(L, 2);
+      return ok;
+    };
+    src.findContact = [](void*, const char* hex8, uint8_t pub[32], char* name, size_t cap) -> bool {
+      if (hex4(kNativePub) != hex8) return false;   // the Lua app's peer is the native node
+      memcpy(pub, kNativePub, 32);
+      snprintf(name, cap, "%s", kNativeName);
+      return true;
+    };
+    src.findChannel = [](void*, const char* s, char* name, size_t cap) -> bool {
+      snprintf(name, cap, "%s", s);
+      return true;
+    };
+    TestIo iom;
+    otp::Core cm(&iom);
+    cm.begin();
+    char e2[120];
+    const int moved = cm.importLua(sav.data(), sav.size(), src, nullptr, e2, sizeof e2);
+    if (g_verbose) printf("  moved %d pads\n", moved);
+    CHECK(moved == 3);   // dm, #ops, #bad
+    otp::Target* md = cm.dmTarget(kNativePub, kNativeName);
+    char code[160];
+    snprintf(code, sizeof code, "load_pad('dm:%s', 'dm')", hex4(kNativePub).c_str());
+    CHECK((long long)md->ctr_mine == lnum((std::string(code) + ".ctr_mine").c_str()));
+    CHECK((long long)md->ctr_theirs == lnum((std::string(code) + ".ctr_theirs").c_str()));
+    CHECK(std::string(1, md->role) == lstr((std::string(code) + ".role").c_str()));
+    CHECK(cm.available(*md) == (int)lnum(("emmb(" + std::string(code) + ")").c_str()));
+    otp::Target* mc = cm.channelTarget("ops");
+    CHECK((long long)mc->ctr == lnum("load_pad('ch:ops', 'channel').ctr"));
+    // A second run moves nothing (pads already here).
+    CHECK(cm.importLua(sav.data(), sav.size(), src, nullptr, e2, sizeof e2) == 0);
+  }
+
   // 7. persistence + passphrase lock
   printf("persistence + lock\n");
   {
@@ -473,6 +519,40 @@ int main(int argc, char** argv) {
     c3.requestSyncCheck(*d3);
     run(2000);
     CHECK(d3->sync_ok == 1);
+    // A passphrase-protected Lua app moves over only with its passphrase.
+    lrun("finish_enable_protection('lua pass')");
+    lrun("local id = 'dm:' .. PEER_PK; local r = load_pad(id, 'dm'); r._hex_dirty = true; save_pad(id, r)");
+    CHECK(lstr("string.sub(FILES['otp3pad_dm_' .. PEER_PK .. '.hex'] or '', 1, 5)") == "ENC2:");
+    std::string sav = lstr("(function() local t = {} for k, v in pairs(STORE) do t[#t + 1] = k .. '=' .. tostring(v) end return table.concat(t, '\\n') end)()");
+    CHECK(otp::Core::luaNeedsPassphrase(sav.data(), sav.size()));
+    otp::Core::LuaSource src;
+    src.ctx = nullptr;
+    src.readFile = [](void*, const char* name, Bytes& out) -> bool {
+      lua_getglobal(L, "FILES");
+      lua_getfield(L, -1, name);
+      size_t n = 0;
+      const char* v = lua_tolstring(L, -1, &n);
+      const bool ok = v != nullptr;
+      if (ok) out.assign(v, (uint32_t)n);
+      lua_pop(L, 2);
+      return ok;
+    };
+    src.findContact = [](void*, const char* hex8, uint8_t pub[32], char* name, size_t cap) -> bool {
+      if (hex4(kNativePub) != hex8) return false;
+      memcpy(pub, kNativePub, 32);
+      snprintf(name, cap, "%s", kNativeName);
+      return true;
+    };
+    src.findChannel = [](void*, const char*, char*, size_t) -> bool { return false; };
+    TestIo iop;
+    otp::Core cp(&iop);
+    cp.begin();
+    char e3[120];
+    CHECK(cp.importLua(sav.data(), sav.size(), src, "nope", e3, sizeof e3) == -1);
+    CHECK(cp.importLua(sav.data(), sav.size(), src, "lua pass", e3, sizeof e3) == 1);
+    otp::Target* pd = cp.dmTarget(kNativePub, kNativeName);
+    CHECK(cp.available(*pd) == c3.available(*d3));
+    CHECK(pd->ctr_mine == d3->ctr_theirs && pd->ctr_theirs == d3->ctr_mine);
     g_core = &core;
   }
 

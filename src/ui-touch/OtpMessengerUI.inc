@@ -132,7 +132,9 @@ static lv_obj_t* row(lv_obj_t* parent, lv_coord_t gap = 6) {
 
 // A scrolling screen body below the bar.
 static lv_obj_t* newBody(bool scroll = true) {
-  if (s_body) { lv_obj_del(s_body); s_body = nullptr; }
+  // Screens are swapped from their own buttons' handlers: never delete the
+  // tree an event is still being dispatched in.
+  if (s_body) { lv_obj_add_flag(s_body, LV_OBJ_FLAG_HIDDEN); lv_obj_del_async(s_body); s_body = nullptr; }
   s_list = s_ta = s_counter = s_info = s_parts = s_bar = s_send_btn = nullptr;
   s_body = lv_obj_create(s_root);
   lv_obj_remove_style_all(s_body);
@@ -548,7 +550,10 @@ static void buildBubbles(bool keep_scroll) {
   const lv_coord_t max_w = w * 4 / 5;
   const int first = t->log_n > s_shown_n ? t->log_n - s_shown_n : 0;
   if (first > 0) {
-    lv_obj_t* more = button(s_list, TR("Earlier messages"), [](lv_event_t*) { s_shown_n += 60; buildBubbles(false); }, nullptr, 0, 24);
+    lv_obj_t* more = button(s_list, TR("Earlier messages"), [](lv_event_t*) {
+      s_shown_n += 60;
+      lv_async_call([](void*) { buildBubbles(false); }, nullptr);   // not from inside the list being rebuilt
+    }, nullptr, 0, 24);
     lv_obj_set_style_align(more, LV_ALIGN_CENTER, LV_PART_MAIN);
   }
   if (!t->log_n) {
@@ -908,6 +913,109 @@ static void buildImport() {
   }
 }
 
+// ---- moving over from the Lua app -----------------------------------------------------------------
+#if CAP_LUA_APPS
+void luaHostAppPath(char* out, size_t cap, const char* rel);
+static char s_lua_dir[96];     // <data>/apps/<id>.d
+static char s_lua_sav[96];     // <data>/apps/<id>.sav
+
+static bool luaReadCb(void*, const char* name, otp::Bytes& out) {
+  fs::FS* fs = luaHostAppFs();
+  if (!fs) return false;
+  char path[160];
+  snprintf(path, sizeof path, "%s/%s", s_lua_dir, name);
+  File f = fs->open(path, "r");
+  if (!f) return false;
+  const size_t n = f.size();
+  if (!out.reserve((uint32_t)n + 1)) { f.close(); return false; }
+  const size_t rd = f.read(out.p, n);
+  f.close();
+  out.n = (uint32_t)rd;
+  out.p[rd] = 0;
+  return rd == n;
+}
+static bool luaContactCb(void*, const char* hex8, uint8_t pub[32], char* name, size_t cap) {
+  const int n = OtpMessenger::contactCount();
+  for (int i = 0; i < n; i++) {
+    uint8_t p[32];
+    char nm[33];
+    if (!OtpMessenger::contactAt(i, p, nm, sizeof nm)) continue;
+    char h[9];
+    otp::toHex(p, 4, h);
+    if (strcasecmp(h, hex8) != 0) continue;
+    memcpy(pub, p, 32);
+    snprintf(name, cap, "%s", nm);
+    return true;
+  }
+  return false;
+}
+static bool luaChannelCb(void*, const char* san, char* name, size_t cap) {
+  for (int i = 0; i < OtpMessenger::channelCount(); i++) {
+    char nm[33], s2[40];
+    if (!OtpMessenger::channelAt(i, nm, sizeof nm)) continue;
+    size_t j = 0;
+    for (const char* c = nm; *c && j + 1 < sizeof s2; ++c)
+      s2[j++] = ((*c >= '0' && *c <= '9') || (*c >= 'a' && *c <= 'z') || (*c >= 'A' && *c <= 'Z')) ? *c : '_';
+    s2[j] = 0;
+    if (strcmp(s2, san) == 0) { snprintf(name, cap, "%s", nm); return true; }
+  }
+  return false;
+}
+// The installed Lua app that holds OTP pads (any id: it was sideloaded).
+static bool findLuaApp(otp::Bytes& sav) {
+  fs::FS* fs = luaHostAppFs();
+  if (!fs) return false;
+  char apps[80];
+  luaHostAppPath(apps, sizeof apps, "/apps");
+  File root = fs->open(apps);
+  if (!root || !root.isDirectory()) return false;
+  bool found = false;
+  for (File f = root.openNextFile(); f && !found; f = root.openNextFile()) {
+    const char* nm = f.name();
+    const char* base = strrchr(nm, '/');
+    base = base ? base + 1 : nm;
+    const size_t n = strlen(base);
+    if (!f.isDirectory() && n > 4 && !strcmp(base + n - 4, ".sav") && f.size() < 64000) {
+      sav.clear();
+      if (sav.reserve((uint32_t)f.size() + 1)) {
+        sav.n = (uint32_t)f.read(sav.p, f.size());
+        sav.p[sav.n] = 0;
+        if (strstr((const char*)sav.p, "padmeta_")) {
+          snprintf(s_lua_sav, sizeof s_lua_sav, "%s/%s", apps, base);
+          snprintf(s_lua_dir, sizeof s_lua_dir, "%s/%.*s.d", apps, (int)(n - 4), base);
+          found = true;
+        }
+      }
+    }
+    f.close();
+  }
+  root.close();
+  return found;
+}
+static void luaImportWith(const char* pass) {
+  if (!pass) return;
+  otp::Bytes sav;
+  if (!findLuaApp(sav)) { toast(TR("No OTP pads from the Lua app found"), 2200); return; }
+  otp::Core::LuaSource src{luaReadCb, luaContactCb, luaChannelCb, nullptr};
+  char err[120];
+  const int n = OtpMessenger::core().importLua((const char*)sav.p, sav.n, src, pass, err, sizeof err);
+  if (n < 0) { toast(err, 2400); return; }
+  char msg[120];
+  if (n) snprintf(msg, sizeof msg, "Moved %d pad(s), counters included. Remove the Lua app so only one copy is used.", n);
+  else snprintf(msg, sizeof msg, "%s", TR("Nothing to move: those pads are already here, or their contacts are unknown"));
+  toast(msg, 3500);
+  show(Screen::List);
+}
+static void luaImport() {
+  otp::Bytes sav;
+  if (!findLuaApp(sav)) { toast(TR("No OTP pads from the Lua app found"), 2200); return; }
+  if (otp::Core::luaNeedsPassphrase((const char*)sav.p, sav.n))
+    prompt(TR("Lua app passphrase"), TR("The Lua app's pads are protected. Its passphrase unlocks them once, to move them."),
+           true, 64, luaImportWith);
+  else luaImportWith("");
+}
+#endif
+
 // ---- Settings -----------------------------------------------------------------------------------
 static char s_pass1[65];
 static void passSecond(const char* p) {
@@ -980,6 +1088,12 @@ static void buildSettings() {
     showConfirm(TR("Erase every pad and message on this device, and turn protection off?\n\nThis cannot be undone."),
                 TR("Wipe"), panicConfirmed);
   }, nullptr, COLOR_STATUS_DANGER);
+#if CAP_LUA_APPS
+  para(b, TR("Coming from the Lua app"), COLOR_TEXT);
+  para(b, TR("Moves its pads here with their counters, so you carry on in step with the other side. "
+             "Afterwards remove the Lua app: two apps using one pad would burn the same bytes twice."));
+  button(b, TR("Move pads from the Lua app"), [](lv_event_t*) { luaImport(); });
+#endif
   snprintf(line, sizeof line, "OTP Messenger %s · wire-compatible with OTP_3_RC1 and MeshCore Open TAK", otp::Core::kBuildId);
   para(b, line);
 }

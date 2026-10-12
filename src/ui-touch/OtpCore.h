@@ -261,6 +261,22 @@ class Core {
   int activeParticipants(Target& t, Participant* out, int max);
   void ensureLog(Target& t);
 
+  // ---- moving over from the Lua app (OTP_3_RC1.lua) ----
+  // `sav` is the app's store file (<data>/apps/<id>.sav, "key=value" lines);
+  // `readFile` reads a file from its private folder (<data>/apps/<id>.d/).
+  // `findContact` maps the 8-hex key prefix the Lua app used to a contact,
+  // `findChannel` a sanitized channel name back to the real one.
+  // Pads that already exist here are left alone. Returns pads moved, or -1
+  // with `err` set (wrong or missing passphrase for a protected Lua app).
+  struct LuaSource {
+    bool (*readFile)(void* ctx, const char* name, Bytes& out);
+    bool (*findContact)(void* ctx, const char* hex8, uint8_t pub[32], char* name, size_t cap);
+    bool (*findChannel)(void* ctx, const char* sanitized, char* name, size_t cap);
+    void* ctx;
+  };
+  static bool luaNeedsPassphrase(const char* sav, size_t n);
+  int importLua(const char* sav, size_t n, const LuaSource& src, const char* passphrase, char* err, size_t cap);
+
   // settings (persisted)
   uint8_t theme = 0;          // 0..5
   bool sound = true;
