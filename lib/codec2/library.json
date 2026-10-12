@@ -1,0 +1,22 @@
+{
+  "name": "codec2",
+  "version": "1.2.0",
+  "description": "Vendored Codec2 speech codec (David Rowe), the subset MeshCore Open TAK uses for voice clips. Decodes VE3 voice messages. Re-vendor with scripts/vendor_codec2.sh. LGPL-2.1.",
+  "license": "LGPL-2.1",
+  "build": {
+    "srcDir": "src",
+    "includeDir": "include",
+    "flags": [
+      "-D__EMBEDDED__",
+      "-DCODEC2_MODE_700C_EN=0",
+      "-DGIT_HASH=\\\"vendored\\\"",
+      "-O2",
+      "-Wno-unused-parameter",
+      "-Wno-unused-variable",
+      "-Wno-unused-but-set-variable",
+      "-Wno-sign-compare",
+      "-Wno-maybe-uninitialized"
+    ],
+    "libArchive": true
+  }
+}

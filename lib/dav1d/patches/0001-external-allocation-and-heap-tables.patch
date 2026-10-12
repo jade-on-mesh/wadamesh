@@ -1,0 +1,200 @@
+diff -ruN a/src/mem.h src/mem.h
+--- a/src/mem.h	2026-10-11 14:22:34.155332720 -0700
++++ b/src/mem.h	2026-10-11 14:24:27.709105879 -0700
+@@ -86,9 +86,25 @@
+  * Allocate align-byte aligned memory. The return value can be released
+  * by calling the dav1d_free_aligned() function.
+  */
++#if DAV1D_EXTERNAL_ALLOC
++/*
++ * wadamesh: every allocation dav1d makes goes through these, supplied by the
++ * embedding firmware (src/VoxAv1Decoder.cpp), so frame buffers and context
++ * land in PSRAM instead of the scarce internal RAM. Tables that upstream keeps
++ * in .bss also come from here (dav1d_ext_alloc_tables in wedge.c/qm.c).
++ */
++void *dav1d_ext_malloc(size_t sz);
++void *dav1d_ext_realloc(void *ptr, size_t sz);
++void dav1d_ext_free(void *ptr);
++void *dav1d_ext_alloc_aligned(size_t sz, size_t align);
++void dav1d_ext_free_aligned(void *ptr);
++#endif
++
+ static inline void *dav1d_alloc_aligned_internal(const size_t sz, const size_t align) {
+     assert(!(align & (align - 1)));
+-#ifdef _WIN32
++#if DAV1D_EXTERNAL_ALLOC
++    return dav1d_ext_alloc_aligned(sz, align);
++#elif defined(_WIN32)
+     return _aligned_malloc(sz, align);
+ #elif HAVE_POSIX_MEMALIGN
+     void *ptr;
+@@ -106,7 +122,9 @@
+ }
+ 
+ static inline void dav1d_free_aligned_internal(void *ptr) {
+-#ifdef _WIN32
++#if DAV1D_EXTERNAL_ALLOC
++    dav1d_ext_free_aligned(ptr);
++#elif defined(_WIN32)
+     _aligned_free(ptr);
+ #else
+     free(ptr);
+@@ -122,10 +140,16 @@
+ void dav1d_log_alloc_stats(Dav1dContext *c);
+ #else
+ #define dav1d_mem_pool_init(type, pool) dav1d_mem_pool_init(pool)
++#if DAV1D_EXTERNAL_ALLOC
++#define dav1d_malloc(type, sz) dav1d_ext_malloc(sz)
++#define dav1d_realloc(type, ptr, sz) dav1d_ext_realloc(ptr, sz)
++#define dav1d_free(ptr) dav1d_ext_free(ptr)
++#else
+ #define dav1d_malloc(type, sz) malloc(sz)
+ #define dav1d_realloc(type, ptr, sz) realloc(ptr, sz)
+-#define dav1d_alloc_aligned(type, sz, align) dav1d_alloc_aligned_internal(sz, align)
+ #define dav1d_free(ptr) free(ptr)
++#endif
++#define dav1d_alloc_aligned(type, sz, align) dav1d_alloc_aligned_internal(sz, align)
+ #define dav1d_free_aligned(ptr) dav1d_free_aligned_internal(ptr)
+ #endif /* TRACK_HEAP_ALLOCATIONS */
+ 
+diff -ruN a/src/qm.c src/qm.c
+--- a/src/qm.c	2026-10-11 14:22:34.154686309 -0700
++++ b/src/qm.c	2026-10-11 14:24:40.211110574 -0700
+@@ -33,6 +33,10 @@
+ 
+ #include "src/qm.h"
+ 
++#if DAV1D_EXTERNAL_ALLOC
++#include "src/mem.h"
++#endif
++
+ static const uint8_t qm_tbl_32x16[][2][512] = {
+     {
+         {
+@@ -1602,6 +1606,55 @@
+ };
+ 
+ const uint8_t *dav1d_qm_tbl[16][2][N_RECT_TX_SIZES];
++#if DAV1D_EXTERNAL_ALLOC
++/* wadamesh: ~90 KB of derived quantizer matrices, on the heap instead of .bss. */
++static uint8_t (*qm_tbl_4x4)[2][16];
++static uint8_t (*qm_tbl_4x8)[2][32];
++static uint8_t (*qm_tbl_4x16)[2][64];
++static uint8_t (*qm_tbl_8x4)[2][32];
++static uint8_t (*qm_tbl_8x8)[2][64];
++static uint8_t (*qm_tbl_8x16)[2][128];
++static uint8_t (*qm_tbl_8x32)[2][256];
++static uint8_t (*qm_tbl_16x4)[2][64];
++static uint8_t (*qm_tbl_16x8)[2][128];
++static uint8_t (*qm_tbl_16x16)[2][256];
++static uint8_t (*qm_tbl_16x32)[2][512];
++static uint8_t (*qm_tbl_32x8)[2][256];
++static uint8_t (*qm_tbl_32x32)[2][1024];
++
++/* Must succeed before dav1d_open(): dav1d_init_qm_tables() writes here. */
++int dav1d_ext_alloc_qm_tables(void);
++int dav1d_ext_alloc_qm_tables(void) {
++    int ok = 1;
++    if (!qm_tbl_4x4) qm_tbl_4x4 = dav1d_ext_alloc_aligned(sizeof(*qm_tbl_4x4) * 15, 16);
++    ok = ok && qm_tbl_4x4;
++    if (!qm_tbl_4x8) qm_tbl_4x8 = dav1d_ext_alloc_aligned(sizeof(*qm_tbl_4x8) * 15, 16);
++    ok = ok && qm_tbl_4x8;
++    if (!qm_tbl_4x16) qm_tbl_4x16 = dav1d_ext_alloc_aligned(sizeof(*qm_tbl_4x16) * 15, 16);
++    ok = ok && qm_tbl_4x16;
++    if (!qm_tbl_8x4) qm_tbl_8x4 = dav1d_ext_alloc_aligned(sizeof(*qm_tbl_8x4) * 15, 16);
++    ok = ok && qm_tbl_8x4;
++    if (!qm_tbl_8x8) qm_tbl_8x8 = dav1d_ext_alloc_aligned(sizeof(*qm_tbl_8x8) * 15, 16);
++    ok = ok && qm_tbl_8x8;
++    if (!qm_tbl_8x16) qm_tbl_8x16 = dav1d_ext_alloc_aligned(sizeof(*qm_tbl_8x16) * 15, 16);
++    ok = ok && qm_tbl_8x16;
++    if (!qm_tbl_8x32) qm_tbl_8x32 = dav1d_ext_alloc_aligned(sizeof(*qm_tbl_8x32) * 15, 16);
++    ok = ok && qm_tbl_8x32;
++    if (!qm_tbl_16x4) qm_tbl_16x4 = dav1d_ext_alloc_aligned(sizeof(*qm_tbl_16x4) * 15, 16);
++    ok = ok && qm_tbl_16x4;
++    if (!qm_tbl_16x8) qm_tbl_16x8 = dav1d_ext_alloc_aligned(sizeof(*qm_tbl_16x8) * 15, 16);
++    ok = ok && qm_tbl_16x8;
++    if (!qm_tbl_16x16) qm_tbl_16x16 = dav1d_ext_alloc_aligned(sizeof(*qm_tbl_16x16) * 15, 16);
++    ok = ok && qm_tbl_16x16;
++    if (!qm_tbl_16x32) qm_tbl_16x32 = dav1d_ext_alloc_aligned(sizeof(*qm_tbl_16x32) * 15, 16);
++    ok = ok && qm_tbl_16x32;
++    if (!qm_tbl_32x8) qm_tbl_32x8 = dav1d_ext_alloc_aligned(sizeof(*qm_tbl_32x8) * 15, 16);
++    ok = ok && qm_tbl_32x8;
++    if (!qm_tbl_32x32) qm_tbl_32x32 = dav1d_ext_alloc_aligned(sizeof(*qm_tbl_32x32) * 15, 16);
++    ok = ok && qm_tbl_32x32;
++    return ok;
++}
++#else
+ static uint8_t qm_tbl_4x4[15][2][16];
+ static uint8_t qm_tbl_4x8[15][2][32];
+ static uint8_t qm_tbl_4x16[15][2][64];
+@@ -1615,6 +1668,7 @@
+ static uint8_t qm_tbl_16x32[15][2][512];
+ static uint8_t qm_tbl_32x8[15][2][256];
+ static uint8_t qm_tbl_32x32[15][2][1024];
++#endif
+ 
+ static void subsample(uint8_t *dst, const uint8_t *const src,
+                       const int h, const int hstep, const int vstep)
+diff -ruN a/src/qm.h src/qm.h
+--- a/src/qm.h	2026-10-11 14:22:34.155400795 -0700
++++ b/src/qm.h	2026-10-11 14:24:27.712607298 -0700
+@@ -33,5 +33,8 @@
+ EXTERN const uint8_t *dav1d_qm_tbl[16][2][N_RECT_TX_SIZES];
+ 
+ void dav1d_init_qm_tables(void);
++#if DAV1D_EXTERNAL_ALLOC
++int dav1d_ext_alloc_qm_tables(void);
++#endif
+ 
+ #endif /* DAV1D_SRC_QM_H */
+diff -ruN a/src/wedge.c src/wedge.c
+--- a/src/wedge.c	2026-10-11 14:22:34.154925663 -0700
++++ b/src/wedge.c	2026-10-11 14:24:40.211655736 -0700
+@@ -34,6 +34,10 @@
+ 
+ #include "src/wedge.h"
+ 
++#if DAV1D_EXTERNAL_ALLOC
++#include "src/mem.h"
++#endif
++
+ enum WedgeDirectionType {
+     WEDGE_HORIZONTAL = 0,
+     WEDGE_VERTICAL = 1,
+@@ -83,7 +87,18 @@
+     { WEDGE_OBLIQUE117, 2, 4 }, { WEDGE_OBLIQUE117, 6, 4 },
+ };
+ 
++#if DAV1D_EXTERNAL_ALLOC
++Dav1dMasks *dav1d_masks_ext;
++
++/* Must succeed before dav1d_open(): dav1d_init_ii_wedge_masks() writes here. */
++int dav1d_ext_alloc_wedge_tables(void) {
++    if (!dav1d_masks_ext)
++        dav1d_masks_ext = dav1d_ext_alloc_aligned(sizeof(Dav1dMasks), 64);
++    return dav1d_masks_ext != NULL;
++}
++#else
+ Dav1dMasks dav1d_masks;
++#endif
+ 
+ static void insert_border(uint8_t *const dst, const uint8_t *const src,
+                           const int ctr)
+diff -ruN a/src/wedge.h src/wedge.h
+--- a/src/wedge.h	2026-10-11 14:22:34.155580306 -0700
++++ b/src/wedge.h	2026-10-11 14:24:27.709472930 -0700
+@@ -89,7 +89,14 @@
+     ((const uint8_t*)((uintptr_t)&dav1d_masks + \
+     (size_t)dav1d_masks.offsets[c][(bs)-BS_32x32].wedge[sign][idx] * 8))
+ 
++#if DAV1D_EXTERNAL_ALLOC
++/* wadamesh: 136 KB of inter-prediction masks, on the heap instead of .bss. */
++EXTERN Dav1dMasks *dav1d_masks_ext;
++#define dav1d_masks (*dav1d_masks_ext)
++int dav1d_ext_alloc_wedge_tables(void);
++#else
+ EXTERN Dav1dMasks dav1d_masks;
++#endif
+ 
+ void dav1d_init_ii_wedge_masks(void);
+ 

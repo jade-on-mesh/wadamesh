@@ -1,4 +1,9 @@
 #include "MyMesh.h"
+#ifdef DISPLAY_CLASS
+#include "ui-touch/VoxPhotos.h"   // MeshCore Open TAK photo fetches
+#include "ui-touch/TeamCore.h"   // Open TAK team positions/alerts/pins (GRP_DATA 0x5654)
+#include "ui-touch/OtpMessenger.h"   // OTP Messenger: one-time-pad DMs/channels, handled in the background
+#endif
 #include <esp_heap_caps.h>
 
 #include <Arduino.h> // needed for PlatformIO
@@ -3251,6 +3256,13 @@ void MyMesh::queueMessage(const ContactInfo &from, uint8_t txt_type, mesh::Packe
 #ifdef DISPLAY_CLASS
   // we only want to show text messages on display, not cli data
   bool should_display = txt_type == TXT_TYPE_PLAIN || txt_type == TXT_TYPE_SIGNED_PLAIN;
+  // "VR3:" DMs are photo/voice fetch requests between MeshCore Open TAK apps:
+  // the app (if one is connected) still gets the frame above, the chat doesn't.
+  if (VoxWire::isControlText(text)) should_display = false;
+  if (txt_type == TXT_TYPE_PLAIN) VoxPhotos::onDirectText(text, from.id.pub_key);
+  // One-time-pad traffic for a contact we share a pad with: OTP Messenger shows
+  // the decrypted text; the chat would only show hex.
+  if (txt_type == TXT_TYPE_PLAIN && OtpMessenger::onDirectText(text, from.id.pub_key)) should_display = false;
   if (should_display && _ui) {
     /* notify BEFORE newMsgFromPub: UITask::newMsg keys on g_last_event to
      * decide channel-thread vs DM-thread. Previously this fired only when
@@ -3481,6 +3493,9 @@ void MyMesh::onChannelMessageRecv(const mesh::GroupChannel &channel, mesh::Packe
   }
 #endif
 #ifdef DISPLAY_CLASS
+  if (resolved_idx >= 0) VoxPhotos::onChannelText(text, resolved_idx);
+  // One-time-pad posts on a channel we hold a pad for go to OTP Messenger only.
+  if (resolved_idx >= 0 && OtpMessenger::onChannelText(text, resolved_idx)) return;
   // Get the channel name from the channel index
   // Never hand the UI an empty name: it renders one as a "#unknown" thread, which
   // is what users saw. Only a RESOLVED, configured, actually-named slot names the
@@ -3504,6 +3519,48 @@ void MyMesh::onChannelMessageRecv(const mesh::GroupChannel &channel, mesh::Packe
                                text, history_count, snr_q4, rssi);
   }
 #endif
+}
+
+// Channel data (GRP_DATA). Frame layout matches upstream MeshCore's companion_radio:
+//   [27][snr*4][0][0][channel_idx][path_len | 0xFF if direct][type lo][type hi][data_len][data...]
+// Delivery differs on purpose: upstream queues these behind CMD_SYNC_NEXT_MESSAGE, but here
+// the sync stream is the persistent history ring (128 slots, chat-only filter), and a burst of
+// data chunks (a 36-packet photo) would push unsynced chat out of it. Channel data is live
+// traffic -- transfer chunks and fetch requests that are stale by the time an offline app
+// reconnects -- so it's pushed to connected apps the same way raw data is, and not queued.
+void MyMesh::onChannelDataRecv(const mesh::GroupChannel &channel, mesh::Packet *pkt, uint16_t data_type,
+                               const uint8_t *data, size_t data_len) {
+  const int resolved_idx = findConfiguredChannelIdx(channel);
+  if (resolved_idx < 0 || resolved_idx >= MAX_GROUP_CHANNELS) return;   // not one of our channels
+
+#ifdef DISPLAY_CLASS
+  if (data_type == VoxWire::kChannelDataType) VoxPhotos::onPayload(data, data_len, resolved_idx);
+  if (data_type == TeamWire::kDataType) teamOnChannelData(resolved_idx, data, data_len);   // Open TAK team
+  if (_ui) _ui->onChannelData((uint8_t)resolved_idx, data_type, data, data_len, pkt->isRouteFlood());
+#endif
+
+  if (data_len > MAX_CHANNEL_DATA_LENGTH) {
+    MESH_DEBUG_PRINTLN("onChannelDataRecv: dropping data_len=%d > frame limit %d",
+                       (int)data_len, (int)MAX_CHANNEL_DATA_LENGTH);
+    return;
+  }
+  if (!_serial->isConnected()) return;
+
+  int i = 0;
+  out_frame[i++] = RESP_CODE_CHANNEL_DATA_RECV;
+  out_frame[i++] = (int8_t)(pkt->getSNR() * 4);
+  out_frame[i++] = 0; // reserved1
+  out_frame[i++] = 0; // reserved2
+  out_frame[i++] = (uint8_t)resolved_idx;
+  out_frame[i++] = pkt->isRouteFlood() ? pkt->path_len : 0xFF;
+  out_frame[i++] = (uint8_t)(data_type & 0xFF);
+  out_frame[i++] = (uint8_t)(data_type >> 8);
+  out_frame[i++] = (uint8_t)data_len;
+  if (data_len > 0) {
+    memcpy(&out_frame[i], data, data_len);
+    i += (int)data_len;
+  }
+  _serial->writeFrameToAll(out_frame, i);
 }
 
 uint8_t MyMesh::onContactRequest(const ContactInfo &contact, uint32_t sender_timestamp, const uint8_t *data,
@@ -3863,6 +3920,9 @@ void MyMesh::discoverUpsert(const uint8_t* pk, uint8_t pklen, uint8_t node_type,
 }
 
 void MyMesh::onRawDataRecv(mesh::Packet *packet) {
+#ifdef DISPLAY_CLASS
+  VoxPhotos::onPayload(packet->payload, packet->payload_len, -1);   // photo packets for this radio
+#endif
   if (packet->payload_len + 4 > sizeof(out_frame)) {
     MESH_DEBUG_PRINTLN("onRawDataRecv(), payload_len too long: %d", packet->payload_len);
     return;

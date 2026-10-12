@@ -53,6 +53,12 @@ public:
   void enableBle() { _serial->enableBle(); }
   void disableBle() { _serial->disableBle(); }
   bool getBlePeerAddress(char* buf, size_t len) const { return _serial->getBlePeerAddress(buf, len); }
+  /** A GRP_DATA datagram arrived on configured channel `channel_idx`. `data` is only
+   *  valid for the duration of the call. Default ignores it. */
+  virtual void onChannelData(uint8_t channel_idx, uint16_t data_type,
+                             const uint8_t* data, size_t data_len, bool is_flood) {
+    (void)channel_idx; (void)data_type; (void)data; (void)data_len; (void)is_flood;
+  }
   virtual void msgRead(int msgcount) = 0;
   virtual void newMsg(uint8_t path_len, const char* from_name, const char* text, int msgcount) = 0;
   virtual void newMsgFromPub(uint8_t path_len, const uint8_t* from_pub, const char* from_name, const char* text, int msgcount) {

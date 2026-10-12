@@ -132,6 +132,10 @@ static void* wadaMp3Scratch() { return s_wada_mp3_scratch; }
 #include "UsbFilesSession.h"    // USB Files: files.wadamesh.com over the USB cable
 #include "SenderExtField.h"   // host-tested split/rejoin of a sender across the two on-disk fields
 #include "Constellation.h"    // the Constellation screensaver (drawing only; the mesh side is in this file)
+#include "VoxAv1Core.h"      // MeshCore Open TAK photos: AV1 decode (lib/dav1d)
+#include "VoxAv1Job.h"       // ...run on its own task, polled from the LVGL loop
+#include "VoxPhotos.h"        // ...and fetched from the sender (VoxFetch over the mesh)
+#include "VoxVoice.h"         // MeshCore Open TAK voice clips: Codec2 decode (lib/codec2)
 #if defined(DOC_CAPTURE)
 extern int g_cst_debug;          // Constellation.cpp: profiling knob for capture builds
 #endif
@@ -25985,7 +25989,12 @@ static bool fmIsImage(const char* name) {
   if (!dot) return false;
   return !strcasecmp(dot, ".png")  || !strcasecmp(dot, ".jpg") ||
          !strcasecmp(dot, ".jpeg") || !strcasecmp(dot, ".sjpg") ||
-         !strcasecmp(dot, ".bmp");
+         !strcasecmp(dot, ".bmp")  || !strcasecmp(dot, ".vi1");
+}
+// A MeshCore Open TAK photo payload ([0x01][AV1 OBUs], what VoxWire reassembles).
+static bool fmIsVoxPhoto(const char* name) {
+  const char* dot = name ? strrchr(name, '.') : nullptr;
+  return dot && !strcasecmp(dot, ".vi1");
 }
 #if CAP_SD || defined(TLORA_PAGER)
 static bool fmIsAudio(const char* name) {
@@ -26151,6 +26160,10 @@ static void fmImageRootClickCb(lv_event_t* e) {
 #if CAP_LOCK_SCREEN
 static void fmSetWallpaperCb(lv_event_t* e) {
   if (lv_event_get_code(e) != LV_EVENT_CLICKED || !s_fm_img_path[0]) return;
+  if (fmIsVoxPhoto(s_fm_img_path)) {   // the lock screen can't decode AV1
+    if (g_lv.task) g_lv.task->showAlert(TR("Mesh photos can't be a wallpaper"), 1600);
+    return;
+  }
   char pref[TOUCH_LOCK_WALLPAPER_MAXLEN];
   if (s_fm_img_on_sd) snprintf(pref, sizeof pref, "sd:%s", s_fm_img_path);
   else                snprintf(pref, sizeof pref, "%s", s_fm_img_path);
@@ -26258,6 +26271,74 @@ static void fmOpenAudio(const char* name) {
 }
 #endif  // HAS_TDECK_GT911 || TLORA_PAGER (.wav notification-sound chooser)
 
+static void fmImageShowDecoded(const char* name, uint8_t* rgb, int dw, int dh);
+
+// ---- MeshCore Open TAK photos (.vi1) -----------------------------------------
+// Decoded by VoxAv1Job on a background task; an lv_timer polls it so the viewer
+// is only ever built from the LVGL loop. The alert shown afterwards reports the
+// decode's cost, which is what on-device testing of the decoder needs.
+static lv_timer_t* s_vox_poll_timer = nullptr;
+static char        s_vox_name[64]   = {0};
+
+static void fmVoxPhotoPollCb(lv_timer_t*) {
+  if (VoxAv1Job::state() != VoxAv1Job::kDone) return;
+  lv_timer_del(s_vox_poll_timer);
+  s_vox_poll_timer = nullptr;
+  VoxAv1Image img;
+  VoxAv1Job::Stats st;
+  const VoxAv1Result r = VoxAv1Job::finish(&img, &st);
+  Serial.printf("[VOX] decode %s: %s (%d) %dx%d %lu ms @%lu MHz, stack %lu/%lu B, heap %lu B, "
+                "internal largest %lu B, PSRAM free %lu B\n", s_vox_name,
+                voxAv1ResultText(r), (int)r, img.width, img.height, (unsigned long)st.decode_ms,
+                (unsigned long)st.cpu_mhz, (unsigned long)st.stack_used, (unsigned long)st.stack_size,
+                (unsigned long)st.heap_peak, (unsigned long)st.internal_largest,
+                (unsigned long)st.psram_free);
+  if (r != kVoxAv1Ok) {
+    voxAv1Free(img.pixels);
+    // The memory picture at the time, so a failure report says which pool ran out.
+    char emsg[160];
+    snprintf(emsg, sizeof emsg, "%s (%d)\ninternal block %lu KB, PSRAM free %lu KB",
+             TR(voxAv1ResultText(r)), (int)r, (unsigned long)(st.internal_largest / 1024),
+             (unsigned long)(st.psram_free / 1024));
+    if (g_lv.task) g_lv.task->showAlert(emsg, 5000);
+    return;
+  }
+  // The viewer frees with lvglPsramFree, so hand it a buffer from that allocator.
+  const size_t bytes = (size_t)img.width * img.height * 2;
+  uint8_t* buf = (uint8_t*)lvglPsramAlloc(bytes);
+  if (!buf) {
+    voxAv1Free(img.pixels);
+    if (g_lv.task) g_lv.task->showAlert(TR("Out of memory"), 1500);
+    return;
+  }
+  memcpy(buf, img.pixels, bytes);
+  voxAv1Free(img.pixels);
+  // The viewer's per-image actions key on this path; a .vi1 name keeps them off
+  // (and stops a previous JPEG's path being used by mistake).
+  snprintf(s_fm_img_path, sizeof s_fm_img_path, "%s", s_vox_name);
+  fmImageShowDecoded(s_vox_name, buf, img.width, img.height);
+  char msg[96];
+  snprintf(msg, sizeof msg, "AV1 %dx%d in %lu ms @ %lu MHz\nstack %lu KB, heap %lu KB", img.width, img.height,
+           (unsigned long)st.decode_ms, (unsigned long)st.cpu_mhz,
+           (unsigned long)((st.stack_used + 1023) / 1024), (unsigned long)((st.heap_peak + 1023) / 1024));
+  if (g_lv.task) g_lv.task->showAlert(msg, 3500);
+}
+
+static void fmVoxPhotoStart(const char* name, const uint8_t* payload, size_t len) {
+#if VOX_AV1_AVAILABLE
+  if (!VoxAv1Job::start(payload, len)) {
+    if (g_lv.task) g_lv.task->showAlert(TR("Already decoding a photo"), 1500);
+    return;
+  }
+  snprintf(s_vox_name, sizeof s_vox_name, "%s", name);
+  if (!s_vox_poll_timer) s_vox_poll_timer = lv_timer_create(fmVoxPhotoPollCb, 50, nullptr);
+  if (g_lv.task) g_lv.task->showAlert(TR("Decoding photo..."), 1200);
+#else
+  (void)name; (void)payload; (void)len;
+  if (g_lv.task) g_lv.task->showAlert(TR(voxAv1ResultText(kVoxAv1Unsupported)), 2000);
+#endif
+}
+
 static void fmOpenImage(const char* name) {
   if (!s_fm_fs || !name || !name[0]) return;
   fmMarkSdIo();                          // SD file read -> activity LED
@@ -26279,6 +26360,12 @@ static void fmOpenImage(const char* name) {
   if (!enc) { f.close(); if (g_lv.task) g_lv.task->showAlert(TR("Out of memory"), 1500); return; }
   size_t rd = f.readBytes((char*)enc, sz);
   f.close();
+
+  if (fmIsVoxPhoto(name)) {   // AV1: decoded on its own task, shown when done
+    fmVoxPhotoStart(name, enc, rd);
+    free(enc);
+    return;
+  }
 
   // Decode to a full RGB565 buffer up front (LVGL's line-by-line readers can't
   // feed a scaled/zoomed lv_img — that renders black). Route by magic bytes:
@@ -26305,6 +26392,12 @@ static void fmOpenImage(const char* name) {
     return;
   }
 
+  fmImageShowDecoded(name, rgb, dw, dh);
+}
+
+// Builds the viewer around an already-decoded RGB565 buffer from lvglPsramAlloc
+// (the viewer takes ownership and frees it on close).
+static void fmImageShowDecoded(const char* name, uint8_t* rgb, int dw, int dh) {
   fmImageClose();        // drop any previous viewer (frees its buffer)
   s_fm_img_buf = rgb;    // decoded RGB565 pixels; freed on close
   memset(&s_fm_img_dsc, 0, sizeof s_fm_img_dsc);
@@ -26371,7 +26464,10 @@ static void fmOpenImage(const char* name) {
   lv_obj_set_style_text_font(fll, &g_font_12, LV_PART_MAIN); lv_obj_center(fll);
 
 #if CAP_LOCK_SCREEN
-  // "Set as lock wallpaper" — bottom-left, windowed chrome only.
+  // "Set as lock wallpaper" — bottom-left, windowed chrome only. Not for mesh
+  // photos (.vi1): the lock screen only decodes JPEG.
+  s_fm_img_wall = nullptr;
+  if (!fmIsVoxPhoto(name)) {
   lv_obj_t* wall = lv_btn_create(s_fm_img_root);
   lv_obj_set_height(wall, 30);
   lv_obj_align(wall, LV_ALIGN_BOTTOM_LEFT, 6, -6);
@@ -26384,6 +26480,7 @@ static void fmOpenImage(const char* name) {
   lv_obj_set_style_text_color(wll, lv_color_black(), LV_PART_MAIN);
   lv_obj_center(wll);
   s_fm_img_wall = wall;
+  }
 #endif  // CAP_LOCK_SCREEN (wallpaper button)
 
   // "tap to exit" hint, shown only in full-screen mode.
@@ -35066,7 +35163,14 @@ static void discoverJumpToMapHere() {
   goToTab(MAP_TAB_INDEX);
 }
 
+// Team overlay (TeamUI.inc, included with the app drawer far below).
+static void teamDrawMapOverlay(lv_obj_t* parent, double cwx, double cwy);
+static void teamFreeMapOverlay();
+static bool teamMapTap(lv_point_t p);
+static bool teamMapLongPress(lv_point_t p);
+
 static void freeMapMarkers() {
+  teamFreeMapOverlay();
   if (s_map_location_marker) {
     lv_obj_del(s_map_location_marker);
     s_map_location_marker = nullptr;
@@ -35269,6 +35373,9 @@ static void renderMapMarkers() {
 
   // Discover wardriving coverage dots (my logged signal samples), under the route overlay.
   if (s_disc_track_n > 0) discoverDrawCoverage(parent, cwx, cwy);
+
+  // Teammates, their alerts and the team's pins.
+  teamDrawMapOverlay(parent, cwx, cwy);
 
   // Route-replay overlay — drawn last so the path + nodes sit above tiles,
   // link lines and contact markers.
@@ -36647,11 +36754,25 @@ static void shiftMapChildren(int dx, int dy) {
 static void mapCanvasEventCb(lv_event_t* e) {
   const lv_event_code_t code = lv_event_get_code(e);
   if (code != LV_EVENT_PRESSED  && code != LV_EVENT_PRESSING &&
-      code != LV_EVENT_RELEASED && code != LV_EVENT_PRESS_LOST) return;
+      code != LV_EVENT_RELEASED && code != LV_EVENT_PRESS_LOST &&
+      code != LV_EVENT_LONG_PRESSED) return;
   lv_indev_t* indev = lv_indev_get_act();
   if (!indev) return;
   lv_point_t p;
   lv_indev_get_point(indev, &p);
+
+  // Hold still on the map: drop a team pin there (when team mode is on).
+  if (code == LV_EVENT_LONG_PRESSED) {
+    if (!s_map_panning) return;
+    const int ldx = p.x - s_map_pan_anchor.x, ldy = p.y - s_map_pan_anchor.y;
+    if (ldx <= -6 || ldx >= 6 || ldy <= -6 || ldy >= 6) return;
+    s_map_panning = false;
+    const int jx = s_map_pan_last.x - s_map_pan_anchor.x, jy = s_map_pan_last.y - s_map_pan_anchor.y;
+    if (jx || jy) shiftMapChildren(-jx, -jy);
+    if (!teamMapLongPress(p)) return;
+    lv_indev_wait_release(indev);
+    return;
+  }
 
   if (code == LV_EVENT_PRESSED) {
     s_map_pan_anchor    = p;
@@ -36680,6 +36801,7 @@ static void mapCanvasEventCb(lv_event_t* e) {
   // jitter we introduced during PRESSING goes away.
   if (tdx > -6 && tdx < 6 && tdy > -6 && tdy < 6) {
     if (tdx != 0 || tdy != 0) shiftMapChildren(-tdx, -tdy);
+    if (teamMapTap(p)) return;   // a teammate, an alert or a team pin
     // Centralized marker hit-test: find every marker whose center is
     // within 16 px of the tap. One hit → open that contact. Multiple
     // hits (overlapping markers) → open a picker so the user can choose.
@@ -37272,6 +37394,7 @@ static void makeMapTab(lv_obj_t* tab) {
   lv_obj_add_event_cb(s_map_touch, mapCanvasEventCb, LV_EVENT_PRESSING,   nullptr);
   lv_obj_add_event_cb(s_map_touch, mapCanvasEventCb, LV_EVENT_RELEASED,   nullptr);
   lv_obj_add_event_cb(s_map_touch, mapCanvasEventCb, LV_EVENT_PRESS_LOST, nullptr);
+  lv_obj_add_event_cb(s_map_touch, mapCanvasEventCb, LV_EVENT_LONG_PRESSED, nullptr);   // team pin drop
   lv_obj_move_to_index(s_map_touch, 0);   // keep it beneath the buttons/labels
 
   // Overlay controls — siblings of the canvas inside the tab, so they
@@ -40617,6 +40740,31 @@ static void chatVirtEnsureMsgIdx() {
   if (s_chat_msg_idx) s_chat_msg_idx_cap = need;
 }
 
+static volatile uint32_t s_vox_voice_sid = 0;   // voice clip playing, 0 when quiet (player below)
+// What a photo or voice bubble says, from the clip's download / playback state.
+static void voxBubbleText(const VoxWire::Envelope& env, bool outgoing, char* out, size_t cap) {
+  const bool voice = env.kind != VoxWire::kImage;
+  if (outgoing) { snprintf(out, cap, "%s", TR(voice ? "Voice message sent" : "Photo sent")); return; }
+  if (!voice) { VoxPhotos::statusText(env.sid, out, cap); return; }
+  if (env.kind == VoxWire::kMimi) { snprintf(out, cap, "%s", TR("Voice (Mimi) - can't play on a radio")); return; }
+  if (!VoxPhotos::canPlay(env)) {
+    snprintf(out, cap, "%s", TR(VOX_CODEC2_AVAILABLE && CAP_LUA_AUDIO ? "Voice (Codec2 700C) - not supported here"
+                                                                      : "Voice message - no speaker on this radio"));
+    return;
+  }
+  if (s_vox_voice_sid == env.sid) { snprintf(out, cap, "%s", TR("Playing - tap to stop")); return; }
+  switch (VoxPhotos::status(env.sid)) {
+    case VoxFetch::kRequesting:
+    case VoxFetch::kReceiving:
+    case VoxFetch::kUnavailable:
+      VoxPhotos::statusText(env.sid, out, cap);
+      break;
+    default:
+      snprintf(out, cap, "Voice %us - tap to play", (unsigned)env.seconds());
+      break;
+  }
+}
+
 static void chatParseMessageDisplay(const UITask::UIMessage& m, bool channel_mode,
                                     bool thread_is_room, ChatBubbleDisplay& d) {
   d.show_sender = m.sender;
@@ -40632,6 +40780,17 @@ static void chatParseMessageDisplay(const UITask::UIMessage& m, bool channel_mod
       d.show_sender = d.retro_sender;
       d.show_text   = body;
     }
+  }
+  // A MeshCore Open TAK photo announcement reads as a photo and its download
+  // state, not as the "VI1:..." envelope it is on the wire.
+  char vox_line[96];
+  VoxWire::Envelope vox_env;
+  if (VoxPhotos::parse(d.show_text, &vox_env)) {
+    char st[72];
+    voxBubbleText(vox_env, m.outgoing, st, sizeof st);
+    snprintf(vox_line, sizeof vox_line, "%s  %s",
+             vox_env.kind == VoxWire::kImage ? LV_SYMBOL_IMAGE : LV_SYMBOL_AUDIO, st);
+    d.show_text = vox_line;
   }
   // The label is the sender's nickname when it has one; show_sender (its colour, its
   // identity) stays the name it advertises.
@@ -41648,6 +41807,91 @@ static void openUrlMenu(const char* url) {
 #endif
   mk(TR(LV_SYMBOL_IMAGE "  Create QR"), urlMenuQrCb);
 }
+// ---- MeshCore Open TAK photo and voice bubbles --------------------------------
+// A tap downloads the clip from its sender (VoxPhotos/VoxFetch); when it's here
+// a photo opens in the image viewer and a voice clip plays, right away for the
+// download the user asked for and on any later tap.
+static uint32_t s_vox_pending_sid = 0;   // the clip the user is waiting for
+static bool     s_vox_pending_voice = false;
+static bool voxVoicePlay(uint32_t sid, const char** err);
+static void voxVoiceStop();
+static char     s_vox_pending_title[48] = "";   // its viewer title, "<sender>.vi1"
+
+// Decode a stored photo and open it in the viewer.
+static void voxShowStoredPhoto(uint32_t sid, const char* title);
+
+static void fmVoxPhotoStart(const char* name, const uint8_t* payload, size_t len);
+
+static bool chatMessagePhoto(const UITask::UIMessage& m, VoxWire::Envelope* env, char* sender,
+                             size_t sender_cap) {
+  if (sender && sender_cap) sender[0] = '\0';
+  const char* body = m.text;
+  char split_name[UITask::MAX_SENDER_NAME + 1] = "";
+  if (m.channel && (m.sender[0] == '\0' || !strcmp(m.sender, "rx"))) {
+    body = ChannelSenderSplit::split(m.text, split_name, sizeof split_name);
+  }
+  if (!VoxPhotos::parse(body, env)) return false;
+  if (sender && sender_cap) snprintf(sender, sender_cap, "%s", split_name[0] ? split_name : m.sender);
+  return true;
+}
+
+static void bubblePhotoTapCb(lv_event_t* e) {
+  if (lv_event_get_code(e) != LV_EVENT_SHORT_CLICKED || !g_lv.task) return;
+  const int idx = (int)(intptr_t)lv_event_get_user_data(e);
+  UITask::UIMessage m;
+  if (!g_lv.task->getMessageByIndex(idx, m)) return;
+  VoxWire::Envelope env;
+  char sender[UITask::MAX_SENDER_NAME + 1];
+  if (!chatMessagePhoto(m, &env, sender, sizeof sender) || m.outgoing) return;
+  const bool voice = env.kind != VoxWire::kImage;
+  if (voice && !VoxPhotos::canPlay(env)) {
+    char why[72];
+    voxBubbleText(env, false, why, sizeof why);
+    g_lv.task->showAlert(why, 2200);
+    return;
+  }
+
+  char title[48];
+  snprintf(title, sizeof title, "%s.vi1", sender[0] ? sender : "photo");
+  if (VoxPhotos::status(env.sid) == VoxFetch::kComplete) {
+    if (!voice) {
+      voxShowStoredPhoto(env.sid, title);
+    } else if (s_vox_voice_sid == env.sid) {
+      voxVoiceStop();
+    } else {
+      voxVoiceStop();   // another clip: stop it, then this one starts on the next tap
+      const char* err = nullptr;
+      if (!voxVoicePlay(env.sid, &err)) g_lv.task->showAlert(TR(err), 2200);
+    }
+    g_lv.dirty_timeline = true;
+    return;
+  }
+
+  // Who to ask: the DM thread's contact, or the channel post's author on that channel.
+  const int thread = g_lv.task->activeThreadIdx();
+  uint8_t pub[32];
+  const bool have_pub = !m.channel && thread >= 0 && g_lv.task->getThreadContactPub(thread, pub);
+  const int ch = m.channel && thread >= 0 ? g_lv.task->threadMeshChannelSlot(thread) : -1;
+  VoxPhotos::request(env, have_pub ? pub : nullptr, m.channel ? sender : nullptr, ch);
+  s_vox_pending_sid = env.sid;
+  s_vox_pending_voice = voice;
+  snprintf(s_vox_pending_title, sizeof s_vox_pending_title, "%s", title);
+  char st[72];
+  g_lv.task->showAlert(VoxPhotos::statusText(env.sid, st, sizeof st), 1500);
+  g_lv.dirty_timeline = true;
+}
+
+static void voxShowStoredPhoto(uint32_t sid, const char* title) {
+  uint8_t* payload = nullptr;
+  size_t len = 0;
+  if (!VoxPhotos::load(sid, &payload, &len)) {
+    if (g_lv.task) g_lv.task->showAlert(TR("Couldn't read the photo"), 1800);
+    return;
+  }
+  fmVoxPhotoStart(title, payload, len);
+  free(payload);
+}
+
 // Short tap on a chat bubble that contains a URL -> the action menu (re-extract the URL
 // from the live message; the ring may have rotated since the bubble was built).
 static void bubbleUrlTapCb(lv_event_t* e) {
@@ -41845,7 +42089,11 @@ static lv_coord_t chatVirtCreateBubble(LvChatPanel* p, int logical_i, int ring_i
   // A short tap on a bubble that carries a URL opens the Open-in-web / Create-QR menu
   // (SHORT_CLICKED so it never double-fires with the long-press action menu). Failed
   // outgoing sends keep their tap-to-resend.
-  if (has_url && !(m.outgoing && m.deliv_state == UITask::DELIV_FAILED))
+  VoxWire::Envelope photo_env;
+  if (!m.outgoing && chatMessagePhoto(m, &photo_env, nullptr, 0))
+    lv_obj_add_event_cb(row, bubblePhotoTapCb, LV_EVENT_SHORT_CLICKED,
+                        reinterpret_cast<void*>(static_cast<intptr_t>(ring_idx)));
+  else if (has_url && !(m.outgoing && m.deliv_state == UITask::DELIV_FAILED))
     lv_obj_add_event_cb(row, bubbleUrlTapCb, LV_EVENT_SHORT_CLICKED,
                         reinterpret_cast<void*>(static_cast<intptr_t>(ring_idx)));
   else if (has_coords && !(m.outgoing && m.deliv_state == UITask::DELIV_FAILED))
@@ -41937,7 +42185,11 @@ static lv_coord_t chatVirtCreateCompactRow(LvChatPanel* p, int logical_i, int ri
                       reinterpret_cast<void*>(static_cast<intptr_t>(ring_idx)));
   double compact_lat = 0.0, compact_lon = 0.0;
   const bool compact_has_coords = chatFirstCoord(m.text, &compact_lat, &compact_lon);
-  if (compact_has_coords && !(m.outgoing && m.deliv_state == UITask::DELIV_FAILED))
+  VoxWire::Envelope compact_photo;
+  if (!m.outgoing && chatMessagePhoto(m, &compact_photo, nullptr, 0))
+    lv_obj_add_event_cb(row, bubblePhotoTapCb, LV_EVENT_SHORT_CLICKED,
+                        reinterpret_cast<void*>(static_cast<intptr_t>(ring_idx)));
+  else if (compact_has_coords && !(m.outgoing && m.deliv_state == UITask::DELIV_FAILED))
     lv_obj_add_event_cb(row, bubbleCoordTapCb, LV_EVENT_SHORT_CLICKED,
                         reinterpret_cast<void*>(static_cast<intptr_t>(ring_idx)));
   if (m.outgoing && m.deliv_state == UITask::DELIV_FAILED)
@@ -52587,8 +52839,18 @@ enum AppDrawerAction {
   APPACT_TERMINAL, APPACT_FILES, APPACT_FILE_TRANSFER, APPACT_SPECTRUM, APPACT_SNAKE, APPACT_VNC, APPACT_REMOTE, APPACT_READER,
   APPACT_DISCOVER, APPACT_STORE,
   APPACT_USB_FILES,
+  APPACT_OTP,
+  APPACT_TEAM,
   APPACT_LUA_BASE = 100,   // APPACT_LUA_BASE + i = installed Lua app s_lua_inst[i]
 };
+// OTP Messenger (app drawer -> APPACT_OTP): the screens; protocol in OtpCore.cpp.
+#include "OtpMessengerUI.inc"
+// Team (app drawer -> APPACT_TEAM): MeshCore Open TAK team awareness; rules in TeamCore.cpp.
+#include "TeamUI.inc"
+static uint32_t otpUnreadSig() {
+  return OtpMessenger::ready() ? ((uint32_t)(OtpMessenger::core().unreadTotal() & 0xFF) << 8) * 0x9E37u : 0u;
+}
+
 // The drawer's built-in tiles, which are also what an App widget on Home can open.
 // `hue` is the theme's section hue (HUE_*): what you say, where things are, the
 // radio's own tools, the system; kAppHueDanger for Power.
@@ -52596,9 +52858,11 @@ struct AppTileDef { const char* icon; const char* label; uint8_t act; uint8_t hu
 static constexpr uint8_t kAppHueDanger = 0xFF;
 static const AppTileDef k_app_tiles[] = {
   { UI_ICON_MESSAGE_SQUARE,     "Chats",     APPACT_CHATS,     HUE_MSG },
+  { UI_ICON_LOCK,               "OTP Messenger", APPACT_OTP,   HUE_MSG },     // one-time-pad DMs and channels
   { UI_ICON_USER,               "Contacts",  APPACT_CONTACTS,  HUE_PEOPLE },
   { UI_ICON_AT_SIGN,            "Mentions",  APPACT_MENTIONS,  HUE_MSG },
   { UI_ICON_MAP_PIN,            "Map",       APPACT_MAP,       HUE_PLACE },
+  { UI_ICON_USERS,              "Team",      APPACT_TEAM,      HUE_PLACE },   // teammates, SOS, pins, Bloodhound
   { UI_ICON_RADIO,              "Advertise", APPACT_ADVERT,    HUE_RADIO },
   { UI_ICON_SIGNAL,             "Signal",    APPACT_SIGNAL,    HUE_RADIO },
   { UI_ICON_RADAR,              "Discover",  APPACT_DISCOVER,  HUE_RADIO },   // active node-discovery sweep
@@ -52955,6 +53219,8 @@ static void appLaunch(int act, lv_event_t* e) {
 #endif
   switch (act) {
     case APPACT_MENTIONS:  openMentionsScreen();  return;
+    case APPACT_OTP:       otpui::open();         return;   // one-time-pad messenger
+    case APPACT_TEAM:      teamui::pageOpen();    return;   // team awareness
     case APPACT_CMDCENTER: setHomeDrawer(false);  return;   // back to the Home widgets
     case APPACT_SIGNAL:    openSignalInfoPopup(); return;   // signal/traffic + auto-discover settings
     case APPACT_SPECTRUM:  openSpectrumPage();   return;   // swept RF spectrum analyzer (borrows the radio)
@@ -53519,8 +53785,8 @@ static void openAppDrawer() {
   // First tile is "Command" (back to the command centre); the rest are the apps.
   const int unread   = g_lv.task ? g_lv.task->getUnreadTotal()        : 0;
   const int mentions = g_lv.task ? g_lv.task->getUnreadMentionCount() : 0;
-  s_appdrawer_badge_sig = ((uint32_t)(unread & 0x7FFF) << 16) | (uint32_t)(mentions & 0xFFFF) |
-                          (s_update_available ? 0x80000000u : 0u);
+  s_appdrawer_badge_sig = (((uint32_t)(unread & 0x7FFF) << 16) | (uint32_t)(mentions & 0xFFFF) |
+                          (s_update_available ? 0x80000000u : 0u)) ^ otpUnreadSig();
   s_appdrawer_live = appTilesLiveMask();
   // The launcher's rows follow the redesign: what you say (teal), where things
   // are (blue), the radio's own tools (amber), then the system (grey). Each hue is
@@ -53533,6 +53799,7 @@ static void openAppDrawer() {
   for (int k = 0; k < kAppTiles; ++k) {
     const AppTileDef& t = k_app_tiles[k];
     const int badge = t.act == APPACT_CHATS ? unread : t.act == APPACT_MENTIONS ? mentions
+                    : t.act == APPACT_OTP ? (OtpMessenger::ready() ? OtpMessenger::core().unreadTotal() : 0)
                     : t.act == APPACT_SETTINGS ? (s_update_available ? -1 : 0) : 0;   // "!" = update
     tiles[k] = { t.icon, TR(k_app_tiles[k].label), t.act, badge, appTileColor(t.hue) };
   }
@@ -54864,9 +55131,9 @@ static void updateGlobalStatusBar() {
   // Rebuild on an actual change of the counts, not every tick, using the same
   // close/open idiom the tile-changing settings already use.
   if (s_appdrawer_root && g_lv.task) {
-    const uint32_t sig = ((uint32_t)(g_lv.task->getUnreadTotal() & 0x7FFF) << 16)
+    const uint32_t sig = (((uint32_t)(g_lv.task->getUnreadTotal() & 0x7FFF) << 16)
                        | (uint32_t)(g_lv.task->getUnreadMentionCount() & 0xFFFF)
-                       | (s_update_available ? 0x80000000u : 0u);
+                       | (s_update_available ? 0x80000000u : 0u)) ^ otpUnreadSig();
     if ((sig != s_appdrawer_badge_sig || appTilesLiveMask() != s_appdrawer_live) && !appDrawerCovered()) {
       // Only when nothing is in front of it. Lua apps and the other tools open
       // OVER the drawer without closing it, deliberately (see appTileCb), and
@@ -67265,6 +67532,95 @@ void luaHostTextPrompt(const char* title, const char* initial, void (*cb)(const 
   s_lua_prompt_cb = cb;
 }
 #endif
+
+#if defined(HAS_TOUCH_UI)
+// ---- MeshCore Open TAK voice clips: Codec2 to the speaker ---------------------
+// Streams a stored clip through the same audio sink Lua apps use, decoding frame
+// by frame on its own task (Codec2 runs well ahead of real time). While it plays,
+// s_lua_audio_active keeps notification chimes off the I2S bus.
+static volatile bool     s_vox_voice_stop = false;
+
+#if CAP_LUA_AUDIO && VOX_CODEC2_AVAILABLE
+struct VoxVoicePlayback { uint8_t* frames; size_t len; int mode; };
+
+static void voxVoiceTask(void* arg) {
+  VoxVoicePlayback* pb = static_cast<VoxVoicePlayback*>(arg);
+  VoxCodec2Stream codec;
+  LuaAudioSinkSession sink;
+  const char* err = nullptr;
+  if (codec.begin(pb->mode) && luaAudioSinkBegin(kVoxVoiceSampleRate, &sink, &err)) {
+    const size_t bpf = (size_t)codec.bytesPerFrame();
+    const int spf = codec.samplesPerFrame();
+    int16_t pcm[320];
+    int16_t out[256];
+    size_t n_out = 0;
+    uint32_t phase = 0;
+    bool failed = false;
+    for (size_t i = 0; i + bpf <= pb->len && !s_vox_voice_stop && !failed; i += bpf) {
+      codec.decode(pb->frames + i, pcm);
+      for (int k = 0; k < spf && !failed; k++) {
+        int32_t v = (int32_t)((float)pcm[k] * sink.gain);
+        v = v > 32767 ? 32767 : (v < -32768 ? -32768 : v);
+        phase += sink.output_rate;   // 8 kHz to whatever the sink runs at (the same on T-Deck/pager)
+        while (phase >= (uint32_t)kVoxVoiceSampleRate) {
+          phase -= kVoxVoiceSampleRate;
+          out[n_out++] = (int16_t)v;
+          if (n_out == sizeof out / sizeof out[0]) {
+            failed = !luaAudioSinkWrite(&sink, out, n_out);
+            n_out = 0;
+          }
+        }
+      }
+    }
+    if (n_out && !failed && !s_vox_voice_stop) luaAudioSinkWrite(&sink, out, n_out);
+    luaAudioSinkEnd(&sink);
+  } else {
+    Serial.printf("[VOX] voice playback couldn't start: %s\n", err ? err : "codec");
+  }
+  codec.end();
+  free(pb->frames);
+  free(pb);
+  __atomic_store_n(&s_lua_audio_active, false, __ATOMIC_RELEASE);
+  s_vox_voice_sid = 0;
+  vTaskDelete(nullptr);
+}
+
+// Starts playing a stored clip. `err` explains a refusal.
+static bool voxVoicePlay(uint32_t sid, const char** err) {
+  if (s_vox_voice_sid) { *err = "Already playing"; return false; }
+  if (luaAudioActive() || s_notify_playing) { *err = "Audio is busy"; return false; }
+  if (!g_lv.task || g_lv.task->isBuzzerQuiet() || touchPrefsGetSoundVolume() == 0) {
+    *err = "Sound is off - turn it on in Settings > Sound";
+    return false;
+  }
+  VoxVoicePlayback* pb = static_cast<VoxVoicePlayback*>(calloc(1, sizeof(VoxVoicePlayback)));
+  if (!pb || !VoxPhotos::loadVoice(sid, &pb->mode, &pb->frames, &pb->len)) {
+    free(pb);
+    *err = "Couldn't read the voice clip";
+    return false;
+  }
+  __atomic_store_n(&s_lua_audio_active, true, __ATOMIC_RELEASE);
+  s_vox_voice_stop = false;
+  s_vox_voice_sid = sid;
+  // ~22 KB of Codec2 decode stack (host-measured), from internal RAM while it plays.
+  if (xTaskCreate(voxVoiceTask, "vox_voice", 32 * 1024, pb, 3, nullptr) != pdPASS) {
+    s_vox_voice_sid = 0;
+    __atomic_store_n(&s_lua_audio_active, false, __ATOMIC_RELEASE);
+    free(pb->frames);
+    free(pb);
+    *err = "Not enough memory to play";
+    return false;
+  }
+  return true;
+}
+#else
+static bool voxVoicePlay(uint32_t, const char** err) {
+  *err = "This radio can't play voice clips";
+  return false;
+}
+#endif
+static void voxVoiceStop() { if (s_vox_voice_sid) s_vox_voice_stop = true; }
+#endif  // HAS_TOUCH_UI (voice clips)
 // True when the chat history lives on a removable SD card (T-Deck SPI SD or the
 // Tanmatsu's SD_MMC) rather than internal flash — those devices get the deep
 // message ring (MAX_UI_MESSAGES_SD) since the card has room for the bigger file.
@@ -75319,6 +75675,49 @@ void UITask::loop() {
 #if !defined(HAS_TANMATSU)
     s_web_rx_nudge = true;   // repeat-heard tag ticked up -> refresh the web chat too
 #endif
+  }
+
+  // MeshCore Open TAK photos: fetch timeouts, and repaint the open chat (at most
+  // once a second) while a photo's download state changes.
+  {
+    static bool s_vox_store_set = false;
+    static uint32_t s_vox_seen = 0, s_vox_paint_ms = 0;
+    if (!s_vox_store_set) {
+      VoxPhotos::setStore(backupInternalFs());
+      // OTP Messenger keeps its pads and messages on the same internal store.
+      OtpMessenger::begin(backupInternalFs());
+      OtpMessenger::setCallbacks(otpui::toastCb, otpui::incomingCb);
+      s_vox_store_set = true;
+    }
+    VoxPhotos::tick();
+    OtpMessenger::tick();   // sends, retries, sync checks: whether or not the app is open
+    teamui::loopTick();     // beacons, alert repeats, alarm, Bloodhound, map refresh
+    static uint32_t s_vox_voice_seen = 0;   // repaint the bubble when playback starts or ends
+    if (s_vox_voice_sid != s_vox_voice_seen) { s_vox_voice_seen = s_vox_voice_sid; g_lv.dirty_timeline = true; }
+    const uint32_t v = VoxPhotos::version();
+    if (v != s_vox_seen && (uint32_t)(now - s_vox_paint_ms) >= 1000) {
+      s_vox_seen = v;
+      s_vox_paint_ms = now;
+      g_lv.dirty_timeline = true;
+      if (s_vox_pending_sid) {
+        const VoxFetch::Status st = VoxPhotos::status(s_vox_pending_sid);
+        if (st == VoxFetch::kComplete) {
+          // The download the user asked for is in: show or play it straight away.
+          const uint32_t sid = s_vox_pending_sid;
+          s_vox_pending_sid = 0;
+          if (!s_vox_pending_voice) {
+            voxShowStoredPhoto(sid, s_vox_pending_title);
+          } else {
+            const char* err = nullptr;
+            if (!voxVoicePlay(sid, &err)) showAlert(TR(err), 2200);
+          }
+        } else if (st == VoxFetch::kUnavailable) {
+          char msg[72];
+          showAlert(VoxPhotos::statusText(s_vox_pending_sid, msg, sizeof msg), 2500);
+          s_vox_pending_sid = 0;
+        }
+      }
+    }
   }
 
   bool heavy_ok = !g_lv.defer_heavy_refresh || now >= g_lv.heavy_refresh_at_ms;
