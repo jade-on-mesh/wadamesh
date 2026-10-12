@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
-// MeshCore Open TAK photos on this radio: wires VoxFetch to the mesh (MyMesh),
-// the internal filesystem (finished photos, /vox_<sid>.vi1) and the chat UI.
+// MeshCore Open TAK photos and voice clips on this radio: wires VoxFetch to the
+// mesh (MyMesh), the internal filesystem (finished photos /vox_<sid>.vi1, voice
+// clips /vox_<sid>.ve3) and the chat UI.
 // Everything runs on the Arduino loop task, like the mesh and LVGL.
 
 #include <stddef.h>
@@ -32,8 +33,15 @@ void request(const VoxWire::Envelope& env, const uint8_t* dm_pub, const char* se
              int channel_idx);
 VoxFetch::Status status(uint32_t sid, int* received = nullptr, int* total = nullptr);
 const char* statusText(uint32_t sid, char* buf, size_t cap);
+// Whether this radio fetches the clip (photos; Codec2 voice where there's a
+// speaker and the mode is built in) and whether it can play it.
+bool canFetch(const VoxWire::Envelope& env);
+bool canPlay(const VoxWire::Envelope& env);
 // A finished photo's payload ([0x01][OBUs]); free with free().
 bool load(uint32_t sid, uint8_t** data, size_t* len);
+// A finished voice clip: its VE3 wire mode and codec frames; free with free().
+bool loadVoice(uint32_t sid, int* mode, uint8_t** frames, size_t* len);
+bool loadFile(uint32_t sid, bool voice, uint8_t** data, size_t* len);
 // Bumped whenever any photo's status changes; the chat redraws on a change.
 uint32_t version();
 

@@ -10,6 +10,8 @@
 
 #include "../MyMesh.h"
 #include "ChannelSenderSplit.h"
+#include "VoxVoice.h"
+#include "device_caps.h"
 
 namespace VoxPhotos {
 namespace {
@@ -17,8 +19,25 @@ namespace {
 fs::FS* g_fs = nullptr;
 uint32_t g_version = 0;
 
-void storePath(uint32_t sid, char* out, size_t cap) {
-  snprintf(out, cap, "/vox_%08lx.vi1", (unsigned long)sid);
+// What each recent envelope was, so a finished clip is stored the right way:
+// a photo as its payload (/vox_<sid>.vi1, opens in Files), a voice clip as
+// [wire mode][codec frames] (/vox_<sid>.ve3).
+struct Seen { uint32_t sid; VoxWire::Kind kind; uint8_t mode; };
+Seen g_seen[16];
+int g_seen_next = 0;
+
+void remember(const VoxWire::Envelope& env) {
+  for (auto& e : g_seen) if (e.sid == env.sid && (e.sid || e.mode)) { e.kind = env.kind; e.mode = env.mode; return; }
+  g_seen[g_seen_next] = Seen{env.sid, env.kind, env.mode};
+  g_seen_next = (g_seen_next + 1) % (int)(sizeof g_seen / sizeof g_seen[0]);
+}
+const Seen* seen(uint32_t sid) {
+  for (auto& e : g_seen) if (e.sid == sid && (e.sid || e.mode)) return &e;
+  return nullptr;
+}
+
+void storePath(uint32_t sid, bool voice, char* out, size_t cap) {
+  snprintf(out, cap, voice ? "/vox_%08lx.ve3" : "/vox_%08lx.vi1", (unsigned long)sid);
 }
 
 // Case-insensitive name match that ignores emoji variation selectors (U+FE0E,
@@ -100,20 +119,27 @@ class MeshIo : public VoxFetchIo {
   bool hasPayload(uint32_t sid) override {
     if (!g_fs) return false;
     char path[32];
-    storePath(sid, path, sizeof path);
+    storePath(sid, false, path, sizeof path);
+    if (g_fs->exists(path)) return true;
+    storePath(sid, true, path, sizeof path);
     return g_fs->exists(path);
   }
 
   bool savePayload(uint32_t sid, const uint8_t* data, size_t len) override {
     if (!g_fs) return false;
+    const Seen* e = seen(sid);
+    const bool voice = e && e->kind != VoxWire::kImage;
     char path[32];
-    storePath(sid, path, sizeof path);
+    storePath(sid, voice, path, sizeof path);
     File f = g_fs->open(path, "w");
     if (!f) return false;
-    const size_t w = f.write(data, len);
+    size_t w = 0;
+    if (voice) w = f.write(&e->mode, 1) == 1 ? f.write(data, len) : 0;
+    else w = f.write(data, len);
     f.close();
     if (w != len) { g_fs->remove(path); return false; }
-    Serial.printf("[VOX] photo %08lx complete, %u bytes\n", (unsigned long)sid, (unsigned)len);
+    Serial.printf("[VOX] %s %08lx complete, %u bytes\n", voice ? "voice" : "photo", (unsigned long)sid,
+                  (unsigned)len);
     return true;
   }
 
@@ -125,23 +151,38 @@ VoxFetch g_fetch(g_io);
 
 bool parseChannelPost(const char* text, char* name, size_t name_cap, VoxWire::Envelope* env) {
   const char* body = ChannelSenderSplit::split(text, name, name_cap);
-  return VoxWire::parseImageEnvelope(body, env);
+  return VoxWire::parseEnvelope(body, env);
 }
 
 }  // namespace
+
+bool canFetch(const VoxWire::Envelope& env) {
+  return env.kind == VoxWire::kImage || canPlay(env);
+}
+
+bool canPlay(const VoxWire::Envelope& env) {
+#if CAP_LUA_AUDIO
+  return env.kind == VoxWire::kCodec2 && voxCodec2CanDecode(env.mode);
+#else
+  (void)env;
+  return false;
+#endif
+}
 
 void setStore(fs::FS* fs) { g_fs = fs; }
 
 void onDirectText(const char* text, const uint8_t sender_pub[32]) {
   VoxWire::Envelope env;
-  if (!VoxWire::parseImageEnvelope(text, &env)) return;
+  if (!VoxWire::parseEnvelope(text, &env) || !canFetch(env)) return;
+  remember(env);
   g_fetch.onEnvelope(env, sender_pub, nullptr, -1, false);
 }
 
 void onChannelText(const char* text, int channel_idx) {
   char name[ChannelSenderSplit::kMaxWireName + 1];
   VoxWire::Envelope env;
-  if (!parseChannelPost(text, name, sizeof name, &env)) return;
+  if (!parseChannelPost(text, name, sizeof name, &env) || !canFetch(env)) return;
+  remember(env);
   g_fetch.onEnvelope(env, nullptr, name, channel_idx, false);
 }
 
@@ -149,10 +190,12 @@ void onPayload(const uint8_t* data, size_t len, int channel_idx) { g_fetch.onPay
 
 void tick() { g_fetch.tick(); }
 
-bool parse(const char* text, VoxWire::Envelope* env) { return VoxWire::parseImageEnvelope(text, env); }
+bool parse(const char* text, VoxWire::Envelope* env) { return VoxWire::parseEnvelope(text, env); }
 
 void request(const VoxWire::Envelope& env, const uint8_t* dm_pub, const char* sender_name,
              int channel_idx) {
+  if (!canFetch(env)) return;
+  remember(env);
   g_fetch.onEnvelope(env, dm_pub, sender_name, channel_idx, false);
   g_fetch.request(env.sid);
 }
@@ -163,14 +206,28 @@ VoxFetch::Status status(uint32_t sid, int* received, int* total) {
 
 const char* statusText(uint32_t sid, char* buf, size_t cap) { return g_fetch.statusText(sid, buf, cap); }
 
-bool load(uint32_t sid, uint8_t** data, size_t* len) {
+bool load(uint32_t sid, uint8_t** data, size_t* len) { return loadFile(sid, false, data, len); }
+
+bool loadVoice(uint32_t sid, int* mode, uint8_t** frames, size_t* len) {
+  uint8_t* raw = nullptr;
+  size_t n = 0;
+  if (!mode || !frames || !len || !loadFile(sid, true, &raw, &n)) return false;
+  if (n < 2) { free(raw); return false; }
+  *mode = raw[0];
+  memmove(raw, raw + 1, n - 1);
+  *frames = raw;
+  *len = n - 1;
+  return true;
+}
+
+bool loadFile(uint32_t sid, bool voice, uint8_t** data, size_t* len) {
   if (!g_fs || !data || !len) return false;
   char path[32];
-  storePath(sid, path, sizeof path);
+  storePath(sid, voice, path, sizeof path);
   File f = g_fs->open(path, "r");
   if (!f) return false;
   const size_t n = f.size();
-  if (n < 2 || n > 64 * 1024) { f.close(); return false; }
+  if (n < 2 || n > 64 * 1024) { f.close(); return false; }   // largest clip: 64 x 156 B
   uint8_t* b = (uint8_t*)malloc(n);
   if (!b) { f.close(); return false; }
   const size_t r = f.read(b, n);

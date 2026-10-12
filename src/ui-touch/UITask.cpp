@@ -135,6 +135,7 @@ static void* wadaMp3Scratch() { return s_wada_mp3_scratch; }
 #include "VoxAv1Core.h"      // MeshCore Open TAK photos: AV1 decode (lib/dav1d)
 #include "VoxAv1Job.h"       // ...run on its own task, polled from the LVGL loop
 #include "VoxPhotos.h"        // ...and fetched from the sender (VoxFetch over the mesh)
+#include "VoxVoice.h"         // MeshCore Open TAK voice clips: Codec2 decode (lib/codec2)
 #if defined(DOC_CAPTURE)
 extern int g_cst_debug;          // Constellation.cpp: profiling knob for capture builds
 #endif
@@ -40713,6 +40714,31 @@ static void chatVirtEnsureMsgIdx() {
   if (s_chat_msg_idx) s_chat_msg_idx_cap = need;
 }
 
+static volatile uint32_t s_vox_voice_sid = 0;   // voice clip playing, 0 when quiet (player below)
+// What a photo or voice bubble says, from the clip's download / playback state.
+static void voxBubbleText(const VoxWire::Envelope& env, bool outgoing, char* out, size_t cap) {
+  const bool voice = env.kind != VoxWire::kImage;
+  if (outgoing) { snprintf(out, cap, "%s", TR(voice ? "Voice message sent" : "Photo sent")); return; }
+  if (!voice) { VoxPhotos::statusText(env.sid, out, cap); return; }
+  if (env.kind == VoxWire::kMimi) { snprintf(out, cap, "%s", TR("Voice (Mimi) - can't play on a radio")); return; }
+  if (!VoxPhotos::canPlay(env)) {
+    snprintf(out, cap, "%s", TR(VOX_CODEC2_AVAILABLE && CAP_LUA_AUDIO ? "Voice (Codec2 700C) - not supported here"
+                                                                      : "Voice message - no speaker on this radio"));
+    return;
+  }
+  if (s_vox_voice_sid == env.sid) { snprintf(out, cap, "%s", TR("Playing - tap to stop")); return; }
+  switch (VoxPhotos::status(env.sid)) {
+    case VoxFetch::kRequesting:
+    case VoxFetch::kReceiving:
+    case VoxFetch::kUnavailable:
+      VoxPhotos::statusText(env.sid, out, cap);
+      break;
+    default:
+      snprintf(out, cap, "Voice %us - tap to play", (unsigned)env.seconds());
+      break;
+  }
+}
+
 static void chatParseMessageDisplay(const UITask::UIMessage& m, bool channel_mode,
                                     bool thread_is_room, ChatBubbleDisplay& d) {
   d.show_sender = m.sender;
@@ -40735,9 +40761,9 @@ static void chatParseMessageDisplay(const UITask::UIMessage& m, bool channel_mod
   VoxWire::Envelope vox_env;
   if (VoxPhotos::parse(d.show_text, &vox_env)) {
     char st[72];
-    if (m.outgoing) snprintf(st, sizeof st, "%s", TR("Photo sent"));
-    else VoxPhotos::statusText(vox_env.sid, st, sizeof st);
-    snprintf(vox_line, sizeof vox_line, LV_SYMBOL_IMAGE "  %s", st);
+    voxBubbleText(vox_env, m.outgoing, st, sizeof st);
+    snprintf(vox_line, sizeof vox_line, "%s  %s",
+             vox_env.kind == VoxWire::kImage ? LV_SYMBOL_IMAGE : LV_SYMBOL_AUDIO, st);
     d.show_text = vox_line;
   }
   // The label is the sender's nickname when it has one; show_sender (its colour, its
@@ -41755,10 +41781,14 @@ static void openUrlMenu(const char* url) {
 #endif
   mk(TR(LV_SYMBOL_IMAGE "  Create QR"), urlMenuQrCb);
 }
-// ---- MeshCore Open TAK photo bubbles -----------------------------------------
-// A tap downloads the photo from its sender (VoxPhotos/VoxFetch) or, once it is
-// here, decodes it on the background task and opens the image viewer.
-static uint32_t s_vox_pending_sid = 0;   // the photo the user is waiting for
+// ---- MeshCore Open TAK photo and voice bubbles --------------------------------
+// A tap downloads the clip from its sender (VoxPhotos/VoxFetch); when it's here
+// a photo opens in the image viewer and a voice clip plays, right away for the
+// download the user asked for and on any later tap.
+static uint32_t s_vox_pending_sid = 0;   // the clip the user is waiting for
+static bool     s_vox_pending_voice = false;
+static bool voxVoicePlay(uint32_t sid, const char** err);
+static void voxVoiceStop();
 static char     s_vox_pending_title[48] = "";   // its viewer title, "<sender>.vi1"
 
 // Decode a stored photo and open it in the viewer.
@@ -41787,11 +41817,27 @@ static void bubblePhotoTapCb(lv_event_t* e) {
   VoxWire::Envelope env;
   char sender[UITask::MAX_SENDER_NAME + 1];
   if (!chatMessagePhoto(m, &env, sender, sizeof sender) || m.outgoing) return;
+  const bool voice = env.kind != VoxWire::kImage;
+  if (voice && !VoxPhotos::canPlay(env)) {
+    char why[72];
+    voxBubbleText(env, false, why, sizeof why);
+    g_lv.task->showAlert(why, 2200);
+    return;
+  }
 
   char title[48];
   snprintf(title, sizeof title, "%s.vi1", sender[0] ? sender : "photo");
   if (VoxPhotos::status(env.sid) == VoxFetch::kComplete) {
-    voxShowStoredPhoto(env.sid, title);
+    if (!voice) {
+      voxShowStoredPhoto(env.sid, title);
+    } else if (s_vox_voice_sid == env.sid) {
+      voxVoiceStop();
+    } else {
+      voxVoiceStop();   // another clip: stop it, then this one starts on the next tap
+      const char* err = nullptr;
+      if (!voxVoicePlay(env.sid, &err)) g_lv.task->showAlert(TR(err), 2200);
+    }
+    g_lv.dirty_timeline = true;
     return;
   }
 
@@ -41802,6 +41848,7 @@ static void bubblePhotoTapCb(lv_event_t* e) {
   const int ch = m.channel && thread >= 0 ? g_lv.task->threadMeshChannelSlot(thread) : -1;
   VoxPhotos::request(env, have_pub ? pub : nullptr, m.channel ? sender : nullptr, ch);
   s_vox_pending_sid = env.sid;
+  s_vox_pending_voice = voice;
   snprintf(s_vox_pending_title, sizeof s_vox_pending_title, "%s", title);
   char st[72];
   g_lv.task->showAlert(VoxPhotos::statusText(env.sid, st, sizeof st), 1500);
@@ -67444,6 +67491,95 @@ void luaHostTextPrompt(const char* title, const char* initial, void (*cb)(const 
   s_lua_prompt_cb = cb;
 }
 #endif
+
+#if defined(HAS_TOUCH_UI)
+// ---- MeshCore Open TAK voice clips: Codec2 to the speaker ---------------------
+// Streams a stored clip through the same audio sink Lua apps use, decoding frame
+// by frame on its own task (Codec2 runs well ahead of real time). While it plays,
+// s_lua_audio_active keeps notification chimes off the I2S bus.
+static volatile bool     s_vox_voice_stop = false;
+
+#if CAP_LUA_AUDIO && VOX_CODEC2_AVAILABLE
+struct VoxVoicePlayback { uint8_t* frames; size_t len; int mode; };
+
+static void voxVoiceTask(void* arg) {
+  VoxVoicePlayback* pb = static_cast<VoxVoicePlayback*>(arg);
+  VoxCodec2Stream codec;
+  LuaAudioSinkSession sink;
+  const char* err = nullptr;
+  if (codec.begin(pb->mode) && luaAudioSinkBegin(kVoxVoiceSampleRate, &sink, &err)) {
+    const size_t bpf = (size_t)codec.bytesPerFrame();
+    const int spf = codec.samplesPerFrame();
+    int16_t pcm[320];
+    int16_t out[256];
+    size_t n_out = 0;
+    uint32_t phase = 0;
+    bool failed = false;
+    for (size_t i = 0; i + bpf <= pb->len && !s_vox_voice_stop && !failed; i += bpf) {
+      codec.decode(pb->frames + i, pcm);
+      for (int k = 0; k < spf && !failed; k++) {
+        int32_t v = (int32_t)((float)pcm[k] * sink.gain);
+        v = v > 32767 ? 32767 : (v < -32768 ? -32768 : v);
+        phase += sink.output_rate;   // 8 kHz to whatever the sink runs at (the same on T-Deck/pager)
+        while (phase >= (uint32_t)kVoxVoiceSampleRate) {
+          phase -= kVoxVoiceSampleRate;
+          out[n_out++] = (int16_t)v;
+          if (n_out == sizeof out / sizeof out[0]) {
+            failed = !luaAudioSinkWrite(&sink, out, n_out);
+            n_out = 0;
+          }
+        }
+      }
+    }
+    if (n_out && !failed && !s_vox_voice_stop) luaAudioSinkWrite(&sink, out, n_out);
+    luaAudioSinkEnd(&sink);
+  } else {
+    Serial.printf("[VOX] voice playback couldn't start: %s\n", err ? err : "codec");
+  }
+  codec.end();
+  free(pb->frames);
+  free(pb);
+  __atomic_store_n(&s_lua_audio_active, false, __ATOMIC_RELEASE);
+  s_vox_voice_sid = 0;
+  vTaskDelete(nullptr);
+}
+
+// Starts playing a stored clip. `err` explains a refusal.
+static bool voxVoicePlay(uint32_t sid, const char** err) {
+  if (s_vox_voice_sid) { *err = "Already playing"; return false; }
+  if (luaAudioActive() || s_notify_playing) { *err = "Audio is busy"; return false; }
+  if (!g_lv.task || g_lv.task->isBuzzerQuiet() || touchPrefsGetSoundVolume() == 0) {
+    *err = "Sound is off - turn it on in Settings > Sound";
+    return false;
+  }
+  VoxVoicePlayback* pb = static_cast<VoxVoicePlayback*>(calloc(1, sizeof(VoxVoicePlayback)));
+  if (!pb || !VoxPhotos::loadVoice(sid, &pb->mode, &pb->frames, &pb->len)) {
+    free(pb);
+    *err = "Couldn't read the voice clip";
+    return false;
+  }
+  __atomic_store_n(&s_lua_audio_active, true, __ATOMIC_RELEASE);
+  s_vox_voice_stop = false;
+  s_vox_voice_sid = sid;
+  // ~22 KB of Codec2 decode stack (host-measured), from internal RAM while it plays.
+  if (xTaskCreate(voxVoiceTask, "vox_voice", 32 * 1024, pb, 3, nullptr) != pdPASS) {
+    s_vox_voice_sid = 0;
+    __atomic_store_n(&s_lua_audio_active, false, __ATOMIC_RELEASE);
+    free(pb->frames);
+    free(pb);
+    *err = "Not enough memory to play";
+    return false;
+  }
+  return true;
+}
+#else
+static bool voxVoicePlay(uint32_t, const char** err) {
+  *err = "This radio can't play voice clips";
+  return false;
+}
+#endif
+static void voxVoiceStop() { if (s_vox_voice_sid) s_vox_voice_stop = true; }
+#endif  // HAS_TOUCH_UI (voice clips)
 // True when the chat history lives on a removable SD card (T-Deck SPI SD or the
 // Tanmatsu's SD_MMC) rather than internal flash — those devices get the deep
 // message ring (MAX_UI_MESSAGES_SD) since the card has room for the bigger file.
@@ -75507,6 +75643,8 @@ void UITask::loop() {
     static uint32_t s_vox_seen = 0, s_vox_paint_ms = 0;
     if (!s_vox_store_set) { VoxPhotos::setStore(backupInternalFs()); s_vox_store_set = true; }
     VoxPhotos::tick();
+    static uint32_t s_vox_voice_seen = 0;   // repaint the bubble when playback starts or ends
+    if (s_vox_voice_sid != s_vox_voice_seen) { s_vox_voice_seen = s_vox_voice_sid; g_lv.dirty_timeline = true; }
     const uint32_t v = VoxPhotos::version();
     if (v != s_vox_seen && (uint32_t)(now - s_vox_paint_ms) >= 1000) {
       s_vox_seen = v;
@@ -75515,10 +75653,15 @@ void UITask::loop() {
       if (s_vox_pending_sid) {
         const VoxFetch::Status st = VoxPhotos::status(s_vox_pending_sid);
         if (st == VoxFetch::kComplete) {
-          // The download the user asked for is in: show it straight away.
+          // The download the user asked for is in: show or play it straight away.
           const uint32_t sid = s_vox_pending_sid;
           s_vox_pending_sid = 0;
-          voxShowStoredPhoto(sid, s_vox_pending_title);
+          if (!s_vox_pending_voice) {
+            voxShowStoredPhoto(sid, s_vox_pending_title);
+          } else {
+            const char* err = nullptr;
+            if (!voxVoicePlay(sid, &err)) showAlert(TR(err), 2200);
+          }
         } else if (st == VoxFetch::kUnavailable) {
           char msg[72];
           showAlert(VoxPhotos::statusText(s_vox_pending_sid, msg, sizeof msg), 2500);
