@@ -23,6 +23,7 @@ on:
       - "platformio.ini"
       - "scripts/**"
       - "*.py"
+      - ".github/workflows/fork-release.yml"
   workflow_dispatch:
 
 permissions:
