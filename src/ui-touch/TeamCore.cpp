@@ -30,7 +30,8 @@ void Core::loadSettings() {
     if (*c == '|') { *c = 0; f[k++] = c + 1; }
   if (k < 7) return;
   cfg.enabled = atoi(f[0]) != 0;
-  cfg.role = (uint8_t)(atoi(f[1]) % TeamWire::kRoles);
+  cfg.role = (uint8_t)atoi(f[1]);
+  if (cfg.role > TeamWire::kMaxRoleId) cfg.role = 0;
   cfg.color = (uint8_t)(atoi(f[2]) % TeamWire::kColors);
   cfg.status = (uint8_t)(atoi(f[3]) % TeamWire::kStatuses);
   cfg.share = atoi(f[4]) != 0;
@@ -77,6 +78,86 @@ void Core::loadMarkers() {
 void Core::begin() {
   loadSettings();
   loadMarkers();
+  loadRoles();
+}
+
+// ---- roles --------------------------------------------------------------------
+// "/teamroles": [len u8][encoded role edit] ...
+static constexpr size_t kRolesFileMax = (TeamWire::kMaxRoleId + 1) * 40;
+
+void Core::saveRoles() {
+  uint8_t* buf = (uint8_t*)malloc(kRolesFileMax);
+  if (!buf) return;
+  size_t n = 0;
+  for (int i = 0; i <= TeamWire::kMaxRoleId; i++) {
+    if (!rused_[i]) continue;
+    uint8_t one[40];
+    const size_t k = TeamWire::encode(roles_[i], one, sizeof one);
+    if (!k || n + 1 + k > kRolesFileMax) continue;
+    buf[n++] = (uint8_t)k;
+    memcpy(buf + n, one, k);
+    n += k;
+  }
+  io_->writeFile("teamroles", buf, n);
+  free(buf);
+}
+
+void Core::loadRoles() {
+  uint8_t* buf = (uint8_t*)malloc(kRolesFileMax);
+  if (!buf) return;
+  size_t n = 0;
+  if (!io_->readFile("teamroles", buf, kRolesFileMax, &n)) { free(buf); return; }
+  size_t o = 0;
+  while (o < n) {
+    const size_t k = buf[o++];
+    if (o + k > n) break;
+    TeamWire::RoleDef d;
+    if (TeamWire::parse(buf + o, k, d)) { roles_[d.role_id] = d; rused_[d.role_id] = true; }
+    o += k;
+  }
+  free(buf);
+}
+
+void Core::onRoleDef(const TeamWire::RoleDef& d) {
+  if (rused_[d.role_id] && !TeamWire::beats(d, roles_[d.role_id])) return;
+  roles_[d.role_id] = d;
+  rused_[d.role_id] = true;
+  saveRoles();
+  io_->changed();
+}
+
+const TeamWire::RoleDef* Core::roleEdit(int id) const {
+  if (id < 0 || id > TeamWire::kMaxRoleId || !rused_[id] || roles_[id].reset) return nullptr;
+  return &roles_[id];
+}
+
+bool Core::roleAvailable(int id) const {
+  return (id >= 0 && id < TeamWire::kRoles) || roleEdit(id) != nullptr;
+}
+
+void Core::roleName(int id, char* out, size_t cap) const {
+  const TeamWire::RoleDef* d = roleEdit(id);
+  if (d && d->name[0]) snprintf(out, cap, "%s", d->name);
+  else if (id >= 0 && id < TeamWire::kRoles) snprintf(out, cap, "%s", TeamWire::roleName(id));
+  else snprintf(out, cap, "Role %d", id);
+}
+
+char Core::roleLetter(int id) const {
+  const TeamWire::RoleDef* d = roleEdit(id);
+  if (d)
+    for (const char* c = d->name; *c; ++c) {
+      if (*c >= 'a' && *c <= 'z') return (char)(*c - 32);
+      if ((*c >= 'A' && *c <= 'Z') || (*c >= '0' && *c <= '9')) return *c;
+    }
+  return id < TeamWire::kRoles ? TeamWire::roleLetter(id) : '?';
+}
+
+int Core::nextRole(int id) const {
+  for (int k = 1; k <= TeamWire::kMaxRoleId + 1; k++) {
+    const int c = (id + k) % (TeamWire::kMaxRoleId + 1);
+    if (roleAvailable(c)) return c;
+  }
+  return 0;
 }
 
 // ---- sending -----------------------------------------------------------------
@@ -196,6 +277,7 @@ void Core::onPayload(const char* channel, const uint8_t* p, size_t n) {
     case TeamWire::kPosition: { TeamWire::Position x; if (TeamWire::parse(p, n, x)) onPosition(x); break; }
     case TeamWire::kAlert: { TeamWire::Alert x; if (TeamWire::parse(p, n, x)) onAlert(x); break; }
     case TeamWire::kMarker: { TeamWire::Marker x; if (TeamWire::parse(p, n, x)) onMarker(x); break; }
+    case TeamWire::kRole: { TeamWire::RoleDef x; if (TeamWire::parse(p, n, x)) onRoleDef(x); break; }
     default: break;   // reports: not on this radio yet
   }
 }

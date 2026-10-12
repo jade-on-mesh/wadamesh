@@ -14,6 +14,12 @@
 //            [callsignLen][callsign][noteLen][note]
 //   marker   [0x4D][key4][id u32][op u8][kind u8][lat i32][lon i32][time u32]
 //            [labelLen][label][noteLen][note][attachMode u8][sid4][packets u8][extra u16]
+//   role     [0x4C][key4][roleId u8][op u8 (1 = back to default / removed)][time u32]
+//            [icon u16 (app icon library id)][nameLen][name]
+//
+// Roles 0-8 are the defaults, 9-24 roles a team added. A position's role is the
+// high nibble; 15 and up write 15 there, set flag 0x20 and put the role id in
+// one byte after the callsign.
 //
 // Host-tested against golden bytes that the app's own test checks too
 // (test/test_team_wire.cpp here, test/team/team_wire_golden_test.dart there).
@@ -27,12 +33,15 @@
 namespace TeamWire {
 
 constexpr uint16_t kDataType = 0x5654;
-constexpr uint8_t kPosition = 0x50, kAlert = 0x53, kMarker = 0x4D, kReport = 0x52;
+constexpr uint8_t kPosition = 0x50, kAlert = 0x53, kMarker = 0x4D, kReport = 0x52, kRole = 0x4C;
 constexpr size_t kMaxPayload = 163;
 constexpr size_t kMaxCallsign = 20, kMaxLabel = 32, kMaxNote = 60, kMaxAlertNote = 80;
 
 // Enum orders are the app's; only the index goes on the air.
 constexpr int kRoles = 9;        // member lead medic navigator comms driver security observer command
+constexpr int kMaxRoleId = 24;   // 9-24: roles the team added
+constexpr int kRoleEscape = 15;
+constexpr size_t kMaxRoleName = 20;
 constexpr int kColors = 14;      // cyan white yellow orange magenta red maroon purple darkBlue blue teal green darkGreen brown
 constexpr int kStatuses = 6;     // none ok busy needHelp returning resting
 constexpr int kMarkerKinds = 10; // point lastKnown staging clue hazard landingZone medical subjectFound water searched
@@ -41,7 +50,7 @@ constexpr int kAlertTypes = 5;   // sos inContact ringTheBell geofence custom
 inline const char* roleName(int i) {
   static const char* const n[kRoles] = {"Team member", "Team lead", "Medic", "Navigator", "Comms",
                                         "Driver / vehicle", "Security", "Observer", "Command / HQ"};
-  return (i >= 0 && i < kRoles) ? n[i] : n[0];
+  return (i >= 0 && i < kRoles) ? n[i] : "Role";
 }
 inline char roleLetter(int i) {
   static const char l[kRoles] = {'M', 'L', '+', 'N', 'C', 'D', 'S', 'O', 'H'};
@@ -89,6 +98,20 @@ struct Position {
   bool from_radio = false, sos = false, relayed = false;
   char callsign[kMaxCallsign + 1] = {0};
 };
+
+struct RoleDef {
+  uint8_t key4[4] = {0};
+  uint8_t role_id = 0;
+  bool reset = false;
+  uint32_t time = 0;   // unix seconds
+  uint16_t icon = 0;   // the app's icon library id; 0 = the role's own
+  char name[kMaxRoleName + 1] = {0};
+};
+// The newer edit of a role wins; equal times go to the larger key.
+inline bool beats(const RoleDef& a, const RoleDef& b) {
+  if (a.time != b.time) return a.time > b.time;
+  return memcmp(a.key4, b.key4, 4) > 0;
+}
 
 struct Alert {
   uint8_t key4[4] = {0};
@@ -170,8 +193,10 @@ inline size_t encode(const Position& x, uint8_t* out, size_t cap) {
   W w(out, cap);
   w.u8(kPosition);
   w.raw(x.key4, 4);
+  const uint32_t rid = x.role > kMaxRoleId ? 0 : x.role;
+  const bool ext = rid >= (uint32_t)kRoleEscape;
   w.u8((x.has_alt ? 0x01 : 0) | (x.has_motion ? 0x02 : 0) | (x.from_radio ? 0x04 : 0) | (x.sos ? 0x08 : 0) |
-       (x.relayed ? 0x10 : 0));
+       (x.relayed ? 0x10 : 0) | (ext ? 0x20 : 0));
   w.u32((uint32_t)deg7(x.lat));
   w.u32((uint32_t)deg7(x.lon));
   w.u16((uint16_t)(int16_t)(x.has_alt ? x.alt_m : 0));
@@ -181,9 +206,10 @@ inline size_t encode(const Position& x, uint8_t* out, size_t cap) {
   w.u8((uint32_t)(lround(h * 256.0 / 360.0) & 0xFF));
   w.u8(x.accuracy_m);
   w.u8(x.battery_pct < 0 ? 255 : (uint32_t)clampl(x.battery_pct, 0, 100));
-  w.u8(((uint32_t)(x.role & 0x0F) << 4) | (x.color & 0x0F));
+  w.u8(((ext ? (uint32_t)kRoleEscape : rid) << 4) | (x.color & 0x0F));
   w.u8(x.status);
   w.str(x.callsign, kMaxCallsign);
+  if (ext) w.u8(rid);
   return w.ok ? w.n : 0;
 }
 
@@ -210,7 +236,8 @@ inline bool parse(const uint8_t* p, size_t n, Position& x) {
   x.heading_deg = x.has_motion ? hdg * 360.0f / 256.0f : 0;
   x.battery_pct = batt == 255 ? -1 : (int)batt;
   x.role = (uint8_t)(rc >> 4);
-  if (x.role >= kRoles) x.role = 0;
+  if (x.role == kRoleEscape) x.role = (flags & 0x20) && r.has(1) ? (uint8_t)r.u8() : 0;
+  if (x.role > kMaxRoleId) x.role = 0;
   x.color = (uint8_t)(rc & 0x0F);
   if (x.color >= kColors) x.color = 0;
   x.from_radio = flags & 0x04;
@@ -302,6 +329,31 @@ inline bool parse(const uint8_t* p, size_t n, Marker& x) {
     }
   }
   return true;
+}
+
+inline size_t encode(const RoleDef& x, uint8_t* out, size_t cap) {
+  W w(out, cap);
+  w.u8(kRole);
+  w.raw(x.key4, 4);
+  w.u8(x.role_id > kMaxRoleId ? 0 : x.role_id);
+  w.u8(x.reset ? 1 : 0);
+  w.u32(x.time);
+  w.u16(x.icon);
+  w.str(x.reset ? "" : x.name, kMaxRoleName);
+  return w.ok ? w.n : 0;
+}
+
+inline bool parse(const uint8_t* p, size_t n, RoleDef& x) {
+  R r(p, n);
+  if (!r.has(14) || r.u8() != kRole) return false;
+  memcpy(x.key4, p + 1, 4);
+  r.o = 5;
+  x.role_id = (uint8_t)r.u8();
+  if (x.role_id > kMaxRoleId) return false;
+  x.reset = r.u8() & 1;
+  x.time = r.u32();
+  x.icon = (uint16_t)r.u16();
+  return r.str(x.name, sizeof x.name);
 }
 
 // ---- geometry (as the app) -----------------------------------------------------

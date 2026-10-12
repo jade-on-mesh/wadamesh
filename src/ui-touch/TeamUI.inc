@@ -113,6 +113,16 @@ static team::Core* core() {
   return s_core;
 }
 
+// The team's name for a role (a few rotating buffers, for use in one printf).
+static const char* roleStr(int id) {
+  static char b[4][TeamWire::kMaxRoleName + 4];
+  static uint8_t k = 0;
+  char* o = b[k++ & 3];
+  if (s_core) s_core->roleName(id, o, sizeof b[0]);
+  else snprintf(o, sizeof b[0], "%s", TeamWire::roleName(id));
+  return o;
+}
+
 static void toast(const char* m, int ms = 1800) { if (g_lv.task) g_lv.task->showAlert(m, ms); }
 
 static bool myFix(double* lat, double* lon) {
@@ -368,7 +378,7 @@ static void teamDrawMapOverlay(lv_obj_t* parent, double cwx, double cwy) {
     if (m->pos.sos) mapDot(parent, sx, sy, 26, 0xE53935, 0xE53935, LV_RADIUS_CIRCLE, LV_OPA_40);
     lv_obj_t* d = mapDot(parent, sx, sy, 16, TeamWire::colorRgb(m->pos.color), 0x101418, LV_RADIUS_CIRCLE,
                          fr == team::Fresh::Live ? LV_OPA_COVER : LV_OPA_50);
-    char letter[2] = {TeamWire::roleLetter(m->pos.role), 0};
+    char letter[2] = {c->roleLetter(m->pos.role), 0};
     lv_obj_t* l = lv_label_create(d);
     lv_label_set_text(l, letter);
     lv_obj_set_style_text_font(l, &g_font_12, LV_PART_MAIN);
@@ -451,7 +461,7 @@ static void memberSheet(int i) {
   const uint32_t ago = (millis() - m->heard_ms) / 60000;
   char batt[12] = "";
   if (m->pos.battery_pct >= 0) snprintf(batt, sizeof batt, " · %d%%", m->pos.battery_pct);
-  snprintf(body, sizeof body, "%s%s%s%s\n%s · heard %lu min ago%s", TeamWire::roleName(m->pos.role),
+  snprintf(body, sizeof body, "%s%s%s%s\n%s · heard %lu min ago%s", roleStr(m->pos.role),
            m->pos.status ? " · " : "", TeamWire::statusName(m->pos.status), m->pos.sos ? " · SOS" : "", rb,
            (unsigned long)ago, batt);
   lv_obj_t* card = sheetOpen(m->pos.callsign[0] ? m->pos.callsign : "?", body);
@@ -687,7 +697,7 @@ static void buildTeam(lv_obj_t* b) {
     const uint32_t ago = (millis() - m->heard_ms) / 60000;
     char batt[12] = "";
     if (m->pos.battery_pct >= 0) snprintf(batt, sizeof batt, " · %d%%", m->pos.battery_pct);
-    snprintf(line, sizeof line, "%s%s%s · %lu min%s%s", TeamWire::roleName(m->pos.role), m->pos.status ? " · " : "",
+    snprintf(line, sizeof line, "%s%s%s · %lu min%s%s", roleStr(m->pos.role), m->pos.status ? " · " : "",
              TeamWire::statusName(m->pos.status), (unsigned long)ago, batt,
              fr == team::Fresh::Live ? "" : fr == team::Fresh::Stale ? " · stale" : " · lost");
     lbl(card, line, &g_font_12, COLOR_SUB);
@@ -733,7 +743,7 @@ static void setupCycle(lv_event_t* e) {
   team::Core* c = s_core;
   switch ((int)(intptr_t)lv_event_get_user_data(e)) {
     case 0: c->cfg.enabled = !c->cfg.enabled; break;
-    case 1: c->cfg.role = (uint8_t)((c->cfg.role + 1) % TeamWire::kRoles); break;
+    case 1: c->cfg.role = (uint8_t)c->nextRole(c->cfg.role); break;
     case 2: c->cfg.color = (uint8_t)((c->cfg.color + 1) % TeamWire::kColors); break;
     case 3: c->cfg.status = (uint8_t)((c->cfg.status + 1) % TeamWire::kStatuses); break;
     case 4: c->cfg.share = !c->cfg.share; break;
@@ -811,7 +821,7 @@ static void buildSetup(lv_obj_t* b) {
     useChainedFont(l);
     lv_obj_align(l, LV_ALIGN_LEFT_MID, 0, 0);
   }
-  snprintf(line, sizeof line, "%s: %s", TR("Role"), TeamWire::roleName(c->cfg.role));
+  snprintf(line, sizeof line, "%s: %s", TR("Role"), roleStr(c->cfg.role));
   btn(line, 1);
   snprintf(line, sizeof line, "%s: %s", TR("Colour"), TeamWire::colorName(c->cfg.color));
   btn(line, 2, TeamWire::colorRgb(c->cfg.color) == 0xFFFFFF ? 0 : TeamWire::colorRgb(c->cfg.color));

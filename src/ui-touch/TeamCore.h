@@ -109,6 +109,13 @@ class Core {
   void stopHound() { hound_ = 0; io_->changed(); }
   bool hound(double* lat, double* lon, char* label, size_t cap);
 
+  // Roles: the team's names for the defaults and its added roles (edited in
+  // the app; the radio follows them).
+  void roleName(int id, char* out, size_t cap) const;
+  char roleLetter(int id) const;
+  bool roleAvailable(int id) const;
+  int nextRole(int id) const;   // the next role to offer in Setup
+
   uint32_t lastBeaconMs() const { return last_beacon_ms_; }
   bool everBeaconed() const { return beaconed_; }
 
@@ -118,6 +125,9 @@ class Core {
   AlertRec alerts_[kMaxAlerts];
   TeamWire::Marker markers_[kMaxMarkers];
   bool mused_[kMaxMarkers] = {false};
+
+  TeamWire::RoleDef roles_[TeamWire::kMaxRoleId + 1];
+  bool rused_[TeamWire::kMaxRoleId + 1] = {false};
 
   bool force_beacon_ = false;
   bool beaconed_ = false;
@@ -141,6 +151,10 @@ class Core {
   void onPosition(const TeamWire::Position& p);
   void onAlert(const TeamWire::Alert& a);
   void onMarker(const TeamWire::Marker& m);
+  void onRoleDef(const TeamWire::RoleDef& d);
+  void saveRoles();
+  void loadRoles();
+  const TeamWire::RoleDef* roleEdit(int id) const;
   void saveMarkers();
   void loadMarkers();
   void loadSettings();

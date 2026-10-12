@@ -279,9 +279,86 @@ static void core() {
   CHECK(!c.hound(&la, &lo, lbl, sizeof lbl));
 }
 
+// Role names and added roles (the app's test checks the same bytes).
+static const char* kR1 = "4ca1b2c3d4020068ec0be0007b07454d5420e29c9a";
+static const char* kR2 = "4c0a0b0c0d110168ec0c44000000";
+static const char* kP3 = "5001020304201b224618b6e10d380000000000fff300064b392d52657814";
+
+static void roles() {
+  uint8_t buf[TeamWire::kMaxPayload];
+  TeamWire::RoleDef r1;
+  key(r1.key4, 0xA1B2C3D4);
+  r1.role_id = 2; r1.time = 1760300000; r1.icon = 123;
+  snprintf(r1.name, sizeof r1.name, "EMT \xE2\x9C\x9A");
+  size_t n = TeamWire::encode(r1, buf, sizeof buf);
+  printf("R1 %s\n", hex(buf, n).c_str());
+  CHECK(hex(buf, n) == kR1);
+  TeamWire::RoleDef r2;
+  key(r2.key4, 0x0A0B0C0D);
+  r2.role_id = 17; r2.reset = true; r2.time = 1760300100;
+  snprintf(r2.name, sizeof r2.name, "ignored");
+  n = TeamWire::encode(r2, buf, sizeof buf);
+  printf("R2 %s\n", hex(buf, n).c_str());
+  CHECK(hex(buf, n) == kR2);
+  CHECK(!TeamWire::beats(r1, r2));
+
+  TeamWire::Position p3;
+  key(p3.key4, 0x01020304);
+  p3.lat = 45.5231; p3.lon = -122.6765; p3.role = 20; p3.color = 3;
+  snprintf(p3.callsign, sizeof p3.callsign, "K9-Rex");
+  n = TeamWire::encode(p3, buf, sizeof buf);
+  printf("P3 %s\n", hex(buf, n).c_str());
+  CHECK(hex(buf, n) == kP3);
+  TeamWire::Position q;
+  auto v = unhex(kP3);
+  CHECK(TeamWire::parse(v.data(), v.size(), q) && q.role == 20 && !strcmp(q.callsign, "K9-Rex"));
+
+  // The core follows the team's edits: newest wins, resets stick, files keep them.
+  TestIo io;
+  team::Core c(&io);
+  c.begin();
+  c.cfg.enabled = true;
+  snprintf(c.cfg.channel, sizeof c.cfg.channel, "ops");
+  char nm[32];
+  c.roleName(2, nm, sizeof nm);
+  CHECK(!strcmp(nm, "Medic") && c.roleLetter(2) == '+');
+  v = unhex(kR1);
+  c.onPayload("ops", v.data(), v.size());
+  c.roleName(2, nm, sizeof nm);
+  CHECK(!strcmp(nm, "EMT \xE2\x9C\x9A") && c.roleLetter(2) == 'E');
+  TeamWire::RoleDef dog;
+  key(dog.key4, 0xA1B2C3D4);
+  dog.role_id = 20; dog.time = 1760300050;
+  snprintf(dog.name, sizeof dog.name, "Search dog");
+  n = TeamWire::encode(dog, buf, sizeof buf);
+  c.onPayload("ops", buf, n);
+  CHECK(c.roleAvailable(20) && !c.roleAvailable(19) && c.nextRole(8) == 20 && c.nextRole(20) == 0);
+  c.roleName(20, nm, sizeof nm);
+  CHECK(!strcmp(nm, "Search dog"));
+  TeamWire::RoleDef older = dog;
+  older.time -= 10;
+  snprintf(older.name, sizeof older.name, "Old name");
+  n = TeamWire::encode(older, buf, sizeof buf);
+  c.onPayload("ops", buf, n);
+  c.roleName(20, nm, sizeof nm);
+  CHECK(!strcmp(nm, "Search dog"));   // an older edit loses
+  team::Core c2(&io);
+  c2.begin();
+  c2.roleName(20, nm, sizeof nm);
+  CHECK(!strcmp(nm, "Search dog"));
+  TeamWire::RoleDef gone = dog;
+  gone.time += 5; gone.reset = true;
+  n = TeamWire::encode(gone, buf, sizeof buf);
+  c.onPayload("ops", buf, n);
+  CHECK(!c.roleAvailable(20) && c.nextRole(8) == 0);
+  c.roleName(20, nm, sizeof nm);
+  CHECK(!strcmp(nm, "Role 20"));
+}
+
 int main() {
   golden();
   core();
+  roles();
   if (g_fail) { printf("%d check(s) failed\n", g_fail); return 1; }
   printf("all team checks passed\n");
   return 0;
