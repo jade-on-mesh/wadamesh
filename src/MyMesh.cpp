@@ -3494,6 +3494,7 @@ void MyMesh::onChannelMessageRecv(const mesh::GroupChannel &channel, mesh::Packe
 #endif
 #ifdef DISPLAY_CLASS
   if (resolved_idx >= 0) VoxPhotos::onChannelText(text, resolved_idx);
+  if (resolved_idx >= 0) teamOnChannelText(resolved_idx, text, timestamp);   // watched channels on the map
   // One-time-pad posts on a channel we hold a pad for go to OTP Messenger only.
   if (resolved_idx >= 0 && OtpMessenger::onChannelText(text, resolved_idx)) return;
   // Get the channel name from the channel index

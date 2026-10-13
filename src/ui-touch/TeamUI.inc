@@ -7,6 +7,7 @@
 #include <new>
 
 #include "TeamCore.h"
+#include "WatchFeed.h"
 
 #if defined(HAS_GPS_MOTION)
 extern bool wadaGpsMotion(float* speed_kmh, float* course_deg);   // board target.cpp
@@ -111,6 +112,37 @@ static team::Core* core() {
     s_core->begin();
   }
   return s_core;
+}
+
+// Watched channels: reports with a position on chosen channels (IceBot, a
+// drone detector...) go on the map for a while. Independent of team mode.
+static watchfeed::Store* s_watch = nullptr;
+
+static watchfeed::Store* watch() {
+  if (!s_watch) {
+    void* m = heap_caps_malloc(sizeof(watchfeed::Store), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!m) return nullptr;
+    s_watch = new (m) watchfeed::Store();
+    char buf[300];
+    size_t n = 0;
+    if (s_io.readFile("teamwatch", (uint8_t*)buf, sizeof buf - 1, &n)) {
+      buf[n] = 0;
+      s_watch->load(buf);
+    }
+  }
+  return s_watch;
+}
+
+static void watchSave() {
+  if (!s_watch) return;
+  char buf[300];
+  const size_t n = s_watch->save(buf, sizeof buf);
+  s_io.writeFile("teamwatch", (const uint8_t*)buf, n);
+}
+
+static const char* channelName(int idx) {
+  static ChannelDetails cd;
+  return (idx >= 0 && the_mesh.getChannel(idx, cd) && cd.name[0]) ? cd.name : "?";
 }
 
 // The team's name for a role (a few rotating buffers, for use in one printf).
@@ -299,10 +331,10 @@ static void houndRefresh() {
 }
 
 // ---- map overlay ---------------------------------------------------------------------------
-constexpr int kMapObjs = 112;
+constexpr int kMapObjs = 176;
 static lv_obj_t* s_map_objs[kMapObjs];
 static int s_map_obj_n = 0;
-struct Hit { int16_t x, y; uint8_t kind; uint8_t idx; };   // kind 0 member, 1 pin
+struct Hit { int16_t x, y; uint8_t kind; uint8_t idx; };   // kind 0 member, 1 pin, 2 watched report
 static Hit s_hits[kMapObjs];
 static int s_hit_n = 0;
 
@@ -357,9 +389,37 @@ static bool toScreen(double lat, double lon, double cwx, double cwy, int* sx, in
 static void teamDrawMapOverlay(lv_obj_t* parent, double cwx, double cwy) {
   using namespace teamui;
   mapFree();
+  int sx, sy;
+  // Watched reports underneath everything: a dot in the report's colour, a
+  // drone as an orange square with its label, its operator as a small grey dot.
+  if (watchfeed::Store* w = s_watch) {
+    const uint32_t now = millis();
+    for (int i = 0; i < watchfeed::kMaxItems; i++) {
+      const watchfeed::Item& it = w->items[i];
+      if (!w->live(it, now)) continue;
+      const bool drone = it.r.track[0] != 0;
+      if (drone && it.r.has2 && toScreen(it.r.lat2, it.r.lon2, cwx, cwy, &sx, &sy)) {
+        mapDot(parent, sx, sy, 10, 0x9AA0A6, 0x101418, LV_RADIUS_CIRCLE, LV_OPA_COVER);
+        char op[24];
+        snprintf(op, sizeof op, "%s %.8s", it.r.label2[0] ? it.r.label2 : "Op", it.r.title + 6);
+        if (s_map_zoom >= 12) mapLabel(parent, sx, sy, op, 0xC8CCD0);
+        if (s_hit_n < kMapObjs) s_hits[s_hit_n++] = {(int16_t)sx, (int16_t)sy, 2, (uint8_t)i};
+      }
+      if (!toScreen(it.r.lat, it.r.lon, cwx, cwy, &sx, &sy)) continue;
+      if (drone) {
+        mapDot(parent, sx, sy, 14, 0xFF9800, 0x101418, 3, LV_OPA_COVER);
+        char lbl[64];
+        watchfeed::droneLabel(it.r, it.has_course, it.course, lbl, sizeof lbl);
+        mapLabel(parent, sx, sy, lbl, 0xFFCC80);
+      } else {
+        mapDot(parent, sx, sy, 12, watchfeed::levelRgb(it.r.level), 0xFFFFFF, LV_RADIUS_CIRCLE, LV_OPA_COVER);
+        if (it.r.title[0] && s_map_zoom >= 13) mapLabel(parent, sx, sy, it.r.title, 0xFFFFFF);
+      }
+      if (s_hit_n < kMapObjs) s_hits[s_hit_n++] = {(int16_t)sx, (int16_t)sy, 2, (uint8_t)i};
+    }
+  }
   team::Core* c = s_core;
   if (!c || !c->cfg.enabled) return;
-  int sx, sy;
   for (int i = 0; i < team::kMaxMarkers; i++) {
     const TeamWire::Marker* m = c->marker(i);
     if (!m || !toScreen(m->lat, m->lon, cwx, cwy, &sx, &sy)) continue;
@@ -511,6 +571,46 @@ static void pinSheet(int i) {
   sheetBtn(card, TR("Close"), [](lv_event_t*) { sheetClose(); });
 }
 
+static void watchSheet(int i) {
+  watchfeed::Store* w = s_watch;
+  if (!w || i < 0 || i >= watchfeed::kMaxItems || !w->items[i].used) return;
+  const watchfeed::Item& it = w->items[i];
+  s_sel_kind = 2;
+  s_sel_idx = i;
+  char title[64], body[260], rb[40], op[48] = "";
+  if (it.r.track[0]) watchfeed::droneLabel(it.r, it.has_course, it.course, title, sizeof title);
+  else snprintf(title, sizeof title, "%s", it.r.title[0] ? it.r.title : channelName(it.channel));
+  rangeTo(it.r.lat, it.r.lon, rb, sizeof rb);
+  if (it.r.has2) {
+    char r2[40];
+    rangeTo(it.r.lat2, it.r.lon2, r2, sizeof r2);
+    snprintf(op, sizeof op, "\n%s: %s", it.r.label2[0] ? it.r.label2 : "2nd", r2);
+  }
+  snprintf(body, sizeof body, "%s%s%s\n%s%s\n%s · %lu min ago", it.r.track[0] ? it.r.track : it.r.body,
+           it.r.track[0] && it.r.body[0] ? " · " : "", it.r.track[0] ? it.r.body : "", rb, op,
+           channelName(it.channel), (unsigned long)((millis() - it.at_ms) / 60000));
+  lv_obj_t* card = sheetOpen(title, body);
+  sheetBtn(card, TR("Hound"), [](lv_event_t*) {
+    const watchfeed::Item* x = s_watch ? &s_watch->items[s_sel_idx] : nullptr;
+    if (x && x->used && core()) s_core->houndPoint(x->r.lat, x->r.lon, x->r.title);
+    sheetClose();
+    houndRefresh();
+  }, nullptr, 0xF2A33A);
+  sheetBtn(card, TR("Map"), [](lv_event_t*) {
+    const watchfeed::Item* x = s_watch ? &s_watch->items[s_sel_idx] : nullptr;
+    sheetClose();
+    if (x && x->used) showOnMap(x->r.lat, x->r.lon);
+  });
+  if (it.r.has2) {
+    sheetBtn(card, it.r.label2[0] ? it.r.label2 : "2nd", [](lv_event_t*) {
+      const watchfeed::Item* x = s_watch ? &s_watch->items[s_sel_idx] : nullptr;
+      sheetClose();
+      if (x && x->used) showOnMap(x->r.lat2, x->r.lon2);
+    });
+  }
+  sheetBtn(card, TR("Close"), [](lv_event_t*) { sheetClose(); });
+}
+
 // Drop a pin: pick a kind, then an optional label.
 static double s_drop_lat = 0, s_drop_lon = 0;
 static int s_drop_kind = 0;
@@ -542,18 +642,20 @@ static void dropSheet(double lat, double lon) {
 // Map canvas tap: true when it hit a teammate or a pin (and handled it).
 static bool teamMapTap(lv_point_t p) {
   using namespace teamui;
-  if (!s_core || !s_core->cfg.enabled || !s_map_canvas) return false;
+  if (!s_hit_n || !s_map_canvas) return false;
   lv_area_t a;
   lv_obj_get_coords(s_map_pan_layer ? s_map_pan_layer : s_map_canvas, &a);
   const int lx = p.x - a.x1, ly = p.y - a.y1;
   int best = -1, best_d = 18 * 18;
   for (int i = 0; i < s_hit_n; i++) {
     const int dx = s_hits[i].x - lx, dy = s_hits[i].y - ly, d = dx * dx + dy * dy;
-    if (d <= best_d && (best < 0 || s_hits[i].kind == 0 || s_hits[best].kind == 1)) { best = i; best_d = d; }
+    // people over pins over watched reports
+    if (d <= best_d && (best < 0 || s_hits[i].kind <= s_hits[best].kind)) { best = i; best_d = d; }
   }
   if (best < 0) return false;
   if (s_hits[best].kind == 0) memberSheet(s_hits[best].idx);
-  else pinSheet(s_hits[best].idx);
+  else if (s_hits[best].kind == 1) pinSheet(s_hits[best].idx);
+  else watchSheet(s_hits[best].idx);
   return true;
 }
 
@@ -578,11 +680,32 @@ void teamOnChannelData(int idx, const uint8_t* data, size_t len) {
   c->onPayload(cd.name, data, len);
 }
 
+// Called by MyMesh for every channel text message: a report with a position on
+// a watched channel goes on the map.
+void teamOnChannelText(int idx, const char* text, uint32_t sent) {
+  using namespace teamui;
+  if (idx < 0 || !text) return;
+  watchfeed::Store* w = watch();
+  ChannelDetails cd;
+  if (!w || !w->watchedCount() || !the_mesh.getChannel(idx, cd) || !w->isWatched(cd.name)) return;
+  watchfeed::Report r;
+  if (!watchfeed::parse(watchfeed::messageText(text, nullptr, 0), r)) return;
+  // When it happened: the sender's time if both clocks are plausible (a
+  // report that waited in the mesh is older), else now.
+  uint32_t at = millis();
+  const uint32_t now_epoch = s_io.epoch();
+  if (now_epoch && sent > 1700000000UL && sent < now_epoch) {
+    const uint32_t age_ms = (now_epoch - sent) > 4000000UL ? 4000000000UL : (now_epoch - sent) * 1000UL;
+    at = age_ms < at ? at - age_ms : 0;
+  }
+  if (w->add(r, (uint8_t)idx, at)) s_io.changed();
+}
+
 namespace teamui {
 // ---- Team page ----------------------------------------------------------------------------------
 static lv_obj_t* s_root = nullptr;
 static lv_obj_t* s_body = nullptr;
-static int s_tab = 0;   // 0 team, 1 pins, 2 setup
+static int s_tab = 0;   // 0 team, 1 pins, 2 setup, 3 watch
 static lv_timer_t* s_page_timer = nullptr;
 
 static void pageBuild();
@@ -833,6 +956,94 @@ static void buildSetup(lv_obj_t* b) {
             "It is sent often while moving and every 10 minutes when still."), &g_font_12, COLOR_SUB);
 }
 
+static void buildWatch(lv_obj_t* b) {
+  watchfeed::Store* w = watch();
+  if (!w) { lbl(b, TR("Out of memory"), &g_font_12, COLOR_SUB); return; }
+  char line[160];
+  lbl(b, TR("Reports with a position on watched channels go on the map: IceBot's \xF0\x9F\x93\x8D lat,lon, "
+            "a drone detector's DRONE reports (with the operator), shared map points."), &g_font_12, COLOR_SUB);
+  {
+    char ttl[16];
+    watchfeed::ttlLabel(w->ttl, ttl, sizeof ttl);
+    lv_obj_t* x = lv_btn_create(b);
+    styleButton(x);
+    lv_obj_set_size(x, LV_PCT(100), 32);
+    lv_obj_add_event_cb(x, [](lv_event_t*) {
+      if (!s_watch) return;
+      s_watch->ttl = (uint8_t)((s_watch->ttl + 1) % watchfeed::kTtlChoices);
+      watchSave();
+      renderMapMarkers();
+      pageBuild();
+    }, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t* l = lv_label_create(x);
+    snprintf(line, sizeof line, "%s: %s", TR("On map for"), ttl);
+    lv_label_set_text(l, line);
+    useChainedFont(l);
+    lv_obj_align(l, LV_ALIGN_LEFT_MID, 0, 0);
+  }
+  lbl(b, TR("Watched channels:"), &g_font_12, COLOR_SUB);
+  lv_obj_t* row = lv_obj_create(b);
+  lv_obj_remove_style_all(row);
+  lv_obj_set_size(row, LV_PCT(100), LV_SIZE_CONTENT);
+  lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW_WRAP);
+  lv_obj_set_style_pad_column(row, 6, LV_PART_MAIN);
+  lv_obj_set_style_pad_row(row, 6, LV_PART_MAIN);
+  for (int i = 0; i < MAX_GROUP_CHANNELS; i++) {
+    ChannelDetails cd;
+    if (!the_mesh.getChannel(i, cd) || !cd.name[0]) continue;
+    lv_obj_t* x = lv_btn_create(row);
+    styleButton(x);
+    lv_obj_set_size(x, LV_SIZE_CONTENT, 30);
+    lv_obj_set_style_pad_hor(x, 10, LV_PART_MAIN);
+    if (w->isWatched(cd.name)) lv_obj_set_style_bg_color(x, lv_color_hex(0x0E7C86), LV_PART_MAIN);
+    lv_obj_add_event_cb(x, [](lv_event_t* e) {
+      ChannelDetails d;
+      if (!s_watch || !the_mesh.getChannel((int)(intptr_t)lv_event_get_user_data(e), d)) return;
+      if (!s_watch->setWatched(d.name, !s_watch->isWatched(d.name))) {
+        toast(TR("Watching 8 channels already"));
+        return;
+      }
+      watchSave();
+      pageBuild();
+    }, LV_EVENT_CLICKED, (void*)(intptr_t)i);
+    lv_obj_t* l = lv_label_create(x);
+    lv_label_set_text(l, cd.name);
+    useChainedFont(l);
+    lv_obj_center(l);
+  }
+  // On the map now, newest first.
+  const uint32_t now = millis();
+  int order[watchfeed::kMaxItems], n = 0;
+  for (int i = 0; i < watchfeed::kMaxItems; i++)
+    if (w->live(w->items[i], now)) order[n++] = i;
+  for (int i = 1; i < n; i++)
+    for (int j = i; j > 0 && (now - w->items[order[j]].at_ms) < (now - w->items[order[j - 1]].at_ms); j--) {
+      const int t = order[j]; order[j] = order[j - 1]; order[j - 1] = t;
+    }
+  if (!n) {
+    lbl(b, w->watchedCount() ? TR("Nothing on the map yet. Reports appear as they arrive.")
+                             : TR("Pick the channels to watch."), &g_font_12, COLOR_SUB);
+    return;
+  }
+  for (int k = 0; k < n; k++) {
+    const watchfeed::Item& it = w->items[order[k]];
+    lv_obj_t* card = rowCard(b, [](lv_event_t* e) { watchSheet((int)(intptr_t)lv_event_get_user_data(e)); },
+                             (void*)(intptr_t)order[k]);
+    const uint32_t col = it.r.track[0] ? 0xFF9800 : watchfeed::levelRgb(it.r.level);
+    lv_obj_set_style_border_color(card, lv_color_hex(col), LV_PART_MAIN);
+    lv_obj_set_style_border_width(card, 2, LV_PART_MAIN);
+    char head[64], rb[40];
+    if (it.r.track[0]) watchfeed::droneLabel(it.r, it.has_course, it.course, head, sizeof head);
+    else snprintf(head, sizeof head, "%s", it.r.title);
+    rangeTo(it.r.lat, it.r.lon, rb, sizeof rb);
+    snprintf(line, sizeof line, "%s  %s", head, rb);
+    lbl(card, line, &g_font_14, COLOR_TEXT);
+    snprintf(line, sizeof line, "%s · %lu min%s%s", channelName(it.channel), (unsigned long)((now - it.at_ms) / 60000),
+             !it.r.track[0] && it.r.body[0] ? " · " : "", it.r.track[0] ? "" : it.r.body);
+    lbl(card, line, &g_font_12, COLOR_SUB);
+  }
+}
+
 static void pageClose();
 static void pageBack() { pageClose(); }
 
@@ -852,8 +1063,10 @@ static void pageBuild() {
   lv_obj_set_size(tabs, LV_PCT(100), LV_SIZE_CONTENT);
   lv_obj_set_flex_flow(tabs, LV_FLEX_FLOW_ROW);
   lv_obj_set_style_pad_column(tabs, 6, LV_PART_MAIN);
-  static const char* const names[3] = {"Team", "Pins", "Setup"};
-  for (int i = 0; i < 3; i++) {
+  static const char* const names[4] = {"Team", "Pins", "Watch", "Setup"};
+  static const int ids[4] = {0, 1, 3, 2};
+  for (int k = 0; k < 4; k++) {
+    const int i = ids[k];
     lv_obj_t* x = lv_btn_create(tabs);
     styleButton(x);
     lv_obj_set_size(x, LV_SIZE_CONTENT, 28);
@@ -862,12 +1075,13 @@ static void pageBuild() {
     lv_obj_add_event_cb(x, [](lv_event_t* e) { s_tab = (int)(intptr_t)lv_event_get_user_data(e); pageBuild(); },
                         LV_EVENT_CLICKED, (void*)(intptr_t)i);
     lv_obj_t* l = lv_label_create(x);
-    lv_label_set_text(l, TR(names[i]));
+    lv_label_set_text(l, TR(names[k]));
     useChainedFont(l);
     lv_obj_center(l);
   }
   if (s_tab == 0) buildTeam(s_body);
   else if (s_tab == 1) buildPins(s_body);
+  else if (s_tab == 3) buildWatch(s_body);
   else buildSetup(s_body);
 }
 
@@ -915,6 +1129,14 @@ static void loopTick() {
   if (s_alarm && now - s_alarm_beep_ms >= 4000) {
     s_alarm_beep_ms = now;
     if (g_lv.task && !g_lv.task->isBuzzerQuiet()) uiPlaySlot(TOUCH_SND_MEN);
+  }
+  // Watched reports leave the map as they pass the time limit.
+  static uint32_t last_watch = 0;
+  static int watch_live = 0;
+  if (s_watch && now - last_watch >= 30000) {
+    last_watch = now;
+    const int live = s_watch->liveCount(now);
+    if (live != watch_live) { watch_live = live; Io::s_version++; }
   }
   static uint32_t last_hound = 0;
   if (now - last_hound >= 1000) { last_hound = now; houndRefresh(); }

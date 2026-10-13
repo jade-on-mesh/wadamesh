@@ -46,6 +46,8 @@ jobs:
           g++ -std=c++17 -Wall -I src -I test test/test_fork_update.cpp /tmp/ed/*.o -o /tmp/fork_update_test && /tmp/fork_update_test
       - name: Team wire golden bytes and core rules (shared with Open TAK)
         run: g++ -std=c++17 -Wall -I src test/test_team_wire.cpp src/ui-touch/TeamCore.cpp -o /tmp/team_test && /tmp/team_test
+      - name: Watched channels on the map (host test)
+        run: g++ -std=c++17 -Wall -I src test/test_watch_feed.cpp -o /tmp/watch_test && /tmp/watch_test
 
   firmware:
     runs-on: ubuntu-latest
