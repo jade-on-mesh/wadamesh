@@ -20,13 +20,14 @@ namespace otpui {
 
 enum class Screen : uint8_t { List, Pick, Chat, Pad, Settings, Lock, Import };
 
-// The six themes of OTP_3_RC1.lua, same names and colours.
+// The six themes of OTP_3_RC1.lua, same names and colours (Cascadia kept to its
+// blues, greens and white here).
 struct Theme { const char* name; uint32_t encrypt, decrypt, ciphertext, plaintext, newpad, channel, ok, keyphrase, padinfo, ready; };
 static const Theme kThemes[6] = {
   {"Default",   0xFF6B4A, 0x2DD4BF, 0xF97316, 0x38BDF8, 0xA78BFA, 0xEC4899, 0x4ADE80, 0xFBBF24, 0x22D3EE, 0x94A3B8},
   {"Cyberpunk", 0xFF1493, 0x39FF14, 0xBC13FE, 0x00F5FF, 0xFF00FF, 0xF5FF00, 0x39FF14, 0xFFAA00, 0x00FFEF, 0x6B7280},
   {"Trans",     0xF5A9B8, 0x5BCEFA, 0xF5A9B8, 0xFFFFFF, 0xA6E8FF, 0xFF69B4, 0x5BCEFA, 0xF5A9B8, 0x38BDF8, 0xE5E7EB},
-  {"Cascadia",  0x60A5FA, 0x38BDF8, 0xA78BFA, 0xFFFFFF, 0xFBBF24, 0x15803D, 0x84CC16, 0xF472B6, 0x22C55E, 0xCBD5E1},
+  {"Cascadia",  0x60A5FA, 0x38BDF8, 0x2DD4BF, 0xFFFFFF, 0x4ADE80, 0x15803D, 0x84CC16, 0x93C5FD, 0x22C55E, 0xDBEAFE},   // blues, greens, white
   {"B&W",       0xFFFFFF, 0xE6E6E6, 0xCCCCCC, 0xFFFFFF, 0xB3B3B3, 0xD9D9D9, 0xFFFFFF, 0x999999, 0x808080, 0x4D4D4D},
   {"Acid",      0xFF4500, 0xFFA500, 0x2F4F4F, 0xFFFFFF, 0x4682B4, 0xFF0000, 0xFFD700, 0xFFDAB9, 0x8B0000, 0x696969},
 };
@@ -97,6 +98,46 @@ static uint32_t ink(uint32_t c) {
   uint32_t out = c;
   for (int t = 51; t <= 255 && contrast(out, COLOR_BG) < 3.0f; t += 51) out = rgbMix(c, COLOR_TEXT, (uint8_t)t);
   return out;
+}
+
+// The screens are built with the firmware's own kit (cards, rows, buttons) in its
+// greys; this pass then gives them the OTP theme: cards and buttons tinted with
+// its colour, primary buttons and switches in it, bubbles in its send and receive
+// colours. It recolours by matching the kit's colours, so anything already given
+// a meaning (danger red, a status colour) is left alone.
+static bool isColor(lv_color_t c, uint32_t hex) { return c.full == lv_color_hex(hex).full; }
+static void bgPair(lv_obj_t* o, uint32_t fill, uint32_t pressed) {
+  lv_obj_set_style_bg_color(o, lv_color_hex(fill), LV_PART_MAIN);
+  lv_obj_set_style_bg_color(o, lv_color_hex(pressed), LV_PART_MAIN | LV_STATE_PRESSED);
+  lv_obj_set_style_bg_grad_dir(o, LV_GRAD_DIR_NONE, LV_PART_MAIN);
+}
+static void themeTree(lv_obj_t* o) {
+  if (!o || plainLook()) return;
+  const Theme& t = th();
+  const uint32_t a = accent();
+  if (lv_obj_get_style_bg_opa(o, LV_PART_MAIN) > LV_OPA_50) {
+    const lv_color_t bg = lv_obj_get_style_bg_color(o, LV_PART_MAIN);
+    if (isColor(bg, COLOR_CONTROL)) {            // buttons, fields
+      bgPair(o, rgbMix(COLOR_CONTROL, a, 72), rgbMix(COLOR_CONTROL_PRESSED, a, 120));
+      lv_obj_set_style_border_color(o, lv_color_hex(rgbMix(COLOR_BORDER, a, 150)), LV_PART_MAIN);
+    } else if (isColor(bg, COLOR_PANEL)) {       // cards
+      lv_obj_set_style_bg_color(o, lv_color_hex(rgbMix(COLOR_PANEL, a, 26)), LV_PART_MAIN);
+      lv_obj_set_style_border_color(o, lv_color_hex(rgbMix(COLOR_BORDER, a, 110)), LV_PART_MAIN);
+    } else if (isColor(bg, COLOR_GLOW)) {        // primary buttons
+      bgPair(o, a, darken(a, 0.8f));
+      lv_obj_set_style_text_color(o, lv_color_hex(contrastOf(a)), LV_PART_MAIN);
+    } else if (isColor(bg, COLOR_CHAT_SENT_BG)) {
+      lv_obj_set_style_bg_color(o, lv_color_hex(rgbMix(COLOR_BG, t.encrypt, 80)), LV_PART_MAIN);
+    } else if (isColor(bg, COLOR_CHAT_RECV_BG)) {
+      lv_obj_set_style_bg_color(o, lv_color_hex(rgbMix(COLOR_BG, t.decrypt, 60)), LV_PART_MAIN);
+    }
+  }
+  if (isColor(lv_obj_get_style_text_color(o, LV_PART_MAIN), COLOR_GLOW))
+    lv_obj_set_style_text_color(o, lv_color_hex(ink(a)), LV_PART_MAIN);
+  if (lv_obj_check_type(o, &lv_switch_class))
+    lv_obj_set_style_bg_color(o, lv_color_hex(a), LV_PART_INDICATOR | LV_STATE_CHECKED);
+  const uint32_t n = lv_obj_get_child_cnt(o);
+  for (uint32_t i = 0; i < n; i++) themeTree(lv_obj_get_child(o, (int32_t)i));
 }
 
 // ---- small widget helpers --------------------------------------------------------------------
@@ -381,6 +422,7 @@ static void prompt(const char* title, const char* hint, bool secret, uint32_t ma
                         i ? COLOR_ON_GLOW : COLOR_TEXT);
     lv_obj_center(l);
   }
+  themeTree(s_prompt);
   if (g_lv.keyboard) kbMirrorBind(s_prompt_ta);
   lv_group_t* g = lv_group_get_default();
   if (g) lv_group_focus_obj(s_prompt_ta);
@@ -921,6 +963,7 @@ static void buildBubbles(bool keep_scroll) {
     lv_label_set_recolor(cl, true);
     lv_obj_set_style_pad_hor(cl, 2, LV_PART_MAIN);
   }
+  themeTree(s_list);
   lv_obj_update_layout(s_list);
   if (keep_scroll && old_bottom > 4) lv_obj_scroll_to_y(s_list, old_y, LV_ANIM_OFF);
   else lv_obj_scroll_to_y(s_list, LV_COORD_MAX, LV_ANIM_OFF);
@@ -1726,6 +1769,7 @@ static void show(Screen s) {
     case Screen::Import: buildImport(); break;
     case Screen::Settings: buildSettings(); break;
   }
+  themeTree(s_body);
   s_seen = OtpMessenger::version();
 }
 
@@ -1747,7 +1791,7 @@ static void timerCb(lv_timer_t*) {
   if (v != s_seen) {
     s_seen = v;
     if (s_screen == Screen::Chat) { refreshInfo(); refreshCounter(); buildBubbles(true); }
-    else if (s_screen == Screen::List) buildList();
+    else if (s_screen == Screen::List) { buildList(); themeTree(s_body); }
   } else if (s_screen == Screen::Chat) {
     refreshInfo();   // signal grade, badge expiry
   }
