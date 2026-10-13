@@ -90,6 +90,17 @@ jobs:
           grep -E "error:|undefined reference|overflowed|greater than|too big" build.log | head -30 \
             | while IFS= read -r l; do echo "::error::${l}"; done
           tail -12 build.log | while IFS= read -r l; do echo "::error title=build log tail::${l}"; done
+      - name: Where the flash goes (largest objects and symbols)
+        if: always()
+        shell: bash
+        run: |
+          B=.pio/build/${{ matrix.env }}
+          T=~/.platformio/packages/toolchain-xtensa-esp32s3/bin/xtensa-esp32s3-elf
+          [ -f $B/firmware.elf ] || exit 0
+          objs=$(find $B -name '*.o' | xargs $T-size 2>/dev/null | awk 'NR>1 && $1+$2>0 {printf "%d %s\n", $1+$2, $6}' | sort -rn | head -45 | sed "s|$B/||")
+          echo "::notice title=largest objects (text+data)::$(printf '%s' "$objs" | sed ':a;N;$!ba;s/\n/%0A/g')"
+          syms=$($T-nm -S --size-sort -C $B/firmware.elf | grep -iE ' [tTrRdD] ' | tail -45 | awk '{printf "%d %s\n", strtonum("0x"$2), substr($0, index($0,$4))}' | sort -rn | cut -c1-110)
+          echo "::notice title=largest symbols::$(printf '%s' "$syms" | sed ':a;N;$!ba;s/\n/%0A/g')"
       - name: Firmware size
         run: |
           ls -la .pio/build/${{ matrix.env }}/firmware.bin
