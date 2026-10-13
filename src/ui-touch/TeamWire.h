@@ -17,7 +17,7 @@
 //   role     [0x4C][key4][roleId u8][op u8 (1 = back to default / removed)][time u32]
 //            [icon u16 (app icon library id)][nameLen][name]
 //
-// Roles 0-8 are the defaults, 9-24 roles a team added. A position's role is the
+// Roles 0-9 are the defaults, 10-24 roles a team added. A position's role is the
 // high nibble; 15 and up write 15 there, set flag 0x20 and put the role id in
 // one byte after the callsign.
 //
@@ -38,8 +38,8 @@ constexpr size_t kMaxPayload = 163;
 constexpr size_t kMaxCallsign = 20, kMaxLabel = 32, kMaxNote = 60, kMaxAlertNote = 80;
 
 // Enum orders are the app's; only the index goes on the air.
-constexpr int kRoles = 9;        // member lead medic navigator comms driver security observer command
-constexpr int kMaxRoleId = 24;   // 9-24: roles the team added
+constexpr int kRoles = 10;       // member lead medic navigator comms driver security observer command press
+constexpr int kMaxRoleId = 24;   // 10-24: roles the team added
 constexpr int kRoleEscape = 15;
 constexpr size_t kMaxRoleName = 20;
 constexpr int kColors = 14;      // cyan white yellow orange magenta red maroon purple darkBlue blue teal green darkGreen brown
@@ -49,11 +49,11 @@ constexpr int kAlertTypes = 5;   // sos inContact ringTheBell geofence custom
 
 inline const char* roleName(int i) {
   static const char* const n[kRoles] = {"Team member", "Team lead", "Medic", "Navigator", "Comms",
-                                        "Driver / vehicle", "Security", "Observer", "Command / HQ"};
+                                        "Driver / vehicle", "Security", "Observer", "Command / HQ", "Press"};
   return (i >= 0 && i < kRoles) ? n[i] : "Role";
 }
 inline char roleLetter(int i) {
-  static const char l[kRoles] = {'M', 'L', '+', 'N', 'C', 'D', 'S', 'O', 'H'};
+  static const char l[kRoles] = {'M', 'L', '+', 'N', 'C', 'D', 'S', 'O', 'H', 'P'};
   return (i >= 0 && i < kRoles) ? l[i] : 'M';
 }
 inline uint32_t colorRgb(int i) {
