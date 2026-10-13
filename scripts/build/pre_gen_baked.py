@@ -44,3 +44,6 @@ lua_src += [os.path.join(ROOT, "deploy", "apps", "apps.json")]
 if _stale(LUAH, [f for f in lua_src if os.path.exists(f)]):
     print("lua: an app changed, regenerating lua_builtin.h")
     subprocess.run([sys.executable, LUAG], cwd=ROOT, check=True)
+
+# Wadamesh-tak: the built-in web pages, gzipped (gen-web-pages-gz.py checks its own staleness).
+subprocess.run([sys.executable, os.path.join(HERE, "gen-web-pages-gz.py")], cwd=ROOT, check=True)

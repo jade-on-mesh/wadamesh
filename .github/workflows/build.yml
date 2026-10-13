@@ -48,6 +48,12 @@ jobs:
         run: g++ -std=c++17 -Wall -I src test/test_team_wire.cpp src/ui-touch/TeamCore.cpp -o /tmp/team_test && /tmp/team_test
       - name: Watched channels on the map (host test)
         run: g++ -std=c++17 -Wall -I src test/test_watch_feed.cpp -o /tmp/watch_test && /tmp/watch_test
+      - name: Pad QR parts (shared with Open TAK; each part checked against LVGL's QR encoder)
+        run: |
+          g++ -std=c++17 -Wall -I src test/test_pad_qr.cpp -o /tmp/pad_qr_test && /tmp/pad_qr_test
+          git clone -q --depth 1 -b v8.3.11 https://github.com/lvgl/lvgl.git /tmp/lvgl
+          gcc -c -DLV_CONF_SKIP /tmp/lvgl/src/extra/libs/qrcode/qrcodegen.c -o /tmp/qrgen.o
+          g++ -std=c++17 -Wall -I src -DQRGEN=/tmp/lvgl/src/extra/libs/qrcode test/test_pad_qr.cpp /tmp/qrgen.o -o /tmp/pad_qr_fit && /tmp/pad_qr_fit
 
   firmware:
     runs-on: ubuntu-latest
@@ -81,7 +87,37 @@ jobs:
         if: failure()
         shell: bash
         run: |
-          grep -E "error:|Error |undefined reference" build.log | head -40 | while IFS= read -r l; do echo "::error::${l}"; done
+          grep -E "error:|undefined reference|overflowed|greater than|too big" build.log | head -30 \
+            | while IFS= read -r l; do echo "::error::${l}"; done
+          tail -12 build.log | while IFS= read -r l; do echo "::error title=build log tail::${l}"; done
+      - name: Where the flash goes (largest objects and symbols, when a build fails)
+        if: failure()
+        shell: bash
+        env:
+          B: .pio/build/${{ matrix.env }}
+        run: |
+          [ -f "$B/firmware.elf" ] || exit 0
+          python3 - <<'PY'
+          import glob, os, subprocess
+          b = os.environ["B"]
+          t = os.path.expanduser("~/.platformio/packages/toolchain-xtensa-esp32s3/bin/xtensa-esp32s3-elf-")
+          objs = []
+          for o in glob.glob(b + "/**/*.o", recursive=True):
+              try:
+                  out = subprocess.run([t + "size", o], capture_output=True, text=True).stdout.split("\n")[1].split()
+                  objs.append((int(out[0]) + int(out[1]), o[len(b) + 1:]))
+              except Exception:
+                  pass
+          objs.sort(reverse=True)
+          print("::notice title=largest objects (text+data)::" + "%0A".join(f"{n} {o}" for n, o in objs[:45]))
+          syms = []
+          for l in subprocess.run([t + "nm", "-S", "--size-sort", "-C", b + "/firmware.elf"], capture_output=True, text=True).stdout.splitlines():
+              f = l.split(" ", 3)
+              if len(f) == 4 and f[2] in "tTrRdD":
+                  syms.append((int(f[1], 16), f[3][:100]))
+          syms.sort(reverse=True)
+          print("::notice title=largest symbols::" + "%0A".join(f"{n} {s}" for n, s in syms[:45]))
+          PY
       - name: Firmware size
         run: |
           ls -la .pio/build/${{ matrix.env }}/firmware.bin

@@ -8,6 +8,12 @@
 #if WADA_WEB_FILE_TRANSFER
 #include "WebFileTransfer.h"
 #include "WebFileTransferPage.h"
+#if __has_include("web_pages_gz.h")
+#include "web_pages_gz.h"   // Wadamesh-tak: the pages gzipped (scripts/build/gen-web-pages-gz.py)
+#define WS_PAGE(p) do { page = p##_GZ; page_len = sizeof(p##_GZ); } while (0)
+#else
+#define WS_PAGE(p) do { page = (const uint8_t*)p; page_len = strlen(p); } while (0)
+#endif
 #endif
 
 #ifndef WS_FRAME_DEBUG
@@ -757,14 +763,17 @@ bool WebSocketCompanionServer::doHandshake(int idx) {
       }
       // Plain HTTP GET (no WS upgrade): /files is a runtime-gated transfer page;
       // the root keeps serving terminal or mirror according to its existing mode.
-      const char* page;
+      const uint8_t* page;
+      size_t page_len;
     #if WADA_WEB_FILE_TRANSFER
-      if (strncmp(c->handshake_buf, "GET /files ", 11) == 0)
-        page = g_web_file_transfer.enabled() ? WS_HTTP_FILES_PAGE : WS_HTTP_FILES_DISABLED;
-      else
+      if (strncmp(c->handshake_buf, "GET /files ", 11) == 0) {
+        if (g_web_file_transfer.enabled()) WS_PAGE(WS_HTTP_FILES_PAGE);
+        else { page = (const uint8_t*)WS_HTTP_FILES_DISABLED; page_len = strlen(WS_HTTP_FILES_DISABLED); }
+      } else
     #endif
-        page = g_web_mirror.terminalOn() ? WS_HTML_TERMINAL_PAGE : WS_HTTP_INFO_PAGE;
-      (void)writeAllBytes(*cl, (const uint8_t*)page, strlen(page), TCP_WRITE_TIMEOUT_MS);
+      if (g_web_mirror.terminalOn()) WS_PAGE(WS_HTML_TERMINAL_PAGE);
+      else WS_PAGE(WS_HTTP_INFO_PAGE);
+      (void)writeAllBytes(*cl, page, page_len, TCP_WRITE_TIMEOUT_MS);
       c->client.stop();
       c->in_use = false;
       return false;
