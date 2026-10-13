@@ -737,7 +737,9 @@ void teamOnChannelText(int idx, const char* text, uint32_t sent) {
   ChannelDetails cd;
   if (!w || !w->watchedCount() || !the_mesh.getChannel(idx, cd) || !w->isWatched(cd.name)) return;
   watchfeed::Report r;
-  if (!watchfeed::parse(watchfeed::messageText(text, nullptr, 0), r)) return;
+  char sender[40];
+  if (!watchfeed::parse(watchfeed::messageText(text, sender, sizeof sender), r)) return;
+  if (!r.track[0] && watchfeed::isIce(cd.name, sender)) watchfeed::tagIce(r);
   // When it happened: the sender's time if both clocks are plausible (a
   // report that waited in the mesh is older), else now.
   uint32_t at = millis();
