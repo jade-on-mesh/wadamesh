@@ -13,6 +13,8 @@
 // send button, the pad gauge, status words), nudged until it reads on the page.
 
 #include "OtpMessenger.h"
+#include "PadQr.h"
+#include "src/extra/libs/qrcode/qrcodegen.h"   // LVGL's QR encoder: alphanumeric mode at level L
 
 namespace otpui {
 
@@ -1072,6 +1074,198 @@ static void buildChat() {
   if (g_lv.keyboard) kbMirrorBind(s_ta);
 }
 
+// ---- Pad as QR codes ---------------------------------------------------------------------------
+// The unused pad as a loop of QR codes (PadQr.h) for MeshCore Open TAK's
+// OTP Pad > Scan QR: each part a few hundred bytes, shown in turn until the
+// phone has them all. White full screen, so the codes have a clean margin.
+constexpr int kQrMaxVersion = 13;
+static lv_obj_t* s_qr = nullptr;
+static lv_obj_t* s_qr_canvas = nullptr;
+static lv_obj_t* s_qr_part = nullptr;
+static lv_obj_t* s_qr_pause = nullptr;
+static lv_timer_t* s_qr_timer = nullptr;
+static uint8_t* s_qr_buf = nullptr;      // the canvas: 1-bit indexed
+static char* s_qr_hex = nullptr;         // the pad as hex (wiped on close)
+static size_t s_qr_hex_len = 0;
+static uint32_t s_qr_crc = 0;
+static size_t s_qr_chunk = 0;
+static int s_qr_i = 1, s_qr_n = 1, s_qr_ver = 1, s_qr_scale = 3, s_qr_px = 0;
+static bool s_qr_paused = false;
+
+static void qrClose() {
+  if (s_qr_timer) { lv_timer_del(s_qr_timer); s_qr_timer = nullptr; }
+  if (s_qr) { lv_obj_del(s_qr); s_qr = nullptr; }
+  s_qr_canvas = s_qr_part = s_qr_pause = nullptr;
+  if (s_qr_hex) { memset(s_qr_hex, 0, s_qr_hex_len); heap_caps_free(s_qr_hex); s_qr_hex = nullptr; }
+  if (s_qr_buf) {
+    memset(s_qr_buf, 0, LV_CANVAS_BUF_SIZE_INDEXED_1BIT(s_qr_px, s_qr_px));
+    heap_caps_free(s_qr_buf);
+    s_qr_buf = nullptr;
+  }
+  s_qr_hex_len = 0;
+}
+
+static void qrDraw() {
+  if (!s_qr_canvas || !s_qr_hex) return;
+  char text[padqr::kHeaderMax + 2 * 600];
+  if (!padqr::frame(s_qr_hex, s_qr_hex_len, s_qr_crc, s_qr_i, s_qr_n, s_qr_chunk, text, sizeof text)) return;
+  uint8_t tmp[qrcodegen_BUFFER_LEN_FOR_VERSION(kQrMaxVersion)];
+  uint8_t qr[qrcodegen_BUFFER_LEN_FOR_VERSION(kQrMaxVersion)];
+  const bool ok = qrcodegen_encodeText(text, tmp, qr, qrcodegen_Ecc_LOW, s_qr_ver, s_qr_ver, qrcodegen_Mask_AUTO, false);
+  memset(text, 0, sizeof text);
+  if (!ok) return;
+  const int m = qrcodegen_getSize(qr);
+  const int stride = (s_qr_px + 7) / 8;
+  uint8_t* px = s_qr_buf + 8;   // after the two palette entries
+  memset(px, 0, (size_t)stride * s_qr_px);
+  const int off = (s_qr_px - m * s_qr_scale) / 2;
+  for (int y = 0; y < m; y++) {
+    for (int x = 0; x < m; x++) {
+      if (!qrcodegen_getModule(qr, x, y)) continue;
+      for (int dy = 0; dy < s_qr_scale; dy++) {
+        uint8_t* row = px + (size_t)(off + y * s_qr_scale + dy) * stride;
+        for (int dx = 0; dx < s_qr_scale; dx++) {
+          const int X = off + x * s_qr_scale + dx;
+          row[X >> 3] |= (uint8_t)(0x80 >> (X & 7));
+        }
+      }
+    }
+  }
+  memset(qr, 0, sizeof qr);
+  memset(tmp, 0, sizeof tmp);
+  lv_obj_invalidate(s_qr_canvas);
+  if (s_qr_part) {
+    char l[32];
+    snprintf(l, sizeof l, "Part %d of %d", s_qr_i, s_qr_n);
+    lv_label_set_text(s_qr_part, l);
+  }
+}
+
+static void qrStep(int d) {
+  s_qr_i = ((s_qr_i - 1 + d) % s_qr_n + s_qr_n) % s_qr_n + 1;
+  qrDraw();
+}
+
+static void qrPause(bool paused) {
+  s_qr_paused = paused;
+  if (s_qr_pause) lv_label_set_text(s_qr_pause, paused ? "Play" : "Pause");
+}
+
+static lv_obj_t* qrBtn(lv_obj_t* parent, const char* text, lv_event_cb_t cb, lv_coord_t w, lv_obj_t** lbl_out = nullptr) {
+  lv_obj_t* b = lv_btn_create(parent);
+  styleButton(b);
+  lv_obj_set_size(b, w, SC(30));
+  lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, nullptr);
+  lv_obj_t* l = lv_label_create(b);
+  lv_label_set_text(l, text);
+  useChainedFont(l);
+  lv_obj_center(l);
+  if (lbl_out) *lbl_out = l;
+  return b;
+}
+
+static void qrOpen() {
+  otp::Target* t = cur();
+  if (!t) return;
+  otp::Bytes hex;
+  if (!OtpMessenger::core().exportHex(*t, hex) || !hex.n) {
+    toast(TR("Only an unused pad can be shown: its bytes would be out of step on the other side"), 3000);
+    return;
+  }
+  qrClose();
+  s_qr_hex = (char*)heap_caps_malloc(hex.n + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!s_qr_hex) { memset(hex.p, 0, hex.n); toast(TR("Out of memory")); return; }
+  memcpy(s_qr_hex, hex.p, hex.n);
+  s_qr_hex[hex.n] = 0;
+  s_qr_hex_len = hex.n;
+  memset(hex.p, 0, hex.n);
+
+  // Landscape screens put the code on the left and the controls beside it.
+  const lv_coord_t sw = lv_disp_get_hor_res(nullptr), sh = lv_disp_get_ver_res(nullptr);
+  const bool side = sw - sh >= SC(80);
+  const lv_coord_t avail = side ? LV_MIN(sh - 8, sw - SC(96)) : LV_MIN(sw - 8, sh - SC(30) - SC(40));
+  s_qr_ver = 0;
+  for (int scale = 6; scale >= 2 && !s_qr_ver; scale--) {
+    const int v = padqr::versionFor(avail, scale, kQrMaxVersion);
+    if (v >= 10 || (scale == 2 && v)) { s_qr_ver = v; s_qr_scale = scale; }
+  }
+  if (!s_qr_ver) { qrClose(); toast(TR("Screen too small for a QR code")); return; }
+  s_qr_px = (padqr::modules(s_qr_ver) + 4) * s_qr_scale;
+  s_qr_chunk = padqr::chunkBytes(s_qr_ver);
+  s_qr_n = padqr::partsFor(s_qr_hex_len / 2, s_qr_chunk);
+  s_qr_crc = padqr::crc32Hex(s_qr_hex, s_qr_hex_len);
+  s_qr_i = 1;
+  s_qr_paused = false;
+  s_qr_buf = (uint8_t*)heap_caps_malloc(LV_CANVAS_BUF_SIZE_INDEXED_1BIT(s_qr_px, s_qr_px), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!s_qr_buf) { qrClose(); toast(TR("Out of memory")); return; }
+
+  s_qr = lv_obj_create(lv_layer_top());
+  lv_obj_remove_style_all(s_qr);
+  lv_obj_set_size(s_qr, sw, sh);
+  lv_obj_set_style_bg_color(s_qr, lv_color_white(), LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(s_qr, LV_OPA_COVER, LV_PART_MAIN);
+  lv_obj_add_flag(s_qr, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_clear_flag(s_qr, LV_OBJ_FLAG_SCROLLABLE);
+
+  s_qr_canvas = lv_canvas_create(s_qr);
+  lv_canvas_set_buffer(s_qr_canvas, s_qr_buf, s_qr_px, s_qr_px, LV_IMG_CF_INDEXED_1BIT);
+  lv_canvas_set_palette(s_qr_canvas, 0, lv_color_white());
+  lv_canvas_set_palette(s_qr_canvas, 1, lv_color_black());
+  lv_obj_add_flag(s_qr_canvas, LV_OBJ_FLAG_CLICKABLE);   // tap the code: pause / go on
+  lv_obj_add_event_cb(s_qr_canvas, [](lv_event_t*) { qrPause(!s_qr_paused); }, LV_EVENT_CLICKED, nullptr);
+
+  lv_obj_t* col = lv_obj_create(s_qr);
+  lv_obj_remove_style_all(col);
+  lv_obj_set_flex_flow(col, side ? LV_FLEX_FLOW_COLUMN : LV_FLEX_FLOW_ROW_WRAP);
+  lv_obj_set_flex_align(col, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lv_obj_set_style_pad_row(col, SC(6), LV_PART_MAIN);
+  lv_obj_set_style_pad_column(col, SC(6), LV_PART_MAIN);
+  lv_obj_clear_flag(col, LV_OBJ_FLAG_SCROLLABLE);
+  const lv_coord_t bw = side ? sw - s_qr_px - SC(14) : (sw - SC(30)) / 3;
+  if (side) {
+    lv_obj_set_pos(s_qr_canvas, 4, (sh - s_qr_px) / 2);
+    lv_obj_set_size(col, bw, sh);
+    lv_obj_set_pos(col, s_qr_px + SC(9), 0);
+  } else {
+    lv_obj_set_pos(s_qr_canvas, (sw - s_qr_px) / 2, SC(26));
+    lv_obj_set_size(col, sw, sh - s_qr_px - SC(26));
+    lv_obj_set_pos(col, 0, s_qr_px + SC(26));
+  }
+  lv_obj_t* title = lv_label_create(side ? col : s_qr);
+  char nm[56];
+  displayName(*t, nm, sizeof nm);
+  lv_label_set_text(title, nm);
+  lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
+  lv_obj_set_width(title, side ? bw : sw - 12);
+  lv_obj_set_style_text_font(title, &g_font_semi_14, LV_PART_MAIN);
+  lv_obj_set_style_text_color(title, lv_color_black(), LV_PART_MAIN);
+  lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+  if (!side) lv_obj_set_pos(title, 6, SC(4));
+  s_qr_part = lv_label_create(side ? col : s_qr);
+  lv_obj_set_style_text_font(s_qr_part, &g_font_12, LV_PART_MAIN);
+  lv_obj_set_style_text_color(s_qr_part, lv_color_hex(0x333333), LV_PART_MAIN);
+  if (!side) lv_obj_align(s_qr_part, LV_ALIGN_TOP_RIGHT, -6, SC(6));
+  lv_obj_t* pb = qrBtn(col, "Pause", [](lv_event_t*) { qrPause(!s_qr_paused); }, bw, &s_qr_pause);
+  lv_obj_t* nb = qrBtn(col, "Next", [](lv_event_t*) { qrPause(true); qrStep(1); }, bw);
+  qrBtn(col, "Close", [](lv_event_t*) { qrClose(); }, bw);
+  if (side) {
+    lv_obj_t* hint = lv_label_create(col);
+    lv_label_set_text(hint, TR("Scan in MeshCore Open TAK: OTP Pad > Scan QR. Keep it private."));
+    lv_label_set_long_mode(hint, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(hint, bw);
+    lv_obj_set_style_text_font(hint, &g_font_12, LV_PART_MAIN);
+    lv_obj_set_style_text_color(hint, lv_color_hex(0x555555), LV_PART_MAIN);
+    useChainedFont(hint);
+  }
+  if (s_qr_n == 1) {   // one code: nothing to step through
+    lv_obj_add_flag(pb, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(nb, LV_OBJ_FLAG_HIDDEN);
+  }
+  qrDraw();
+  s_qr_timer = lv_timer_create([](lv_timer_t*) { if (!s_qr_paused && s_qr_n > 1) qrStep(1); }, 1400, nullptr);
+  lv_obj_move_foreground(s_qr);
+}
+
 // ---- Pad --------------------------------------------------------------------------------
 static void importHexText(const char* text) {
   otp::Target* t = cur();
@@ -1215,6 +1409,7 @@ static void buildPad() {
   });
 
   lv_obj_t* share = setCardIn(b, TR("Share"));
+  setActionRow(share, UI_ICON_QR_CODE, "Show as QR code", nullptr, [](lv_event_t*) { qrOpen(); }, nullptr, SET_NORMAL, false);
   setActionRow(share, UI_ICON_SHARE_2, "Export to the SD card", nullptr, [](lv_event_t*) { exportPadNow(); }, nullptr, SET_NORMAL, false);
   if (t->kind == otp::Kind::Dm) {
     char role[4] = {t->role, 0};
@@ -1222,7 +1417,8 @@ static void buildPad() {
       if (otp::Target* x = cur()) { OtpMessenger::core().flipRole(*x); show(Screen::Pad); }
     }, nullptr, SET_NORMAL, false);
   }
-  setNote(share, "Export writes this pad, unused, to the SD card as hex. The other device imports the same file; "
+  setNote(share, "Show as QR code: MeshCore Open TAK scans it from its OTP Pad screen (Scan QR), a few parts in turn. "
+                 "Export writes this pad, unused, to the SD card as hex. The other device imports the same file; "
                  "roles A/B are worked out from your keys, so both sides import it unchanged.");
 
   lv_obj_t* danger = setCardIn(b, TR("Danger zone"));
@@ -1514,6 +1710,7 @@ static void buildSettings() {
 // ---- navigation -----------------------------------------------------------------------------------
 static void show(Screen s) {
   if (!s_root) return;
+  qrClose();
   promptClose();
   otp::Core& c = OtpMessenger::core();
   if (c.locked()) s = Screen::Lock;
@@ -1533,6 +1730,7 @@ static void show(Screen s) {
 }
 
 static void back() {
+  if (s_qr) { qrClose(); return; }
   if (s_prompt) { promptDone(false); return; }
   switch (s_screen) {
     case Screen::Chat: show(Screen::List); break;
@@ -1556,6 +1754,7 @@ static void timerCb(lv_timer_t*) {
 }
 
 static void close() {
+  qrClose();
   promptClose();
   if (s_timer) { lv_timer_del(s_timer); s_timer = nullptr; }
   if (OtpMessenger::ready()) OtpMessenger::core().setOpenTarget(nullptr);

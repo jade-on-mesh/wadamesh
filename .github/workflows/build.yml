@@ -48,6 +48,12 @@ jobs:
         run: g++ -std=c++17 -Wall -I src test/test_team_wire.cpp src/ui-touch/TeamCore.cpp -o /tmp/team_test && /tmp/team_test
       - name: Watched channels on the map (host test)
         run: g++ -std=c++17 -Wall -I src test/test_watch_feed.cpp -o /tmp/watch_test && /tmp/watch_test
+      - name: Pad QR parts (shared with Open TAK; each part checked against LVGL's QR encoder)
+        run: |
+          g++ -std=c++17 -Wall -I src test/test_pad_qr.cpp -o /tmp/pad_qr_test && /tmp/pad_qr_test
+          git clone -q --depth 1 -b v8.3.11 https://github.com/lvgl/lvgl.git /tmp/lvgl
+          gcc -c -DLV_CONF_SKIP /tmp/lvgl/src/extra/libs/qrcode/qrcodegen.c -o /tmp/qrgen.o
+          g++ -std=c++17 -Wall -I src -DQRGEN=/tmp/lvgl/src/extra/libs/qrcode test/test_pad_qr.cpp /tmp/qrgen.o -o /tmp/pad_qr_fit && /tmp/pad_qr_fit
 
   firmware:
     runs-on: ubuntu-latest
