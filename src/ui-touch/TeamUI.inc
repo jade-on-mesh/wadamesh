@@ -157,6 +157,51 @@ static const char* roleStr(int id) {
 
 static void toast(const char* m, int ms = 1800) { if (g_lv.task) g_lv.task->showAlert(m, ms); }
 
+// ---- colour: the firmware theme's accent instead of plain grey ---------------------------
+// Buttons are tinted with the theme's accent, a card takes its own colour (a
+// teammate's, a pin's kind, a report's level) or else the accent, and the chosen
+// tab or channel is filled with it. E-paper and high contrast keep the plain look.
+static bool plain() {
+#if defined(HAS_TDECK_PRO)
+  return true;
+#else
+  return s_theme_high_contrast;
+#endif
+}
+static bool isCol(lv_color_t c, uint32_t hex) { return c.full == lv_color_hex(hex).full; }
+// Readable text on a fill.
+static uint32_t textOn(uint32_t c) {
+  const uint32_t r = (c >> 16) & 0xFF, g = (c >> 8) & 0xFF, b = c & 0xFF;
+  return (r * 299 + g * 587 + b * 114) / 1000 > 150 ? 0x14171C : 0xFFFFFF;
+}
+// A button filled with a colour of its own (Hound, Delete, the chosen tab).
+static void fill(lv_obj_t* o, uint32_t c) {
+  lv_obj_set_style_bg_color(o, lv_color_hex(c), LV_PART_MAIN);
+  lv_obj_set_style_bg_color(o, lv_color_hex(rgbMix(c, 0x000000, 50)), LV_PART_MAIN | LV_STATE_PRESSED);
+  lv_obj_set_style_text_color(o, lv_color_hex(textOn(c)), LV_PART_MAIN);
+}
+static void selected(lv_obj_t* o) { fill(o, plain() ? COLOR_CONTROL_PRESSED : COLOR_GLOW); }
+static void tint(lv_obj_t* o) {
+  if (!o || plain()) return;
+  const uint32_t a = COLOR_GLOW;
+  if (lv_obj_get_style_bg_opa(o, LV_PART_MAIN) > LV_OPA_50) {
+    const lv_color_t bg = lv_obj_get_style_bg_color(o, LV_PART_MAIN);
+    if (isCol(bg, COLOR_CONTROL)) {
+      lv_obj_set_style_bg_color(o, lv_color_hex(rgbMix(COLOR_CONTROL, a, 72)), LV_PART_MAIN);
+      lv_obj_set_style_bg_color(o, lv_color_hex(rgbMix(COLOR_CONTROL_PRESSED, a, 120)), LV_PART_MAIN | LV_STATE_PRESSED);
+      lv_obj_set_style_border_color(o, lv_color_hex(rgbMix(COLOR_BORDER, a, 150)), LV_PART_MAIN);
+    } else if (isCol(bg, COLOR_PANEL)) {
+      const lv_color_t bc = lv_obj_get_style_border_color(o, LV_PART_MAIN);
+      const bool own = lv_obj_get_style_border_width(o, LV_PART_MAIN) >= 2 && !isCol(bc, COLOR_BORDER);
+      const uint32_t c = own ? (lv_color_to32(bc) & 0xFFFFFF) : a;
+      lv_obj_set_style_bg_color(o, lv_color_hex(rgbMix(COLOR_PANEL, c, own ? 44 : 26)), LV_PART_MAIN);
+      if (!own) lv_obj_set_style_border_color(o, lv_color_hex(rgbMix(COLOR_BORDER, a, 110)), LV_PART_MAIN);
+    }
+  }
+  const uint32_t n = lv_obj_get_child_cnt(o);
+  for (uint32_t i = 0; i < n; i++) tint(lv_obj_get_child(o, (int32_t)i));
+}
+
 static bool myFix(double* lat, double* lon) {
   team::Fix f;
   if (!s_io.fix(f)) return false;
@@ -229,6 +274,7 @@ static void alarmShow(team::AlertRec& r) {
   auto mk = [&](const char* txt, lv_event_cb_t cb) {
     lv_obj_t* b = lv_btn_create(row);
     styleButton(b);
+    tint(b);
     lv_obj_set_size(b, LV_SIZE_CONTENT, 36);
     lv_obj_set_style_pad_hor(b, 12, LV_PART_MAIN);
     lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, nullptr);
@@ -475,6 +521,7 @@ static lv_obj_t* sheetOpen(const char* title, const char* body) {
   lv_obj_set_style_max_height(card, sh - STATUSBAR_H - 12, LV_PART_MAIN);
   lv_obj_align(card, LV_ALIGN_BOTTOM_MID, 0, -6);
   styleCard(card);
+  tint(card);
   lv_obj_set_style_pad_all(card, 8, LV_PART_MAIN);
   lv_obj_set_flex_flow(card, LV_FLEX_FLOW_ROW_WRAP);
   lv_obj_set_style_pad_row(card, 6, LV_PART_MAIN);
@@ -502,7 +549,8 @@ static lv_obj_t* sheetBtn(lv_obj_t* card, const char* txt, lv_event_cb_t cb, voi
   styleButton(b);
   lv_obj_set_size(b, LV_SIZE_CONTENT, 32);
   lv_obj_set_style_pad_hor(b, 10, LV_PART_MAIN);
-  if (bg) lv_obj_set_style_bg_color(b, lv_color_hex(bg), LV_PART_MAIN);
+  if (bg) fill(b, bg);
+  else tint(b);
   lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, ud);
   lv_obj_t* l = lv_label_create(b);
   lv_label_set_text(l, txt);
@@ -763,7 +811,7 @@ static void buildTeam(lv_obj_t* b) {
   lv_obj_t* sos = lv_btn_create(b);
   lv_obj_set_size(sos, LV_PCT(100), 40);
   styleButton(sos);
-  lv_obj_set_style_bg_color(sos, lv_color_hex(c->sosActive() ? 0x5A5F66 : 0xD32F2F), LV_PART_MAIN);
+  fill(sos, c->sosActive() ? 0x7F1D1D : 0xD32F2F);
   lv_obj_add_event_cb(sos, [](lv_event_t*) {
     if (!s_core || !s_core->active()) { toast(TR("Team is not set up yet")); return; }
     if (s_core->sosActive())
@@ -890,7 +938,7 @@ static void buildSetup(lv_obj_t* b) {
     lv_obj_t* x = lv_btn_create(b);
     styleButton(x);
     lv_obj_set_size(x, LV_PCT(100), 32);
-    if (bg) lv_obj_set_style_bg_color(x, lv_color_hex(bg), LV_PART_MAIN);
+    if (bg) fill(x, bg);
     lv_obj_add_event_cb(x, setupCycle, LV_EVENT_CLICKED, (void*)(intptr_t)which);
     lv_obj_t* l = lv_label_create(x);
     lv_label_set_text(l, t);
@@ -915,7 +963,7 @@ static void buildSetup(lv_obj_t* b) {
     styleButton(x);
     lv_obj_set_size(x, LV_SIZE_CONTENT, 30);
     lv_obj_set_style_pad_hor(x, 10, LV_PART_MAIN);
-    if (!strcmp(cd.name, c->cfg.channel)) lv_obj_set_style_bg_color(x, lv_color_hex(0x0E7C86), LV_PART_MAIN);
+    if (!strcmp(cd.name, c->cfg.channel)) selected(x);
     lv_obj_add_event_cb(x, [](lv_event_t* e) {
       ChannelDetails d;
       if (s_core && the_mesh.getChannel((int)(intptr_t)lv_event_get_user_data(e), d)) {
@@ -995,7 +1043,7 @@ static void buildWatch(lv_obj_t* b) {
     styleButton(x);
     lv_obj_set_size(x, LV_SIZE_CONTENT, 30);
     lv_obj_set_style_pad_hor(x, 10, LV_PART_MAIN);
-    if (w->isWatched(cd.name)) lv_obj_set_style_bg_color(x, lv_color_hex(0x0E7C86), LV_PART_MAIN);
+    if (w->isWatched(cd.name)) selected(x);
     lv_obj_add_event_cb(x, [](lv_event_t* e) {
       ChannelDetails d;
       if (!s_watch || !the_mesh.getChannel((int)(intptr_t)lv_event_get_user_data(e), d)) return;
@@ -1071,7 +1119,7 @@ static void pageBuild() {
     styleButton(x);
     lv_obj_set_size(x, LV_SIZE_CONTENT, 28);
     lv_obj_set_flex_grow(x, 1);
-    if (i == s_tab) lv_obj_set_style_bg_color(x, lv_color_hex(0x0E7C86), LV_PART_MAIN);
+    if (i == s_tab) selected(x);
     lv_obj_add_event_cb(x, [](lv_event_t* e) { s_tab = (int)(intptr_t)lv_event_get_user_data(e); pageBuild(); },
                         LV_EVENT_CLICKED, (void*)(intptr_t)i);
     lv_obj_t* l = lv_label_create(x);
@@ -1083,6 +1131,7 @@ static void pageBuild() {
   else if (s_tab == 1) buildPins(s_body);
   else if (s_tab == 3) buildWatch(s_body);
   else buildSetup(s_body);
+  tint(s_body);
 }
 
 static void pageClose() {
