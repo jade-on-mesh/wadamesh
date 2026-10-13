@@ -1,8 +1,11 @@
 name: fork-release
 
-# Publishes this fork's firmware as a GitHub release, tak_1, tak_2, ... which
-# is what a fork device's Settings > About checks and installs (see
-# src/ui-touch/ForkUpdateCore.h). Runs for every change to main that touches
+# Publishes this fork's firmware as a GitHub release, which is what a fork
+# device's Settings > About checks and installs (see
+# src/ui-touch/ForkUpdateCore.h). Versions follow upstream: the fork's builds on
+# top of Wadamesh beta_93 are "wadamesh-tak beta_93.1", beta_93.2, ... tagged
+# tak-beta_93.1, ... (upstream's version is the newest release-notes/beta_N.txt,
+# which an upstream sync brings in). Runs for every change to main that touches
 # the firmware, after an upstream sync, or by hand.
 #
 # Each board's app image is signed with the fork's release key (repo secret
@@ -54,14 +57,20 @@ jobs:
             exit 1
           fi
           git fetch --quiet --tags origin
-          if git tag --points-at HEAD | grep -q '^tak_'; then
-            echo "This commit is already released as $(git tag --points-at HEAD | grep '^tak_' | head -1)."
+          if git tag --points-at HEAD | grep -q '^tak-beta_'; then
+            echo "This commit is already released as $(git tag --points-at HEAD | grep '^tak-beta_' | head -1)."
             echo "skip=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          # No tak_ tags yet is fine (grep finding nothing must not end the step).
-          last=$(git tag -l 'tak_*' | sed 's/^tak_//' | { grep -E '^[0-9]+$' || true; } | sort -n | tail -1)
-          tag="tak_$(( ${last:-0} + 1 ))"
+          # Upstream's version: the newest release-notes/beta_N.txt.
+          base=$(ls release-notes | sed -n 's/^beta_\([0-9][0-9]*\)\.txt$/\1/p' | sort -n | tail -1)
+          if [ -z "$base" ]; then
+            echo "::error::No release-notes/beta_N.txt, so the upstream version is unknown."
+            exit 1
+          fi
+          # The fork's next build on that base (none yet is fine: grep must not end the step).
+          last=$(git tag -l "tak-beta_${base}.*" | sed "s/^tak-beta_${base}\.//" | { grep -E '^[0-9]+$' || true; } | sort -n | tail -1)
+          tag="tak-beta_${base}.$(( ${last:-0} + 1 ))"
           echo "Releasing $tag"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "skip=false" >> "$GITHUB_OUTPUT"
@@ -98,7 +107,7 @@ jobs:
         run: |
           set -euo pipefail
           unset WIFI_SSID WIFI_PWD
-          export PLATFORMIO_BUILD_FLAGS="-DFIRMWARE_RELEASE_TAG='\"${TAG}\"' -DFIRMWARE_VERSION='\"wadamesh-tak ${TAG}\"'"
+          export PLATFORMIO_BUILD_FLAGS="-DFIRMWARE_RELEASE_TAG='\"${TAG}\"' -DFIRMWARE_VERSION='\"wadamesh-tak ${TAG#tak-}\"'"
           pio run -e "${{ matrix.env }}"
           pio run -t mergebin -e "${{ matrix.env }}" || echo "::notice::no merged image for ${{ matrix.env }}"
           mkdir -p dist
@@ -149,10 +158,9 @@ jobs:
           TAG: ${{ needs.plan.outputs.tag }}
         run: |
           set -euo pipefail
-          base=$(git log -1 --format=%s origin/upstream-mirror 2>/dev/null || true)
-          [ -n "$base" ] || base=$(git fetch -q origin upstream-mirror && git log -1 --format=%s FETCH_HEAD || echo "upstream Wadamesh")
-          notes="Firmware **$TAG** of the jade-on-mesh fork (MeshCore Open TAK photos and voice, OTP Messenger, Team), built from \`$GITHUB_SHA\` on top of $base.
+          ver="${TAG#tak-}"   # beta_93.2
+          notes="**Wadamesh-tak $ver**: fork build ${ver##*.} on top of Wadamesh ${ver%.*}, adding MeshCore Open TAK photos and voice, OTP Messenger and Team. Built from \`$GITHUB_SHA\`.
 
           Fork devices install this from **Settings > About > Install update**. To flash by USB, use a \`-merged.bin\`. Every app image carries a \`.sig\` that the device checks before installing."
-          gh release create "$TAG" dist/* --target "$GITHUB_SHA" --title "wadamesh-tak $TAG" \
+          gh release create "$TAG" dist/* --target "$GITHUB_SHA" --title "Wadamesh-tak $ver" \
             --notes "$(printf '%s' "$notes" | sed 's/^          //')" --latest

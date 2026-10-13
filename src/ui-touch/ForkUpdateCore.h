@@ -9,9 +9,13 @@
 // (badge, "Update available", Install update, previous versions, save to SD)
 // follows the fork's own GitHub releases instead:
 //
-//   tags      tak_1, tak_2, ... (made by .github/workflows/fork-release.yml)
-//   latest    https://github.com/<repo>/releases/latest  -> 302 .../tag/tak_N
-//   firmware  https://github.com/<repo>/releases/download/tak_N/wadamesh-<board>.bin
+// Versions follow upstream: a fork build on top of Wadamesh beta_93 is
+// "wadamesh-tak beta_93.1", then beta_93.2, ... and beta_94.1 after the next
+// upstream release. Its tag is tak-beta_93.1 (made by fork-release.yml; not
+// beta_*, which would start upstream's own release workflow).
+//
+//   latest    https://github.com/<repo>/releases/latest  -> 302 .../tag/tak-beta_93.2
+//   firmware  https://github.com/<repo>/releases/download/tak-beta_93.2/wadamesh-<board>.bin
 //   signature                                       ... /wadamesh-<board>.bin.sig
 //
 // Every image is signed in CI with the fork's Ed25519 key (repo secret
@@ -25,6 +29,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -33,7 +38,8 @@
 #endif
 
 #define WADA_FORK_REPO "jade-on-mesh/wadamesh"
-#define WADA_RELEASE_PREFIX "tak_"
+#define WADA_TAG_PREFIX "tak-"
+#define WADA_BRAND "WADAMESH-TAK"
 #define WADA_UPDATE_SITE "github.com/" WADA_FORK_REPO "/releases"
 
 extern "C" int ed25519_verify(const unsigned char* signature, const unsigned char* message, size_t message_len,
@@ -50,24 +56,47 @@ static const uint8_t kForkUpdatePubKey[32] = {
 
 constexpr size_t kSigBytes = 64;
 
-// N of "tak_N" (also accepts a full URL ending in .../tag/tak_N), else -1.
-inline int releaseN(const char* s) {
+// A release as one comparable number: upstream beta N, fork build k -> N*1000+k.
+constexpr int kBuildsPerBase = 1000;
+
+// "beta_93.2", "tak-beta_93.2" or a URL ending in .../tag/tak-beta_93.2 -> 93002;
+// -1 for anything else (an upstream "beta_93" has no fork build and is -1 too).
+inline int releaseCode(const char* s) {
   if (!s) return -1;
-  const char* p = strstr(s, WADA_RELEASE_PREFIX);
+  const char* p = strstr(s, "beta_");
   const char* last = nullptr;
-  while (p) { last = p; p = strstr(p + 1, WADA_RELEASE_PREFIX); }
+  while (p) { last = p; p = strstr(p + 1, "beta_"); }
   if (!last) return -1;
-  last += sizeof(WADA_RELEASE_PREFIX) - 1;
-  if (*last < '0' || *last > '9') return -1;
-  long n = 0;
-  while (*last >= '0' && *last <= '9') {
-    n = n * 10 + (*last - '0');
-    if (n > 1000000) return -1;
-    ++last;
-  }
-  // Only a clean end: "tak_12", "tak_12/", "tak_12?x", not "tak_12abc".
+  last += 5;
+  auto num = [&](long* out) {
+    if (*last < '0' || *last > '9') return false;
+    long v = 0;
+    while (*last >= '0' && *last <= '9') {
+      v = v * 10 + (*last - '0');
+      if (v > 100000) return false;
+      ++last;
+    }
+    *out = v;
+    return true;
+  };
+  long n = 0, k = 0;
+  if (!num(&n) || *last != '.') return -1;
+  ++last;
+  if (!num(&k) || k < 1 || k >= kBuildsPerBase) return -1;
+  // Only a clean end: "...93.2", "...93.2/", "...93.2?x", not "...93.2abc".
   if (*last && *last != '/' && *last != '?' && *last != '#' && *last != '\r' && *last != '\n') return -1;
-  return (int)n;
+  return (int)(n * kBuildsPerBase + k);
+}
+
+// 93002 -> "beta_93.2"
+inline void formatRelease(int code, char* out, size_t cap) {
+  if (code < 0) { snprintf(out, cap, "?"); return; }
+  snprintf(out, cap, "beta_%d.%d", code / kBuildsPerBase, code % kBuildsPerBase);
+}
+
+// 93002 -> "tak-beta_93.2" (the release tag, and part of the signed message)
+inline void tagFor(int code, char* out, size_t cap) {
+  snprintf(out, cap, WADA_TAG_PREFIX "beta_%d.%d", code / kBuildsPerBase, code % kBuildsPerBase);
 }
 
 // The exact bytes the release workflow signs:

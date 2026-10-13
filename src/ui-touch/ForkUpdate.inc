@@ -51,7 +51,7 @@ static int latest() {
   const String loc = h.header("Location");
   h.end();
   if (code != 301 && code != 302) return -1;
-  return forkupd::releaseN(loc.c_str());   // -1 too when there are no releases yet
+  return forkupd::releaseCode(loc.c_str());   // -1 too when there are no releases yet
 }
 
 static void assetUrl(char* out, size_t cap, const char* tag, const char* file) {
@@ -96,8 +96,8 @@ static bool fetchSig(Job& j, const char* tag, const char* file, uint8_t sig[fork
 // Streams the image into the spare OTA slot or a file on the SD card, hashing as
 // it goes; it is kept only if the hash carries the release key's signature.
 static bool fetchImage(Job& j) {
-  char tag[16], file[48], url[192];
-  snprintf(tag, sizeof tag, WADA_RELEASE_PREFIX "%d", j.n);
+  char tag[32], file[48], url[192];
+  forkupd::tagFor(j.n, tag, sizeof tag);
   snprintf(file, sizeof file, "wadamesh-%s.bin", WADA_BOARD_ID);
   uint8_t sig[forkupd::kSigBytes];
   if (!fetchSig(j, tag, file, sig)) return false;
