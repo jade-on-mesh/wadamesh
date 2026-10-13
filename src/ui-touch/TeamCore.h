@@ -164,3 +164,6 @@ class Core {
 
 // Called by MyMesh for GRP_DATA with TeamWire::kDataType (defined in the UI glue).
 void teamOnChannelData(int channel_idx, const uint8_t* data, size_t len);
+// Called by MyMesh for channel text: reports with a position on watched channels
+// go on the map (WatchFeed.h; defined in the UI glue).
+void teamOnChannelText(int channel_idx, const char* text, uint32_t sent_epoch);
