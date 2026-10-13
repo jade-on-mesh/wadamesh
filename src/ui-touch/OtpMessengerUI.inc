@@ -5,6 +5,12 @@
 //
 // Screens: Lock -> Conversations -> Chat -> Pad, plus New conversation and
 // Settings. Back (the bar, Esc) goes one screen up and closes from the list.
+//
+// The look follows the rest of the firmware, not the Lua app it came from: the
+// Chats list's rows and glyph avatars, the chat's bubbles (yours on the right) and
+// pill composer, and the Settings kit's cards, action rows and switches. Surfaces
+// and text take the firmware theme; the OTP theme is the app's accent only (the
+// send button, the pad gauge, status words), nudged until it reads on the page.
 
 #include "OtpMessenger.h"
 
@@ -33,11 +39,12 @@ static bool s_pick_channels = false;
 // chat widgets
 static lv_obj_t* s_list = nullptr;     // bubble column
 static lv_obj_t* s_ta = nullptr;
-static lv_obj_t* s_counter = nullptr;
-static lv_obj_t* s_info = nullptr;
-static lv_obj_t* s_parts = nullptr;
-static lv_obj_t* s_bar = nullptr;
+static lv_obj_t* s_counter = nullptr;  // byte budget, over the bottom of the bubbles while typing
+static lv_obj_t* s_info = nullptr;     // header subtitle: pad, sync, signal
+static lv_obj_t* s_parts = nullptr;    // channel participants strip
+static lv_obj_t* s_bar = nullptr;      // pad gauge / transfer progress under the header
 static lv_obj_t* s_send_btn = nullptr;
+static lv_obj_t* s_parts_btn = nullptr;
 static int s_shown_n = 60;             // bubbles drawn (newest)
 // prompt
 static lv_obj_t* s_prompt = nullptr;
@@ -53,17 +60,17 @@ static void show(Screen s);
 static void close();
 static void back();
 
-// ---- colour helpers (contrast_of / darken / lighten from the Lua app) ----------
+// ---- colour ---------------------------------------------------------------------------------
 static uint32_t darken(uint32_t c, float f) {
   return ((uint32_t)(((c >> 16) & 0xFF) * f) << 16) | ((uint32_t)(((c >> 8) & 0xFF) * f) << 8) | (uint32_t)((c & 0xFF) * f);
 }
-static uint32_t lighten(uint32_t c, float t) {
-  uint32_t r = (c >> 16) & 0xFF, g = (c >> 8) & 0xFF, b = c & 0xFF;
-  r = (uint32_t)(r + (255 - r) * t); g = (uint32_t)(g + (255 - g) * t); b = (uint32_t)(b + (255 - b) * t);
-  return (r << 16) | (g << 8) | b;
-}
 static float lin(float c) { c /= 255.0f; return c <= 0.03928f ? c / 12.92f : powf((c + 0.055f) / 1.055f, 2.4f); }
 static float lum(uint32_t h) { return 0.2126f * lin((h >> 16) & 0xFF) + 0.7152f * lin((h >> 8) & 0xFF) + 0.0722f * lin(h & 0xFF); }
+static float contrast(uint32_t a, uint32_t b) {
+  const float la = lum(a) + 0.05f, lb = lum(b) + 0.05f;
+  return la > lb ? la / lb : lb / la;
+}
+// Dark or light text on a fill of this colour.
 static uint32_t contrastOf(uint32_t col) {
   const float l = lum(col) + 0.05f;
   if (0.96f / l >= 4.5f) return 0xF5F5F5;
@@ -71,87 +78,31 @@ static uint32_t contrastOf(uint32_t col) {
   if (l / (lum(shade) + 0.05f) >= 4.5f) return shade;
   return 0x14171C;
 }
-static uint32_t senderColor(const char* who) {
-  // Stable per name (the Lua app assigned buckets in arrival order).
-  uint32_t h = 2166136261u;
-  for (const char* c = who; *c; ++c) h = (h ^ (uint8_t)*c) * 16777619u;
-  const Theme& t = th();
-  const uint32_t opts[5] = {t.decrypt, t.ciphertext, t.newpad, t.keyphrase, t.ok};
-  return opts[h % 5];
+// E-paper and high contrast keep the firmware's own plain look: no theme accents.
+static bool plainLook() {
+#if defined(HAS_TDECK_PRO)
+  return true;
+#else
+  return s_theme_high_contrast;
+#endif
+}
+// The app's accent: the OTP theme's main colour.
+static uint32_t accent() { return plainLook() ? COLOR_GLOW : th().channel; }
+// An OTP theme colour used as text or an icon on the page, eased toward the text
+// colour until it reads (B&W's near-whites vanish on the day theme otherwise).
+static uint32_t ink(uint32_t c) {
+  if (plainLook()) return COLOR_TEXT;
+  uint32_t out = c;
+  for (int t = 51; t <= 255 && contrast(out, COLOR_BG) < 3.0f; t += 51) out = rgbMix(c, COLOR_TEXT, (uint8_t)t);
+  return out;
 }
 
-// ---- small widget helpers --------------------------------------------------------
+// ---- small widget helpers --------------------------------------------------------------------
 static lv_obj_t* label(lv_obj_t* parent, const char* text, const lv_font_t* font, uint32_t color) {
   lv_obj_t* l = lv_label_create(parent);
   lv_label_set_text(l, text);
   lv_obj_set_style_text_font(l, font, LV_PART_MAIN);
   lv_obj_set_style_text_color(l, lv_color_hex(color), LV_PART_MAIN);
-  return l;
-}
-
-static lv_obj_t* button(lv_obj_t* parent, const char* text, lv_event_cb_t cb, void* ud = nullptr,
-                        uint32_t bg = 0, lv_coord_t h = 30) {
-  lv_obj_t* b = lv_btn_create(parent);
-  styleButton(b);
-  lv_obj_set_height(b, h);
-  lv_obj_set_style_pad_hor(b, 10, LV_PART_MAIN);
-  lv_obj_set_style_pad_ver(b, 0, LV_PART_MAIN);
-  if (bg) {
-    lv_obj_set_style_bg_color(b, lv_color_hex(bg), LV_PART_MAIN);
-    lv_obj_set_style_text_color(b, lv_color_hex(contrastOf(bg)), LV_PART_MAIN);
-  }
-  if (cb) lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, ud);
-  lv_obj_t* l = lv_label_create(b);
-  lv_label_set_text(l, text);
-  lv_obj_set_style_text_font(l, &g_font_14, LV_PART_MAIN);
-  useChainedFont(l);
-  lv_obj_center(l);
-  return b;
-}
-
-static lv_obj_t* column(lv_obj_t* parent, lv_coord_t pad = 6, lv_coord_t gap = 6) {
-  lv_obj_t* c = lv_obj_create(parent);
-  lv_obj_remove_style_all(c);
-  lv_obj_set_size(c, LV_PCT(100), LV_SIZE_CONTENT);
-  lv_obj_set_flex_flow(c, LV_FLEX_FLOW_COLUMN);
-  lv_obj_set_style_pad_all(c, pad, LV_PART_MAIN);
-  lv_obj_set_style_pad_row(c, gap, LV_PART_MAIN);
-  return c;
-}
-
-static lv_obj_t* row(lv_obj_t* parent, lv_coord_t gap = 6) {
-  lv_obj_t* r = lv_obj_create(parent);
-  lv_obj_remove_style_all(r);
-  lv_obj_set_size(r, LV_PCT(100), LV_SIZE_CONTENT);
-  lv_obj_set_flex_flow(r, LV_FLEX_FLOW_ROW_WRAP);
-  lv_obj_set_flex_align(r, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-  lv_obj_set_style_pad_column(r, gap, LV_PART_MAIN);
-  lv_obj_set_style_pad_row(r, gap, LV_PART_MAIN);
-  return r;
-}
-
-// A scrolling screen body below the bar.
-static lv_obj_t* newBody(bool scroll = true) {
-  // Screens are swapped from their own buttons' handlers: never delete the
-  // tree an event is still being dispatched in.
-  if (s_body) { lv_obj_add_flag(s_body, LV_OBJ_FLAG_HIDDEN); lv_obj_del_async(s_body); s_body = nullptr; }
-  s_list = s_ta = s_counter = s_info = s_parts = s_bar = s_send_btn = nullptr;
-  s_body = lv_obj_create(s_root);
-  lv_obj_remove_style_all(s_body);
-  lv_obj_set_size(s_body, LV_PCT(100), LV_PCT(100));
-  if (scroll) {
-    lv_obj_set_flex_flow(s_body, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_all(s_body, 6, LV_PART_MAIN);
-    lv_obj_set_style_pad_row(s_body, 6, LV_PART_MAIN);
-    lv_obj_set_scroll_dir(s_body, LV_DIR_VER);
-  } else {
-    lv_obj_clear_flag(s_body, LV_OBJ_FLAG_SCROLLABLE);
-  }
-  return s_body;
-}
-
-static lv_obj_t* heading(lv_obj_t* parent, const char* text) {
-  lv_obj_t* l = label(parent, text, &g_font_16, th().channel);
   useChainedFont(l);
   return l;
 }
@@ -160,8 +111,168 @@ static lv_obj_t* para(lv_obj_t* parent, const char* text, uint32_t color = 0) {
   lv_obj_t* l = label(parent, text, &g_font_12, color ? color : COLOR_SUB);
   lv_obj_set_width(l, LV_PCT(100));
   lv_label_set_long_mode(l, LV_LABEL_LONG_WRAP);
-  useChainedFont(l);
   return l;
+}
+
+static lv_obj_t* box(lv_obj_t* parent) {
+  lv_obj_t* o = lv_obj_create(parent);
+  lv_obj_remove_style_all(o);
+  lv_obj_clear_flag(o, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+  return o;
+}
+
+// A bare line icon that lifts when pressed, as beside the Chat composer.
+static lv_obj_t* iconBtn(lv_obj_t* parent, const char* icon, lv_event_cb_t cb, uint32_t color = 0) {
+  lv_obj_t* b = lv_btn_create(parent);
+  styleButton(b);
+  const lv_coord_t sz = SC(30);
+  lv_obj_set_size(b, sz, sz);
+  lv_obj_set_style_radius(b, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(b, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_border_width(b, 0, LV_PART_MAIN);
+  lv_obj_set_style_shadow_width(b, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(b, 0, LV_PART_MAIN);
+  lv_obj_set_ext_click_area(b, 4);
+  if (cb) lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, nullptr);
+  lv_obj_t* l = lv_label_create(b);
+  setIconLabel(l, icon);
+  lv_obj_set_style_text_color(l, lv_color_hex(color ? color : COLOR_SUB), LV_PART_MAIN);
+  lv_obj_center(l);
+  return b;
+}
+
+// A round button filled with the accent (send, new conversation).
+static lv_obj_t* roundAccent(lv_obj_t* parent, const char* icon, lv_event_cb_t cb, lv_coord_t sz) {
+  lv_obj_t* b = lv_btn_create(parent);
+  stylePrimary(b);
+  lv_obj_set_size(b, sz, sz);
+  lv_obj_set_style_radius(b, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(b, 0, LV_PART_MAIN);
+  uint32_t fg = COLOR_ON_GLOW;
+  if (!plainLook()) {
+    const uint32_t a = accent();
+    lv_obj_set_style_bg_color(b, lv_color_hex(a), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(b, lv_color_hex(darken(a, 0.8f)), LV_PART_MAIN | LV_STATE_PRESSED);
+    lv_obj_set_style_bg_grad_dir(b, LV_GRAD_DIR_NONE, LV_PART_MAIN);
+    lv_obj_set_style_outline_color(b, lv_color_hex(a), LV_PART_MAIN);
+    fg = contrastOf(a);
+  }
+  if (cb) lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, nullptr);
+  lv_obj_t* l = lv_label_create(b);
+  setIconLabel(l, icon);
+  lv_obj_set_style_text_color(l, lv_color_hex(fg), LV_PART_MAIN);
+  lv_obj_center(l);
+  return b;
+}
+
+// The conversation's glyph: the same one the Chats list shows for that contact or
+// channel (a square for a channel, a circle for a person), its emoji if it has one.
+static lv_obj_t* avatar(lv_obj_t* parent, const char* name, bool channel, lv_coord_t sz) {
+  lv_obj_t* av = makeGlyphAvatar(parent, name, channel ? GLYPH_SQUARE : GLYPH_CIRCLE, sz);
+  char eb[20];
+  if (touchPrefsGetChannelEmoji(name, eb, sizeof eb) || (!channel && nameFirstEmoji(name, eb, sizeof eb)))
+    glyphAvatarSetEmoji(av, name, eb);
+  return av;
+}
+static lv_obj_t* avatar(lv_obj_t* parent, const otp::Target& t, lv_coord_t sz) {
+  return avatar(parent, t.name, t.kind == otp::Kind::Channel, sz);
+}
+
+static void displayName(const char* name, bool channel, char* out, size_t cap) {
+  char raw[48];
+  snprintf(raw, sizeof raw, "%s%s", channel ? "#" : "", name);
+  copyUtf8ReplacingMissingGlyphs(&g_font_semi_14, out, cap, raw);
+}
+static void displayName(const otp::Target& t, char* out, size_t cap) {
+  displayName(t.name, t.kind == otp::Kind::Channel, out, cap);
+}
+
+// The width rows and cards share: the Settings cards' (settingsCardIn).
+static lv_coord_t rowW() { return lv_disp_get_hor_res(nullptr) - 22; }
+
+// A scrolling screen body below the bar, with the Settings pages' margins.
+static lv_obj_t* newBody(bool scroll = true) {
+  // Screens are swapped from their own buttons' handlers: never delete the
+  // tree an event is still being dispatched in.
+  if (s_body) { lv_obj_add_flag(s_body, LV_OBJ_FLAG_HIDDEN); lv_obj_del_async(s_body); s_body = nullptr; }
+  s_list = s_ta = s_counter = s_info = s_parts = s_bar = s_send_btn = s_parts_btn = nullptr;
+  s_body = lv_obj_create(s_root);
+  lv_obj_remove_style_all(s_body);
+  lv_obj_set_size(s_body, LV_PCT(100), LV_PCT(100));
+  if (scroll) {
+    lv_obj_set_flex_flow(s_body, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_left(s_body, 8, LV_PART_MAIN);
+    lv_obj_set_style_pad_right(s_body, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_ver(s_body, SC(8), LV_PART_MAIN);
+    lv_obj_set_style_pad_row(s_body, SC(6), LV_PART_MAIN);
+    lv_obj_set_scroll_dir(s_body, LV_DIR_VER);
+  } else {
+    lv_obj_clear_flag(s_body, LV_OBJ_FLAG_SCROLLABLE);
+  }
+  return s_body;
+}
+
+// A page title with optional icon buttons on its right (filled in by the caller).
+static lv_obj_t* titleRow(lv_obj_t* parent, const char* text) {
+  lv_obj_t* r = box(parent);
+  lv_obj_set_size(r, rowW(), LV_SIZE_CONTENT);
+  lv_obj_set_flex_flow(r, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(r, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lv_obj_set_style_pad_column(r, SC(6), LV_PART_MAIN);
+  lv_obj_set_style_pad_bottom(r, SC(2), LV_PART_MAIN);
+  lv_obj_t* l = label(r, text, &g_font_semi_16, COLOR_TEXT);
+  lv_label_set_long_mode(l, LV_LABEL_LONG_DOT);
+  lv_obj_set_flex_grow(l, 1);
+  return r;
+}
+
+// A list row in the Chats list's language: soft rounded, tinted while it holds
+// something new, lit by a press or the keypad cursor.
+static lv_obj_t* listRow(lv_obj_t* parent, lv_coord_t h, bool tinted, lv_event_cb_t cb, void* ud) {
+  lv_obj_t* r = lv_btn_create(parent);
+  lv_obj_remove_style_all(r);
+  lv_obj_set_size(r, rowW(), h);
+  lv_obj_clear_flag(r, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_flag(r, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLL_ON_FOCUS);
+  lv_obj_set_style_radius(r, SC(10), LV_PART_MAIN);
+  if (tinted && !s_theme_high_contrast) {
+    lv_obj_set_style_bg_color(r, lv_color_hex(rgbMix(COLOR_BG, accent(), 22)), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(r, LV_OPA_COVER, LV_PART_MAIN);
+  }
+  lv_obj_set_style_bg_color(r, lv_color_hex(COLOR_CONTROL), LV_PART_MAIN | LV_STATE_PRESSED);
+  lv_obj_set_style_bg_opa(r, LV_OPA_COVER, LV_PART_MAIN | LV_STATE_PRESSED);
+  lv_obj_set_style_bg_color(r, lv_color_hex(COLOR_CONTROL), LV_PART_MAIN | LV_STATE_FOCUS_KEY);
+  lv_obj_set_style_bg_opa(r, LV_OPA_COVER, LV_PART_MAIN | LV_STATE_FOCUS_KEY);
+  lv_obj_set_style_bg_color(r, lv_color_hex(COLOR_PANEL), LV_PART_MAIN | LV_STATE_DISABLED);
+  lv_obj_set_style_opa(r, LV_OPA_40, LV_PART_MAIN | LV_STATE_DISABLED);
+  if (cb) lv_obj_add_event_cb(r, cb, LV_EVENT_CLICKED, ud);
+  return r;
+}
+
+// An empty state: a lit icon in a soft disc, a line, and help under it.
+static void emptyState(lv_obj_t* parent, const char* icon, const char* title, const char* help) {
+  lv_obj_t* col = box(parent);
+  lv_obj_set_size(col, rowW(), LV_SIZE_CONTENT);
+  lv_obj_set_flex_flow(col, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_flex_align(col, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lv_obj_set_style_pad_row(col, SC(6), LV_PART_MAIN);
+  lv_obj_set_style_pad_ver(col, SC(10), LV_PART_MAIN);
+  lv_obj_t* disc = box(col);
+  lv_obj_set_size(disc, SC(44), SC(44));
+  lv_obj_set_style_radius(disc, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+  lv_obj_set_style_bg_color(disc, lv_color_hex(plainLook() ? COLOR_CONTROL : rgbMix(COLOR_PANEL, accent(), 50)), LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(disc, LV_OPA_COVER, LV_PART_MAIN);
+  lv_obj_t* il = lv_label_create(disc);
+  setIconLabel(il, icon);
+  lv_obj_set_style_text_color(il, lv_color_hex(ink(accent())), LV_PART_MAIN);
+  lv_obj_center(il);
+  label(col, title, &g_font_semi_14, COLOR_TEXT);
+  if (help && *help) {
+    lv_obj_t* h = label(col, help, &g_font_12, COLOR_SUB);
+    lv_obj_set_width(h, rowW() - SC(24));
+    lv_label_set_long_mode(h, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_align(h, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+  }
 }
 
 static void fmtAgo(uint32_t epoch, uint32_t at_ms, char* out, size_t cap) {
@@ -171,17 +282,23 @@ static void fmtAgo(uint32_t epoch, uint32_t at_ms, char* out, size_t cap) {
     struct tm a, b;
     if (localtime_r(&t, &a) && localtime_r(&n, &b)) {
       if (a.tm_year == b.tm_year && a.tm_yday == b.tm_yday) strftime(out, cap, "%H:%M", &a);
-      else strftime(out, cap, "%b %d, %H:%M", &a);
+      else strftime(out, cap, "%b %d", &a);
       return;
     }
   }
   if (!at_ms) { out[0] = 0; return; }
   const uint32_t s = (millis() - at_ms) / 1000;
-  if (s < 5) snprintf(out, cap, "just now");
-  else if (s < 60) snprintf(out, cap, "%us ago", (unsigned)s);
-  else if (s < 3600) snprintf(out, cap, "%um ago", (unsigned)(s / 60));
-  else if (s < 86400) snprintf(out, cap, "%uh ago", (unsigned)(s / 3600));
-  else snprintf(out, cap, "%ud ago", (unsigned)(s / 86400));
+  if (s < 60) snprintf(out, cap, "now");
+  else if (s < 3600) snprintf(out, cap, "%um", (unsigned)(s / 60));
+  else if (s < 86400) snprintf(out, cap, "%uh", (unsigned)(s / 3600));
+  else snprintf(out, cap, "%ud", (unsigned)(s / 86400));
+}
+
+// The pad's state in one colour: plenty, running low, used up.
+static uint32_t padColor(int avail) {
+  if (avail <= 0) return COLOR_STATUS_DANGER_TEXT;
+  if (avail < otp::kLowPadBytes) return COLOR_STATUS_WARN;
+  return ink(accent());
 }
 
 // ---- text prompt (long fields: pad hex, passphrases) --------------------------------
@@ -221,15 +338,17 @@ static void prompt(const char* title, const char* hint, bool secret, uint32_t ma
   lv_obj_set_size(card, sw - 20, LV_SIZE_CONTENT);
   lv_obj_align(card, LV_ALIGN_TOP_MID, 0, 6);
   styleCard(card);
-  lv_obj_set_style_pad_all(card, 8, LV_PART_MAIN);
+  lv_obj_set_style_radius(card, 12, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(card, SC(10), LV_PART_MAIN);
   lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
-  lv_obj_set_style_pad_row(card, 6, LV_PART_MAIN);
-  lv_obj_t* tl = label(card, title, &g_font_14, COLOR_TEXT);
-  useChainedFont(tl);
+  lv_obj_set_style_pad_row(card, SC(8), LV_PART_MAIN);
+  label(card, title, &g_font_semi_14, COLOR_TEXT);
   if (hint && *hint) para(card, hint);
   s_prompt_ta = lv_textarea_create(card);
   lv_obj_set_width(s_prompt_ta, LV_PCT(100));
   styleCard(s_prompt_ta);
+  lv_obj_set_style_bg_color(s_prompt_ta, lv_color_hex(COLOR_FIELD), LV_PART_MAIN);
+  lv_obj_set_style_radius(s_prompt_ta, SC(8), LV_PART_MAIN);
   lv_obj_set_style_text_font(s_prompt_ta, &g_font_14, LV_PART_MAIN);
   lv_obj_set_style_text_color(s_prompt_ta, lv_color_hex(COLOR_TEXT), LV_PART_MAIN);
   lv_textarea_set_max_length(s_prompt_ta, max_len);
@@ -243,10 +362,23 @@ static void prompt(const char* title, const char* hint, bool secret, uint32_t ma
   lv_obj_add_event_cb(s_prompt_ta, [](lv_event_t* e) {
     if (lv_event_get_code(e) == LV_EVENT_READY) promptDone(true);
   }, LV_EVENT_READY, nullptr);
-  lv_obj_t* r = row(card);
+  lv_obj_t* r = box(card);
+  lv_obj_set_size(r, LV_PCT(100), LV_SIZE_CONTENT);
+  lv_obj_set_flex_flow(r, LV_FLEX_FLOW_ROW);
   lv_obj_set_flex_align(r, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-  button(r, TR("Cancel"), [](lv_event_t*) { promptDone(false); }, nullptr, COLOR_SECONDARY_ACTION);
-  button(r, "OK", [](lv_event_t*) { promptDone(true); }, nullptr, COLOR_STATUS_OK);
+  lv_obj_set_style_pad_column(r, SC(8), LV_PART_MAIN);
+  for (int i = 0; i < 2; i++) {
+    lv_obj_t* b = lv_btn_create(r);
+    if (i) stylePrimary(b); else styleButton(b);
+    lv_obj_set_size(b, LV_SIZE_CONTENT, SC(32));
+    lv_obj_set_style_pad_hor(b, SC(14), LV_PART_MAIN);
+    lv_obj_set_style_radius(b, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+    lv_obj_add_event_cb(b, i ? (lv_event_cb_t)[](lv_event_t*) { promptDone(true); }
+                             : (lv_event_cb_t)[](lv_event_t*) { promptDone(false); }, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t* l = label(b, i ? "OK" : TR("Cancel"), i ? &g_font_semi_14 : &g_font_14,
+                        i ? COLOR_ON_GLOW : COLOR_TEXT);
+    lv_obj_center(l);
+  }
   if (g_lv.keyboard) kbMirrorBind(s_prompt_ta);
   lv_group_t* g = lv_group_get_default();
   if (g) lv_group_focus_obj(s_prompt_ta);
@@ -264,18 +396,33 @@ static void panicConfirmed() {
   s_tid[0] = 0;
   show(Screen::List);
 }
+static void panicAsk(lv_event_t*) {
+  showConfirm(TR("Erase every pad and message on this device, and turn protection off?\n\nThis cannot be undone."),
+              TR("Wipe"), panicConfirmed);
+}
 static void buildLock() {
   lv_obj_t* b = newBody();
-  heading(b, "OTP Messenger");
-  para(b, TR("Locked. Your pads and messages are encrypted with your passphrase. "
-             "Messages that arrive while locked are kept and opened when you unlock."));
-  button(b, TR("Enter passphrase"), [](lv_event_t*) {
-    prompt(TR("Passphrase"), nullptr, true, 64, unlockWith);
-  }, nullptr, th().channel);
-  button(b, TR("Panic wipe"), [](lv_event_t*) {
-    showConfirm(TR("Erase every pad and message on this device, and turn protection off?\n\nThis cannot be undone."),
-                TR("Wipe"), panicConfirmed);
-  }, nullptr, COLOR_STATUS_DANGER);
+  lv_obj_set_flex_align(b, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lv_obj_set_style_pad_top(b, SC(18), LV_PART_MAIN);
+  emptyState(b, UI_ICON_LOCK, "OTP Messenger",
+             TR("Locked. Your pads and messages are encrypted with your passphrase. "
+                "Messages that arrive while locked are kept and opened when you unlock."));
+  lv_obj_t* u = lv_btn_create(b);
+  stylePrimary(u);
+  lv_obj_set_size(u, LV_MIN(rowW(), SC(200)), SC(36));
+  lv_obj_set_style_radius(u, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+  lv_obj_add_event_cb(u, [](lv_event_t*) { prompt(TR("Passphrase"), nullptr, true, 64, unlockWith); },
+                      LV_EVENT_CLICKED, nullptr);
+  lv_obj_t* ul = label(u, TR("Unlock"), &g_font_semi_14, COLOR_ON_GLOW);
+  lv_obj_center(ul);
+  lv_obj_t* p = lv_btn_create(b);
+  styleDanger(p);
+  lv_obj_set_size(p, LV_MIN(rowW(), SC(200)), SC(32));
+  lv_obj_set_style_radius(p, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(p, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_add_event_cb(p, panicAsk, LV_EVENT_CLICKED, nullptr);
+  lv_obj_t* pl = label(p, TR("Panic wipe"), &g_font_14, COLOR_STATUS_DANGER_TEXT);
+  lv_obj_center(pl);
 }
 
 // ---- Conversations ---------------------------------------------------------------------
@@ -291,15 +438,19 @@ static const otp::Entry* lastShown(otp::Target& t) {
   return t.log_n ? &t.log[t.log_n - 1] : nullptr;
 }
 
+// Two lines, as a Chats row: the name and the time on top, the last message and
+// the unread count (or what is left of the pad) under it.
+static lv_coord_t twoLineRowH() {
+  return LV_MAX(SC(42), (lv_coord_t)(lv_font_get_line_height(&g_font_semi_14) + lv_font_get_line_height(&g_font_12) + SC(10)));
+}
+
 static void buildList() {
   otp::Core& c = OtpMessenger::core();
   lv_obj_t* b = newBody();
-  lv_obj_t* top = row(b);
-  lv_obj_set_flex_flow(top, LV_FLEX_FLOW_ROW);
-  lv_obj_t* h = heading(top, TR("Conversations"));
-  lv_obj_set_flex_grow(h, 1);
-  button(top, LV_SYMBOL_PLUS, [](lv_event_t*) { show(Screen::Pick); }, nullptr, th().channel, 28);
-  button(top, LV_SYMBOL_SETTINGS, [](lv_event_t*) { show(Screen::Settings); }, nullptr, 0, 28);
+  lv_obj_set_style_pad_row(b, SC(2), LV_PART_MAIN);
+  lv_obj_t* top = titleRow(b, TR("Conversations"));
+  iconBtn(top, UI_ICON_SETTINGS, [](lv_event_t*) { show(Screen::Settings); });
+  roundAccent(top, UI_ICON_PLUS, [](lv_event_t*) { show(Screen::Pick); }, SC(30));
 
   // Newest activity first.
   otp::Target* order[otp::kMaxTargets];
@@ -317,44 +468,84 @@ static void buildList() {
       if (kz > ka) { otp::Target* x = order[j]; order[j] = order[j - 1]; order[j - 1] = x; }
     }
   if (!n) {
-    para(b, TR("No conversations yet.\n\nTap + to pick a contact or a private channel, then give it a pad: "
-               "generate one and export it to the SD card for the other device, or import theirs."));
+    emptyState(b, UI_ICON_LOCK, TR("No conversations yet"),
+               TR("Pick a contact or a private channel, then give it a pad: generate one and export it "
+                  "to the SD card for the other device, or import theirs."));
+    lv_obj_t* go = setButton(b, UI_ICON_PLUS, "New conversation", [](lv_event_t*) { show(Screen::Pick); }, nullptr, SET_PRIMARY);
+    lv_obj_set_width(go, rowW());
     return;
   }
+  const lv_coord_t rh = twoLineRowH(), av = SC(30), pl = SC(6), pr = SC(8);
+  const lv_coord_t tx = pl + av + SC(10);
   for (int i = 0; i < n; i++) {
     otp::Target* t = order[i];
-    lv_obj_t* card = lv_obj_create(b);
-    lv_obj_remove_style_all(card);
-    lv_obj_set_size(card, LV_PCT(100), LV_SIZE_CONTENT);
-    styleCard(card);
-    lv_obj_set_style_pad_all(card, 6, LV_PART_MAIN);
-    lv_obj_add_flag(card, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_add_event_cb(card, openChatCb, LV_EVENT_CLICKED, t);
-    char title[64];
-    snprintf(title, sizeof title, "%s%s", t->kind == otp::Kind::Dm ? "" : "#", t->name);
-    lv_obj_t* tl = label(card, title, &g_font_14, t->kind == otp::Kind::Dm ? senderColor(t->name) : th().channel);
-    useChainedFont(tl);
-    lv_obj_set_width(tl, LV_PCT(70));
-    lv_label_set_long_mode(tl, LV_LABEL_LONG_DOT);
-    // pad bytes, right
-    char right[48];
-    const int avail = c.available(*t);
-    if (t->unread) snprintf(right, sizeof right, "%u new", (unsigned)t->unread);
-    else if (avail > 0) snprintf(right, sizeof right, "%d B", avail);
-    else snprintf(right, sizeof right, TR("no pad"));
-    lv_obj_t* rl = label(card, right, &g_font_12, t->unread ? th().ok : (avail < otp::kLowPadBytes ? th().encrypt : th().padinfo));
-    lv_obj_align(rl, LV_ALIGN_TOP_RIGHT, 0, 2);
+    lv_obj_t* r = listRow(b, rh, t->unread > 0, openChatCb, t);
+    lv_obj_t* a = avatar(r, *t, av);
+    lv_obj_align(a, LV_ALIGN_LEFT_MID, pl, 0);
+
     const otp::Entry* e = lastShown(*t);
+    // Time, top right: lit while there is something unread.
+    char when[16] = "";
+    if (e) fmtAgo(e->at_epoch, e->at_ms, when, sizeof when);
+    lv_coord_t tw = 0;
+    if (when[0]) {
+      lv_obj_t* tl = label(r, when, t->unread ? &g_font_semi_12 : &g_font_12, t->unread ? ink(accent()) : COLOR_TERTIARY);
+      lv_obj_align(tl, LV_ALIGN_TOP_RIGHT, -pr, SC(5));
+      tw = lv_txt_get_width(when, strlen(when), &g_font_semi_12, 0, LV_TEXT_FLAG_NONE);
+    }
+    char nm[56];
+    displayName(*t, nm, sizeof nm);
+    lv_obj_t* nl = label(r, nm, &g_font_semi_14, COLOR_TEXT);
+    lv_label_set_long_mode(nl, LV_LABEL_LONG_DOT);
+    lv_obj_set_size(nl, LV_MAX((lv_coord_t)40, (lv_coord_t)(rowW() - tx - pr - tw - SC(8))),
+                    lv_font_get_line_height(&g_font_semi_14));
+    lv_obj_align(nl, LV_ALIGN_TOP_LEFT, tx, SC(4));
+
+    // Bottom right: the unread count, or the pad left.
+    lv_coord_t rw = 0;
+    if (t->unread) {
+      lv_obj_t* pill = makeCountPill(r, t->unread > 99 ? 100 : t->unread);
+      if (!plainLook()) {
+        lv_obj_set_style_bg_color(pill, lv_color_hex(accent()), LV_PART_MAIN);
+        if (lv_obj_t* pt = lv_obj_get_child(pill, 0))
+          lv_obj_set_style_text_color(pt, lv_color_hex(contrastOf(accent())), LV_PART_MAIN);
+      }
+      lv_obj_update_layout(pill);
+      rw = lv_obj_get_width(pill);
+      lv_obj_align(pill, LV_ALIGN_BOTTOM_RIGHT, -pr, -SC(5));
+    } else {
+      const int avail = c.available(*t);
+      char pad[24];
+      if (avail > 0) snprintf(pad, sizeof pad, "%d B", avail);
+      else snprintf(pad, sizeof pad, "%s", c.hasPad(*t) ? TR("used up") : TR("no pad"));
+      lv_obj_t* pl2 = label(r, pad, &g_font_12, avail >= otp::kLowPadBytes ? COLOR_TERTIARY : padColor(avail));
+      lv_obj_align(pl2, LV_ALIGN_BOTTOM_RIGHT, -pr, -SC(5));
+      rw = lv_txt_get_width(pad, strlen(pad), &g_font_12, 0, LV_TEXT_FLAG_NONE);
+    }
+    // The last message, "You:" quiet before your own.
+    lv_coord_t px = tx;
     char prev[96];
-    if (e) snprintf(prev, sizeof prev, "%s%.*s", e->mine ? TR("You: ") : "", (int)(e->len > 70 ? 70 : e->len), e->text);
-    else snprintf(prev, sizeof prev, "%s", TR("No messages yet"));
-    for (char* p = prev; *p; ++p) if (*p == '\n') *p = ' ';
-    lv_obj_t* pl = label(card, prev, &g_font_12, COLOR_SUB);
-    useChainedFont(pl);
-    lv_obj_set_width(pl, LV_PCT(100));
-    lv_label_set_long_mode(pl, LV_LABEL_LONG_DOT);
-    lv_obj_set_pos(pl, 0, 20);
+    if (e) {
+      if (e->mine) {
+        lv_obj_t* you = label(r, TR("You:"), &g_font_12, COLOR_TERTIARY);
+        lv_obj_align(you, LV_ALIGN_BOTTOM_LEFT, px, -SC(5));
+        px += lv_txt_get_width(TR("You:"), strlen(TR("You:")), &g_font_12, 0, LV_TEXT_FLAG_NONE) + 4;
+      }
+      // A channel names who said it: "Sam: text".
+      char raw[112];
+      const bool named = t->kind == otp::Kind::Channel && !e->mine && e->who[0];
+      snprintf(raw, sizeof raw, "%s%s%.*s", named ? e->who : "", named ? ": " : "",
+               (int)(e->len > 70 ? 70 : e->len), e->text ? e->text : "");
+      for (char* q = raw; *q; ++q) if (*q == '\n' || *q == '\r') *q = ' ';
+      copyUtf8ReplacingMissingGlyphs(&g_font_12, prev, sizeof prev, raw);
+    } else {
+      snprintf(prev, sizeof prev, "%s", c.hasPad(*t) ? TR("No messages yet") : TR("Tap to add a pad"));
+    }
+    lv_obj_t* pv = label(r, prev, &g_font_12, COLOR_SUB);
+    lv_label_set_long_mode(pv, LV_LABEL_LONG_DOT);
+    lv_obj_set_size(pv, LV_MAX((lv_coord_t)30, (lv_coord_t)(rowW() - px - pr - rw - SC(8))),
+                    lv_font_get_line_height(&g_font_12));
+    lv_obj_align(pv, LV_ALIGN_BOTTOM_LEFT, px, -SC(5));
   }
 }
 
@@ -378,14 +569,54 @@ static void pickChannelCb(lv_event_t* e) {
   snprintf(s_tid, sizeof s_tid, "%s", t->id);
   show(OtpMessenger::core().hasPad(*t) ? Screen::Chat : Screen::Pad);
 }
+// One pick row: the glyph, the name, a status line, a chevron.
+static void pickRow(lv_obj_t* parent, const char* name, bool channel, const char* sub, uint32_t sub_col,
+                    bool enabled, lv_event_cb_t cb, int idx) {
+  const lv_coord_t rh = twoLineRowH(), av = SC(30), pl = SC(6), pr = SC(8);
+  const lv_coord_t tx = pl + av + SC(10);
+  lv_obj_t* r = listRow(parent, rh, false, enabled ? cb : nullptr, (void*)(intptr_t)idx);
+  if (!enabled) lv_obj_add_state(r, LV_STATE_DISABLED);
+  lv_obj_t* a = avatar(r, name, channel, av);
+  lv_obj_align(a, LV_ALIGN_LEFT_MID, pl, 0);
+  lv_obj_t* ch = lv_label_create(r);
+  setIconLabel(ch, UI_ICON_CHEVRON_RIGHT);
+  lv_obj_set_style_text_color(ch, lv_color_hex(COLOR_TERTIARY), LV_PART_MAIN);
+  lv_obj_align(ch, LV_ALIGN_RIGHT_MID, -pr, 0);
+  char nm[56];
+  displayName(name, channel, nm, sizeof nm);
+  const lv_coord_t tw = LV_MAX((lv_coord_t)40, (lv_coord_t)(rowW() - tx - pr - SC(26)));
+  lv_obj_t* nl = label(r, nm, &g_font_semi_14, COLOR_TEXT);
+  lv_label_set_long_mode(nl, LV_LABEL_LONG_DOT);
+  lv_obj_set_size(nl, tw, lv_font_get_line_height(&g_font_semi_14));
+  lv_obj_align(nl, LV_ALIGN_TOP_LEFT, tx, SC(4));
+  lv_obj_t* sl = label(r, sub, &g_font_12, sub_col);
+  lv_label_set_long_mode(sl, LV_LABEL_LONG_DOT);
+  lv_obj_set_size(sl, tw, lv_font_get_line_height(&g_font_12));
+  lv_obj_align(sl, LV_ALIGN_BOTTOM_LEFT, tx, -SC(5));
+}
 static void buildPick() {
   lv_obj_t* b = newBody();
-  heading(b, TR("New conversation"));
-  lv_obj_t* seg = row(b);
-  button(seg, TR("Contacts"), [](lv_event_t*) { s_pick_channels = false; show(Screen::Pick); }, nullptr,
-         s_pick_channels ? 0 : th().channel, 28);
-  button(seg, TR("Channels"), [](lv_event_t*) { s_pick_channels = true; show(Screen::Pick); }, nullptr,
-         s_pick_channels ? th().channel : 0, 28);
+  lv_obj_set_style_pad_row(b, SC(2), LV_PART_MAIN);
+  titleRow(b, TR("New conversation"));
+  // Contacts | Channels, as the Settings choice tiles.
+  lv_obj_t* seg = box(b);
+  lv_obj_set_size(seg, rowW(), LV_SIZE_CONTENT);
+  lv_obj_set_flex_flow(seg, LV_FLEX_FLOW_ROW);
+  lv_obj_set_style_pad_column(seg, SC(6), LV_PART_MAIN);
+  lv_obj_set_style_pad_bottom(seg, SC(6), LV_PART_MAIN);
+  const char* segs[2] = {TR("Contacts"), TR("Channels")};
+  for (int i = 0; i < 2; i++) {
+    lv_obj_t* t = lv_btn_create(seg);
+    styleButton(t);
+    lv_obj_set_size(t, (rowW() - SC(6)) / 2, SC(30));
+    lv_obj_add_event_cb(t, [](lv_event_t* e) {
+      s_pick_channels = (int)(intptr_t)lv_event_get_user_data(e) == 1;
+      show(Screen::Pick);
+    }, LV_EVENT_CLICKED, (void*)(intptr_t)i);
+    lv_obj_t* l = label(t, segs[i], &g_font_14, COLOR_TEXT);
+    lv_obj_center(l);
+    setTileStyle(t, (i == 1) == s_pick_channels, true);
+  }
   otp::Core& c = OtpMessenger::core();
   int shown = 0;
   if (!s_pick_channels) {
@@ -397,30 +628,24 @@ static void buildPick() {
       char hex[9]; otp::toHex(pub, 4, hex);
       char id[16]; snprintf(id, sizeof id, "dm:%s", hex);
       otp::Target* t = c.findById(id);
-      char line[80];
-      if (t && c.available(*t) > 0) snprintf(line, sizeof line, "%s  (%d B)", name, c.available(*t));
-      else snprintf(line, sizeof line, "%s", name);
-      lv_obj_t* bt = button(b, line, pickContactCb, (void*)(intptr_t)i);
-      lv_obj_set_width(bt, LV_PCT(100));
-      lv_obj_set_style_text_align(lv_obj_get_child(bt, 0), LV_TEXT_ALIGN_LEFT, LV_PART_MAIN);
-      lv_obj_align(lv_obj_get_child(bt, 0), LV_ALIGN_LEFT_MID, 0, 0);
+      char sub[48];
+      const int avail = t ? c.available(*t) : 0;
+      if (avail > 0) snprintf(sub, sizeof sub, "%d B of pad left", avail);
+      else snprintf(sub, sizeof sub, "%s", TR("No pad yet"));
+      pickRow(b, name, false, sub, avail > 0 ? padColor(avail) : COLOR_SUB, true, pickContactCb, i);
       shown++;
     }
-    if (!shown) para(b, TR("No chat contacts yet. Add the other person as a contact first."));
+    if (!shown) emptyState(b, UI_ICON_USER_PLUS, TR("No chat contacts yet"), TR("Add the other person as a contact first."));
   } else {
     for (int i = 0; i < OtpMessenger::channelCount(); i++) {
       char name[33];
       if (!OtpMessenger::channelAt(i, name, sizeof name)) continue;
       const bool pub = otp::Core::isPublicChannel(name);
-      char line[80];
-      snprintf(line, sizeof line, "#%s%s", name, pub ? TR("  (not available)") : "");
-      lv_obj_t* bt = button(b, line, pub ? nullptr : pickChannelCb, (void*)(intptr_t)i);
-      lv_obj_set_width(bt, LV_PCT(100));
-      lv_obj_align(lv_obj_get_child(bt, 0), LV_ALIGN_LEFT_MID, 0, 0);
-      if (pub) lv_obj_add_state(bt, LV_STATE_DISABLED);
+      pickRow(b, name, true, pub ? TR("Not available: everyone has its key") : TR("Private channel"),
+              COLOR_SUB, !pub, pickChannelCb, i);
       shown++;
     }
-    if (!shown) para(b, TR("No channels configured. Add a private channel in Chats first."));
+    if (!shown) emptyState(b, UI_ICON_HASH, TR("No channels configured"), TR("Add a private channel in Chats first."));
     else para(b, TR("Use a private channel: Public uses a key everyone has, so a pad there protects nothing."));
   }
 }
@@ -440,11 +665,12 @@ static int sigGrade(uint32_t* color, const char** word) {
   float m = 0;
   for (int i = 0; i < n; i++) m += hist[i];
   m = n ? m / n : -99;
-  if (m >= 20) { *color = 0x39FF14; *word = "excellent"; return 4; }
-  if (m >= 12) { *color = 0x2ECC71; *word = "good"; return 3; }
-  if (m >= 6) { *color = 0xF1C40F; *word = "fair"; return 2; }
-  if (m >= 0) { *color = 0xE67E22; *word = "poor"; return 1; }
-  *color = 0xE74C3C; *word = n ? "very poor" : "no data";
+  if (m >= 20) { *color = COLOR_STATUS_OK_TEXT; *word = "excellent signal"; return 4; }
+  if (m >= 12) { *color = COLOR_STATUS_OK_TEXT; *word = "good signal"; return 3; }
+  if (m >= 6) { *color = COLOR_STATUS_WARN; *word = "fair signal"; return 2; }
+  if (m >= 0) { *color = COLOR_STATUS_WARN; *word = "poor signal"; return 1; }
+  *color = n ? COLOR_STATUS_DANGER_TEXT : COLOR_TERTIARY;
+  *word = n ? "very poor signal" : "no signal data";
   return 0;
 }
 
@@ -452,50 +678,78 @@ static void refreshInfo() {
   otp::Target* t = cur();
   if (!t || !s_info) return;
   otp::Core& c = OtpMessenger::core();
-  char txt[200];
-  uint32_t col = th().padinfo;
   const int avail = c.available(*t);
-  if (t->badge[0]) { snprintf(txt, sizeof txt, "%s", t->badge); col = th().ok; }
-  else if (avail <= 0) { snprintf(txt, sizeof txt, "%s", c.hasPad(*t) ? TR("Pad used up") : TR("No pad yet: tap Pad")); col = th().encrypt; }
-  else if (avail < otp::kLowPadBytes) { snprintf(txt, sizeof txt, "%d B left: running low", avail); col = th().keyphrase; }
-  else snprintf(txt, sizeof txt, "%d B left", avail);
-  // sync state + signal on the same line
-  const char* sync = t->sync_ok == 1 ? LV_SYMBOL_OK : t->sync_ok == 0 ? LV_SYMBOL_WARNING : "";
+  // Subtitle: the pad, then sync, then the signal, each in its state's colour.
+  char pad[64];
+  uint32_t pcol = COLOR_SUB;
+  if (t->badge[0]) { snprintf(pad, sizeof pad, "%s", t->badge); pcol = ink(th().ok); }
+  else if (avail <= 0) { snprintf(pad, sizeof pad, "%s", c.hasPad(*t) ? TR("Pad used up") : TR("No pad yet")); pcol = COLOR_STATUS_DANGER_TEXT; }
+  else if (avail < otp::kLowPadBytes) { snprintf(pad, sizeof pad, "%d B left, running low", avail); pcol = COLOR_STATUS_WARN; }
+  else snprintf(pad, sizeof pad, "%d B left", avail);
+  const char* sync = t->sync_ok == 1 ? TR("in sync") : t->sync_ok == 0 ? TR("out of sync") : TR("sync unchecked");
+  const uint32_t ycol = t->sync_ok == 1 ? COLOR_SUB : t->sync_ok == 0 ? COLOR_STATUS_DANGER_TEXT : COLOR_TERTIARY;
   uint32_t scol; const char* sword;
   sigGrade(&scol, &sword);
-  char line[260];
-  snprintf(line, sizeof line, "#%06lX %s#  #%06lX %s#  #%06lX %s#", (unsigned long)col, txt,
-           (unsigned long)(t->sync_ok == 0 ? th().encrypt : th().ok), sync, (unsigned long)scol, sword);
-  lv_label_set_text(s_info, line);
-  // progress
+  if (scol == COLOR_STATUS_OK_TEXT) scol = COLOR_SUB;   // a good link needs no colour
+  char line[220];
+  snprintf(line, sizeof line, "#%06lX %s#  #%06lX %s#  #%06lX %s#", (unsigned long)pcol, pad,
+           (unsigned long)ycol, sync, (unsigned long)scol, sword);
+  if (strcmp(lv_label_get_text(s_info), line) != 0) lv_label_set_text(s_info, line);
+
+  // The gauge: a transfer's progress while one runs, else what is left of the pad.
   if (s_bar) {
     int total = 0;
     int done = c.sendProgress(*t, &total);
-    uint32_t bc = th().channel;
-    if (done < 0) { done = c.recvProgress(*t, &total); bc = th().ok; }
-    if (done >= 0 && total > 1) {
+    uint32_t bc = accent();
+    if (done < 0) { done = c.recvProgress(*t, &total); bc = plainLook() ? COLOR_GLOW : th().ok; }
+    if (done < 0 || total <= 1) {
+      total = (int)t->pad.n;
+      done = avail;
+      bc = avail <= 0 ? COLOR_STATUS_DANGER : avail < otp::kLowPadBytes ? COLOR_STATUS_WARN : accent();
+    }
+    if (total > 0) {
       lv_obj_clear_flag(s_bar, LV_OBJ_FLAG_HIDDEN);
       lv_bar_set_range(s_bar, 0, total);
-      lv_bar_set_value(s_bar, done, LV_ANIM_OFF);
+      lv_bar_set_value(s_bar, LV_MIN(done, total), LV_ANIM_OFF);
       lv_obj_set_style_bg_color(s_bar, lv_color_hex(bc), LV_PART_INDICATOR);
     } else {
       lv_obj_add_flag(s_bar, LV_OBJ_FLAG_HIDDEN);
     }
   }
+  // Who is on the channel: a dot per person, lit when they are in step.
   if (s_parts) {
-    if (t->kind == otp::Kind::Channel && c.show_participants) {
-      otp::Participant ps[8];
-      const int n = c.activeParticipants(*t, ps, 8);
-      char pl[300] = "";
-      size_t o = 0;
-      for (int i = 0; i < n && o + 48 < sizeof pl; i++)
-        o += snprintf(pl + o, sizeof pl - o, "#%06lX %s#  ", (unsigned long)(ps[i].in_sync == 1 ? th().ok : th().ready), ps[i].name);
-      if (!n) snprintf(pl, sizeof pl, "#%06lX %s#", (unsigned long)th().ready, TR("no one heard yet"));
-      lv_label_set_text(s_parts, pl);
-      lv_obj_clear_flag(s_parts, LV_OBJ_FLAG_HIDDEN);
-    } else {
-      lv_obj_add_flag(s_parts, LV_OBJ_FLAG_HIDDEN);
+    const bool on = t->kind == otp::Kind::Channel && c.show_participants;
+    if (s_parts_btn && lv_obj_get_child(s_parts_btn, 0))
+      lv_obj_set_style_text_color(lv_obj_get_child(s_parts_btn, 0), lv_color_hex(on ? ink(accent()) : COLOR_SUB), LV_PART_MAIN);
+    if (!on) { lv_obj_add_flag(s_parts, LV_OBJ_FLAG_HIDDEN); return; }
+    otp::Participant ps[8];
+    const int n = c.activeParticipants(*t, ps, 8);
+    char sig[160] = "";
+    size_t o = 0;
+    for (int i = 0; i < n && o + 40 < sizeof sig; i++) o += snprintf(sig + o, sizeof sig - o, "%d%s|", ps[i].in_sync, ps[i].name);
+    const char* old = (const char*)lv_obj_get_user_data(s_parts);
+    if (!old || strcmp(old, sig) != 0) {
+      free((void*)old);
+      lv_obj_set_user_data(s_parts, strdup(sig));
+      lv_obj_clean(s_parts);
+      if (!n) label(s_parts, TR("No one heard yet"), &g_font_12, COLOR_TERTIARY);
+      for (int i = 0; i < n; i++) {
+        lv_obj_t* chip = box(s_parts);
+        lv_obj_set_size(chip, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+        lv_obj_set_flex_flow(chip, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(chip, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_set_style_pad_column(chip, 4, LV_PART_MAIN);
+        lv_obj_t* dot = box(chip);
+        lv_obj_set_size(dot, 6, 6);
+        lv_obj_set_style_radius(dot, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(dot, LV_OPA_COVER, LV_PART_MAIN);
+        lv_obj_set_style_bg_color(dot, lv_color_hex(ps[i].in_sync == 1 ? COLOR_STATUS_OK : ps[i].in_sync == 0 ? COLOR_STATUS_DANGER : COLOR_TERTIARY), LV_PART_MAIN);
+        char nm[40];
+        copyUtf8ReplacingMissingGlyphs(&g_font_12, nm, sizeof nm, ps[i].name);
+        label(chip, nm, &g_font_12, COLOR_SUB);
+      }
     }
+    lv_obj_clear_flag(s_parts, LV_OBJ_FLAG_HIDDEN);
   }
 }
 
@@ -517,12 +771,15 @@ static void refreshCounter() {
     const int ccap = otp::maxChunkBytes(name_len);
     const int parts = typed ? (typed + ccap - 1) / ccap : 0;
     const int need = typed + parts * 12;
-    if (parts > 1) snprintf(buf, sizeof buf, "%d typed  ·  %d parts  ·  %d of %d B", typed, parts, need, avail);
-    else snprintf(buf, sizeof buf, "%d typed  ·  %d of %d B", typed, need, avail);
+    if (parts > 1) snprintf(buf, sizeof buf, "%d parts  ·  %d of %d B", parts, need, avail);
+    else snprintf(buf, sizeof buf, "%d of %d B", need, avail);
     bad = need > avail;
   }
+  // Only while there is something to weigh: the header already says what is left.
+  if (!typed && !bad) { lv_obj_add_flag(s_counter, LV_OBJ_FLAG_HIDDEN); return; }
+  lv_obj_clear_flag(s_counter, LV_OBJ_FLAG_HIDDEN);
   lv_label_set_text(s_counter, buf);
-  lv_obj_set_style_text_color(s_counter, lv_color_hex(bad ? th().encrypt : th().padinfo), LV_PART_MAIN);
+  lv_obj_set_style_text_color(s_counter, lv_color_hex(bad ? COLOR_STATUS_DANGER_TEXT : COLOR_SUB), LV_PART_MAIN);
 }
 
 static void sendNow() {
@@ -538,6 +795,16 @@ static void sendNow() {
   refreshCounter();
 }
 
+// A bubble's status word colour (yours) by its state.
+static uint32_t stateColor(otp::State s) {
+  switch (s) {
+    case otp::State::Delivered: return ink(plainLook() ? COLOR_GLOW : th().ok);
+    case otp::State::Retrying:  return COLOR_STATUS_WARN;
+    case otp::State::Failed: case otp::State::Lost: return COLOR_STATUS_DANGER_TEXT;
+    default: return COLOR_TERTIARY;
+  }
+}
+
 static void buildBubbles(bool keep_scroll) {
   otp::Target* t = cur();
   if (!t || !s_list) return;
@@ -550,69 +817,107 @@ static void buildBubbles(bool keep_scroll) {
   const lv_coord_t max_w = w * 4 / 5;
   const int first = t->log_n > s_shown_n ? t->log_n - s_shown_n : 0;
   if (first > 0) {
-    lv_obj_t* more = button(s_list, TR("Earlier messages"), [](lv_event_t*) {
+    lv_obj_t* wrap = box(s_list);
+    lv_obj_set_size(wrap, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(wrap, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(wrap, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_t* more = lv_btn_create(wrap);
+    styleButton(more);
+    lv_obj_set_size(more, LV_SIZE_CONTENT, SC(24));
+    lv_obj_set_style_pad_hor(more, SC(12), LV_PART_MAIN);
+    lv_obj_set_style_radius(more, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+    lv_obj_add_event_cb(more, [](lv_event_t*) {
       s_shown_n += 60;
       lv_async_call([](void*) { buildBubbles(false); }, nullptr);   // not from inside the list being rebuilt
-    }, nullptr, 0, 24);
-    lv_obj_set_style_align(more, LV_ALIGN_CENTER, LV_PART_MAIN);
+    }, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t* ml = label(more, TR("Earlier messages"), &g_font_12, COLOR_SUB);
+    lv_obj_center(ml);
   }
   if (!t->log_n) {
-    para(s_list, c.hasPad(*t) ? TR("No messages yet. Everything you send here is one-time-pad encrypted.")
-                              : TR("There is no pad for this conversation yet. Open Pad to generate or import one."));
+    emptyState(s_list, c.hasPad(*t) ? UI_ICON_SHIELD_CHECK : UI_ICON_LOCK,
+               c.hasPad(*t) ? TR("No messages yet") : TR("No pad yet"),
+               c.hasPad(*t) ? TR("Everything you send here is one-time-pad encrypted.")
+                            : TR("Open the pad to generate or import one."));
+    lv_obj_t* last = lv_obj_get_child(s_list, -1);
+    if (last) lv_obj_set_width(last, LV_PCT(100));
   }
-  // OTP_3_RC1: own messages on the LEFT, theirs on the right.
+  const bool plain = plainLook();
+  const bool colorful = !plain && touchPrefsGetColorfulBubbles();
+  const lv_font_t* mf = chatMessageFont();
   for (int i = first; i < t->log_n; i++) {
     const otp::Entry& e = t->log[i];
     const bool own = e.mine;
-    uint32_t outline = th().plaintext;
-    switch (e.state) {
-      case otp::State::Sent: case otp::State::Pending: outline = th().channel; break;
-      case otp::State::Delivered: outline = th().ok; break;
-      case otp::State::Retrying: outline = th().keyphrase; break;
-      case otp::State::Waiting: outline = th().ready; break;
-      case otp::State::Received: outline = senderColor(e.who[0] ? e.who : "Them"); break;
-      case otp::State::Failed: case otp::State::Lost: outline = th().encrypt; break;
-    }
-    const uint32_t fill = (e.state == otp::State::Pending || e.state == otp::State::Retrying) ? darken(outline, 0.6f) : outline;
-    lv_obj_t* wrap = lv_obj_create(s_list);
-    lv_obj_remove_style_all(wrap);
+    const char* who = e.who[0] ? e.who : t->name;
+    // Yours on the right in the sent colour, theirs on the left, as in Chats.
+    lv_color_t bg = lv_color_hex(own ? COLOR_CHAT_SENT_BG : COLOR_CHAT_RECV_BG);
+    if (colorful) usernameBubbleColors(own ? the_mesh.getNodePrefs()->node_name : who, &bg, nullptr);
+    lv_obj_t* wrap = box(s_list);
     lv_obj_set_size(wrap, LV_PCT(100), LV_SIZE_CONTENT);
     lv_obj_set_flex_flow(wrap, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(wrap, own ? LV_FLEX_ALIGN_START : LV_FLEX_ALIGN_END,
-                          own ? LV_FLEX_ALIGN_START : LV_FLEX_ALIGN_END, own ? LV_FLEX_ALIGN_START : LV_FLEX_ALIGN_END);
-    lv_obj_set_style_pad_row(wrap, 1, LV_PART_MAIN);
-    lv_obj_clear_flag(wrap, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_t* bub = lv_obj_create(wrap);
-    lv_obj_remove_style_all(bub);
+    const lv_flex_align_t side = own ? LV_FLEX_ALIGN_END : LV_FLEX_ALIGN_START;
+    lv_obj_set_flex_align(wrap, LV_FLEX_ALIGN_START, side, side);
+    lv_obj_set_style_pad_row(wrap, 2, LV_PART_MAIN);
+    lv_obj_t* bub = box(wrap);
     lv_obj_set_size(bub, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
     lv_obj_set_style_max_width(bub, max_w, LV_PART_MAIN);
-    styleSurface(bub, fill, 8);
-    lv_obj_set_style_border_width(bub, 1, LV_PART_MAIN);
-    lv_obj_set_style_border_color(bub, lv_color_hex(lighten(outline, 0.35f)), LV_PART_MAIN);
-    lv_obj_set_style_pad_hor(bub, 7, LV_PART_MAIN);
-    lv_obj_set_style_pad_ver(bub, 4, LV_PART_MAIN);
-    lv_obj_clear_flag(bub, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(bub, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_radius(bub, 9, LV_PART_MAIN);
+    lv_obj_set_style_pad_hor(bub, 8, LV_PART_MAIN);
+    lv_obj_set_style_pad_ver(bub, 5, LV_PART_MAIN);
+#if defined(HAS_TDECK_PRO)
+    lv_obj_set_style_bg_opa(bub, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_color(bub, lv_color_black(), LV_PART_MAIN);
+    lv_obj_set_style_border_width(bub, 2, LV_PART_MAIN);
+#else
+    lv_obj_set_style_bg_color(bub, bg, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(bub, LV_OPA_COVER, LV_PART_MAIN);
+    if (s_theme_high_contrast) {
+      lv_obj_set_style_border_color(bub, lv_color_hex(COLOR_BORDER), LV_PART_MAIN);
+      lv_obj_set_style_border_width(bub, 2, LV_PART_MAIN);
+    } else if (own && (e.state == otp::State::Failed || e.state == otp::State::Lost)) {
+      lv_obj_set_style_border_color(bub, lv_color_hex(COLOR_STATUS_DANGER), LV_PART_MAIN);
+      lv_obj_set_style_border_width(bub, 1, LV_PART_MAIN);
+    }
+#endif
+    // Still on its way: a little faded until it lands.
+    if (own && (e.state == otp::State::Pending || e.state == otp::State::Retrying || e.state == otp::State::Waiting))
+      lv_obj_set_style_opa(bub, LV_OPA_70, LV_PART_MAIN);
+    // The sender, in their colour, inside the bubble on a channel.
+    if (!own && t->kind == otp::Kind::Channel) {
+      char nm[40];
+      copyUtf8ReplacingMissingGlyphs(&g_font_semi_12, nm, sizeof nm, who);
+      lv_color_t nc = lv_color_hex(COLOR_GLOW);
+      if (!plain) usernameBubbleColors(who, nullptr, &nc);
+      else nc = lv_color_hex(COLOR_CHAT_TEXT);
+      lv_obj_t* sl = lv_label_create(bub);
+      lv_label_set_text(sl, nm);
+      lv_obj_set_style_text_font(sl, &g_font_semi_12, LV_PART_MAIN);
+      lv_obj_set_style_text_color(sl, nc, LV_PART_MAIN);
+      lv_label_set_long_mode(sl, LV_LABEL_LONG_DOT);
+      lv_obj_set_style_max_width(sl, max_w - 16, LV_PART_MAIN);
+    }
     lv_obj_t* tl = lv_label_create(bub);
     lv_label_set_text(tl, e.text ? e.text : "");
-    lv_obj_set_style_text_font(tl, &g_font_14, LV_PART_MAIN);
-    lv_obj_set_style_text_color(tl, lv_color_hex(contrastOf(fill)), LV_PART_MAIN);
+    lv_obj_set_style_text_font(tl, mf, LV_PART_MAIN);
+#if defined(HAS_TDECK_PRO)
+    lv_obj_set_style_text_color(tl, lv_color_black(), LV_PART_MAIN);
+#else
+    lv_obj_set_style_text_color(tl, lv_color_hex(COLOR_CHAT_TEXT), LV_PART_MAIN);
+#endif
     useChainedFont(tl);
     lv_label_set_long_mode(tl, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(tl, LV_SIZE_CONTENT);
-    lv_obj_set_style_max_width(tl, max_w - 14, LV_PART_MAIN);
-    // caption: "Name · 12:04" or "Delivered · 12:04"
+    lv_obj_set_style_max_width(tl, max_w - 16, LV_PART_MAIN);
+    // Under it: the time, and for yours the delivery state in its colour.
     char when[24], cap[96], sw[48];
     fmtAgo(e.at_epoch, e.at_ms, when, sizeof when);
-    if (!own) {
-      if (t->kind == otp::Kind::Channel || e.state != otp::State::Received) snprintf(cap, sizeof cap, "%s · %s", e.who[0] ? e.who : "Them", when);
-      else snprintf(cap, sizeof cap, "%s", when);
-    } else {
-      const char* st = c.statusWord(*t, e, sw, sizeof sw);
-      if (st && *st) snprintf(cap, sizeof cap, "%s · %s", st, when);
-      else snprintf(cap, sizeof cap, "%s", when);
-    }
-    lv_obj_t* cl = label(wrap, cap, &g_font_12, th().padinfo);
-    useChainedFont(cl);
+    const char* st = own ? c.statusWord(*t, e, sw, sizeof sw) : nullptr;
+    if (st && *st) snprintf(cap, sizeof cap, "#%06lX %s#  #%06lX %s#", (unsigned long)stateColor(e.state), st,
+                            (unsigned long)COLOR_TERTIARY, when);
+    else snprintf(cap, sizeof cap, "#%06lX %s#", (unsigned long)COLOR_TERTIARY, when);
+    lv_obj_t* cl = label(wrap, cap, &g_font_12, COLOR_TERTIARY);
+    lv_label_set_recolor(cl, true);
+    lv_obj_set_style_pad_hor(cl, 2, LV_PART_MAIN);
   }
   lv_obj_update_layout(s_list);
   if (keep_scroll && old_bottom > 4) lv_obj_scroll_to_y(s_list, old_y, LV_ANIM_OFF);
@@ -627,63 +932,110 @@ static void buildChat() {
   s_shown_n = 60;
   lv_obj_t* b = newBody(false);
   const lv_coord_t W = lv_obj_get_width(s_root), H = lv_obj_get_height(s_root);
-  // header
-  lv_obj_t* hdr = lv_obj_create(b);
-  lv_obj_remove_style_all(hdr);
-  lv_obj_set_size(hdr, W, 26);
+  const bool channel = t->kind == otp::Kind::Channel;
+
+  // Header, as the open chat's: the glyph, the name in SemiBold, a status line
+  // under it, and the conversation's actions on the right.
+  const lv_coord_t hh = LV_MAX(SC(40), (lv_coord_t)(lv_font_get_line_height(&g_font_semi_14) + lv_font_get_line_height(&g_font_12) + SC(8)));
+  const lv_coord_t av = SC(28), btn = SC(30);
+  lv_obj_t* hdr = box(b);
+  lv_obj_set_size(hdr, W, hh);
   lv_obj_set_pos(hdr, 0, 0);
-  lv_obj_clear_flag(hdr, LV_OBJ_FLAG_SCROLLABLE);
-  char title[48];
-  snprintf(title, sizeof title, "%s%s", t->kind == otp::Kind::Channel ? "#" : "", t->name);
-  lv_obj_t* tl = label(hdr, title, &g_font_16, t->kind == otp::Kind::Channel ? th().channel : senderColor(t->name));
-  useChainedFont(tl);
-  lv_obj_set_width(tl, W - 150);
-  lv_label_set_long_mode(tl, LV_LABEL_LONG_DOT);
-  lv_obj_align(tl, LV_ALIGN_LEFT_MID, 6, 0);
-  lv_obj_t* pad = button(hdr, TR("Pad"), [](lv_event_t*) { show(Screen::Pad); }, nullptr, 0, 24);
-  lv_obj_align(pad, LV_ALIGN_RIGHT_MID, -4, 0);
-  lv_obj_t* sync = button(hdr, LV_SYMBOL_REFRESH, [](lv_event_t*) {
-    if (otp::Target* x = cur()) { OtpMessenger::core().requestSyncCheck(*x); toast(TR("Sync check sent"), 1200); }
-  }, nullptr, 0, 24);
-  lv_obj_align_to(sync, pad, LV_ALIGN_OUT_LEFT_MID, -4, 0);
-  if (t->kind == otp::Kind::Channel) {
-    lv_obj_t* pp = button(hdr, LV_SYMBOL_EYE_OPEN, [](lv_event_t*) {
+  lv_obj_t* a = avatar(hdr, *t, av);
+  lv_obj_align(a, LV_ALIGN_LEFT_MID, 8, 0);
+  lv_obj_t* actions = box(hdr);
+  lv_obj_set_size(actions, LV_SIZE_CONTENT, btn);
+  lv_obj_set_flex_flow(actions, LV_FLEX_FLOW_ROW);
+  lv_obj_set_style_pad_column(actions, 2, LV_PART_MAIN);
+  lv_obj_align(actions, LV_ALIGN_RIGHT_MID, -6, 0);
+  if (channel) {
+    s_parts_btn = iconBtn(actions, UI_ICON_USERS, [](lv_event_t*) {
       otp::Core& cc = OtpMessenger::core();
       cc.show_participants = !cc.show_participants;
       cc.saveSettings();
-      refreshInfo();
-    }, nullptr, 0, 24);
-    lv_obj_align_to(pp, sync, LV_ALIGN_OUT_LEFT_MID, -4, 0);
+      show(Screen::Chat);   // the strip changes the list's height
+    });
   }
-  // info line
-  s_info = lv_label_create(b);
+  iconBtn(actions, UI_ICON_REFRESH_CW, [](lv_event_t*) {
+    if (otp::Target* x = cur()) { OtpMessenger::core().requestSyncCheck(*x); toast(TR("Sync check sent"), 1200); }
+  });
+  iconBtn(actions, UI_ICON_SHIELD_CHECK, [](lv_event_t*) { show(Screen::Pad); });
+  const int nbtn = channel ? 3 : 2;
+  const lv_coord_t tx = 8 + av + 8;
+  const lv_coord_t tw = LV_MAX((lv_coord_t)40, (lv_coord_t)(W - tx - 6 - nbtn * (btn + 2) - 6));
+  char nm[56];
+  displayName(*t, nm, sizeof nm);
+  lv_obj_t* tl = label(hdr, nm, &g_font_semi_14, COLOR_TEXT);
+  lv_label_set_long_mode(tl, LV_LABEL_LONG_DOT);
+  lv_obj_set_size(tl, tw, lv_font_get_line_height(&g_font_semi_14));
+  const lv_coord_t top = (hh - lv_font_get_line_height(&g_font_semi_14) - lv_font_get_line_height(&g_font_12)) / 2;
+  lv_obj_set_pos(tl, tx, top);
+  s_info = lv_label_create(hdr);
   lv_label_set_recolor(s_info, true);
+  lv_label_set_text(s_info, "");
   lv_obj_set_style_text_font(s_info, &g_font_12, LV_PART_MAIN);
-  lv_obj_set_width(s_info, W - 12);
   lv_label_set_long_mode(s_info, LV_LABEL_LONG_DOT);
-  lv_obj_set_pos(s_info, 6, 27);
-  s_parts = lv_label_create(b);
-  lv_label_set_recolor(s_parts, true);
-  lv_obj_set_style_text_font(s_parts, &g_font_12, LV_PART_MAIN);
-  lv_obj_set_width(s_parts, W - 12);
-  lv_label_set_long_mode(s_parts, LV_LABEL_LONG_DOT);
-  lv_obj_set_pos(s_parts, 6, 42);
+  lv_obj_set_size(s_info, tw, lv_font_get_line_height(&g_font_12));
+  lv_obj_set_pos(s_info, tx, top + lv_font_get_line_height(&g_font_semi_14));
+
+  // The pad gauge, a hairline under the header.
+  lv_coord_t y = hh;
   s_bar = lv_bar_create(b);
-  lv_obj_set_size(s_bar, W - 12, 4);
-  lv_obj_set_pos(s_bar, 6, 42);
+  lv_obj_set_size(s_bar, W - 16, 3);
+  lv_obj_set_pos(s_bar, 8, y);
+  lv_obj_set_style_radius(s_bar, 2, LV_PART_MAIN);
+  lv_obj_set_style_radius(s_bar, 2, LV_PART_INDICATOR);
   lv_obj_set_style_bg_color(s_bar, lv_color_hex(COLOR_TRACK), LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(s_bar, LV_OPA_COVER, LV_PART_MAIN);
   lv_obj_add_flag(s_bar, LV_OBJ_FLAG_HIDDEN);
-  // composer
-  const lv_coord_t comp_h = 50;
+  y += 3 + SC(2);
+  // Who is on the channel, when asked for.
+  if (channel && c.show_participants) {
+    s_parts = box(b);
+    lv_obj_set_size(s_parts, W - 16, lv_font_get_line_height(&g_font_12) + 4);
+    lv_obj_set_pos(s_parts, 8, y);
+    lv_obj_set_flex_flow(s_parts, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(s_parts, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(s_parts, SC(10), LV_PART_MAIN);
+    lv_obj_add_event_cb(s_parts, [](lv_event_t* e) {
+      lv_obj_t* o = lv_event_get_target(e);
+      free(lv_obj_get_user_data(o));
+      lv_obj_set_user_data(o, nullptr);
+    }, LV_EVENT_DELETE, nullptr);
+    y += lv_font_get_line_height(&g_font_12) + 4;
+  }
+
+  // The composer: a pill that grows no further than one line, and the send button.
+  const lv_coord_t send = SC(30), comp_h = send + SC(10);
+  const lv_coord_t cy = H - comp_h + SC(5);
   s_ta = lv_textarea_create(b);
-  lv_obj_set_size(s_ta, W - 70, 32);
-  lv_obj_set_pos(s_ta, 4, H - comp_h);
+  lv_obj_set_size(s_ta, W - 8 - 8 - send - 6, send);
+  lv_obj_set_pos(s_ta, 8, cy);
   styleCard(s_ta);
+  lv_obj_set_style_bg_color(s_ta, lv_color_hex(COLOR_FIELD), LV_PART_MAIN);
+  lv_obj_set_style_radius(s_ta, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+  lv_obj_set_style_pad_hor(s_ta, SC(12), LV_PART_MAIN);
+  lv_obj_set_style_pad_ver(s_ta, 3, LV_PART_MAIN);
+  lv_obj_set_scrollbar_mode(s_ta, LV_SCROLLBAR_MODE_OFF);
   lv_textarea_set_one_line(s_ta, true);
-  lv_textarea_set_max_length(s_ta, t->kind == otp::Kind::Channel ? 65 : 2000);
+  lv_textarea_set_max_length(s_ta, channel ? 65 : 2000);
   lv_obj_set_style_text_font(s_ta, &g_font_14, LV_PART_MAIN);
   lv_obj_set_style_text_color(s_ta, lv_color_hex(COLOR_TEXT), LV_PART_MAIN);
-  taSetPlaceholder(s_ta, c.hasPad(*t) ? TR("Encrypted message") : TR("No pad yet"));
+  if (lv_obj_t* tlb = lv_textarea_get_label(s_ta)) lv_obj_set_style_pad_top(tlb, 4, LV_PART_MAIN);
+#if !defined(HAS_TDECK_PRO)
+  if (!s_theme_high_contrast) {
+    const lv_color_t edge = lv_color_mix(lv_color_hex(accent()), lv_color_hex(COLOR_BORDER), 90);
+    for (lv_style_selector_t st : { (lv_style_selector_t)(LV_PART_MAIN | LV_STATE_FOCUSED),
+                                    (lv_style_selector_t)(LV_PART_MAIN | LV_STATE_FOCUS_KEY) })
+      lv_obj_set_style_border_color(s_ta, edge, st);
+  }
+#endif
+  {
+    char ph[64];
+    if (c.hasPad(*t)) snprintf(ph, sizeof ph, "%s %s", TR("Encrypted to"), nm);
+    else snprintf(ph, sizeof ph, "%s", TR("No pad yet"));
+    taSetPlaceholder(s_ta, ph);
+  }
   attachSettingsTaEvents(s_ta);
   lv_obj_add_event_cb(s_ta, [](lv_event_t* e) {
     const lv_event_code_t code = lv_event_get_code(e);
@@ -691,20 +1043,29 @@ static void buildChat() {
     else if (code == LV_EVENT_VALUE_CHANGED) refreshCounter();
     else if (code == LV_EVENT_FOCUSED) { if (otp::Target* x = cur()) x->next_sync_check = 0; }
   }, LV_EVENT_ALL, nullptr);
-  s_send_btn = button(b, LV_SYMBOL_RIGHT, [](lv_event_t*) { sendNow(); }, nullptr, th().channel, 32);
-  lv_obj_set_width(s_send_btn, 56);
-  lv_obj_set_pos(s_send_btn, W - 62, H - comp_h);
-  s_counter = label(b, "", &g_font_12, th().padinfo);
-  lv_obj_set_pos(s_counter, 8, H - 16);
-  // bubbles fill the middle
+  s_send_btn = roundAccent(b, UI_ICON_ARROW_UP, [](lv_event_t*) { sendNow(); }, send);
+  lv_obj_set_pos(s_send_btn, W - 8 - send, cy);
+
+  // Bubbles fill the middle; the byte budget floats over their bottom while typing.
   s_list = lv_obj_create(b);
   lv_obj_remove_style_all(s_list);
-  lv_obj_set_pos(s_list, 0, 48);
-  lv_obj_set_size(s_list, W, H - 48 - comp_h - 4);
+  lv_obj_set_pos(s_list, 0, y);
+  lv_obj_set_size(s_list, W, H - y - comp_h);
   lv_obj_set_flex_flow(s_list, LV_FLEX_FLOW_COLUMN);
-  lv_obj_set_style_pad_all(s_list, 6, LV_PART_MAIN);
-  lv_obj_set_style_pad_row(s_list, 6, LV_PART_MAIN);
+  lv_obj_set_style_pad_hor(s_list, 8, LV_PART_MAIN);
+  lv_obj_set_style_pad_ver(s_list, SC(4), LV_PART_MAIN);
+  lv_obj_set_style_pad_row(s_list, SC(6), LV_PART_MAIN);
   lv_obj_set_scroll_dir(s_list, LV_DIR_VER);
+  s_counter = label(b, "", &g_font_12, COLOR_SUB);
+  lv_obj_set_style_bg_color(s_counter, lv_color_hex(COLOR_BG), LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(s_counter, LV_OPA_80, LV_PART_MAIN);
+  lv_obj_set_style_radius(s_counter, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+  lv_obj_set_style_pad_hor(s_counter, SC(6), LV_PART_MAIN);
+  lv_obj_set_style_pad_ver(s_counter, 1, LV_PART_MAIN);
+  lv_obj_align(s_counter, LV_ALIGN_BOTTOM_RIGHT, -8, -(comp_h + 2));
+  lv_obj_add_flag(s_counter, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_move_foreground(s_ta);
+  lv_obj_move_foreground(s_send_btn);
   refreshInfo();
   refreshCounter();
   buildBubbles(false);
@@ -765,40 +1126,76 @@ static void buildPad() {
   otp::Core& c = OtpMessenger::core();
   c.setOpenTarget(t);
   lv_obj_t* b = newBody();
-  char title[64];
-  snprintf(title, sizeof title, "%s %s%s", TR("Pad:"), t->kind == otp::Kind::Channel ? "#" : "", t->name);
-  heading(b, title);
   const int avail = c.available(*t);
+  const bool has = c.hasPad(*t);
   char line[200];
-  if (!c.hasPad(*t)) snprintf(line, sizeof line, "%s", TR("No pad yet."));
-  else if (avail <= 0) snprintf(line, sizeof line, "%s", TR("This pad is used up. Wipe it and add a new one."));
-  else snprintf(line, sizeof line, "%d bytes left", avail);
-  lv_obj_t* st = para(b, line, avail <= 0 ? th().encrypt : th().padinfo);
-  lv_obj_set_style_text_font(st, &g_font_14, LV_PART_MAIN);
+
+  // Who the pad is with: the glyph, the name, what it is.
+  lv_obj_t* who = box(b);
+  lv_obj_set_size(who, rowW(), LV_SIZE_CONTENT);
+  lv_obj_set_style_pad_bottom(who, SC(4), LV_PART_MAIN);
+  lv_obj_t* a = avatar(who, *t, SC(36));
+  lv_obj_align(a, LV_ALIGN_LEFT_MID, 2, 0);
+  char nm[56];
+  displayName(*t, nm, sizeof nm);
+  lv_obj_t* nl = label(who, nm, &g_font_semi_16, COLOR_TEXT);
+  lv_label_set_long_mode(nl, LV_LABEL_LONG_DOT);
+  lv_obj_set_width(nl, rowW() - SC(36) - SC(14));
+  lv_obj_set_pos(nl, SC(36) + SC(12), 0);
+  lv_obj_t* kl = label(who, t->kind == otp::Kind::Channel ? TR("Channel pad, shared by everyone on it") : TR("One-time pad"),
+                       &g_font_12, COLOR_SUB);
+  lv_obj_set_pos(kl, SC(36) + SC(12), lv_font_get_line_height(&g_font_semi_16));
+  lv_obj_set_height(who, LV_MAX(SC(36), (lv_coord_t)(lv_font_get_line_height(&g_font_semi_16) + lv_font_get_line_height(&g_font_12))));
+
+  // The pad: what is left, a gauge, the counters, sync.
+  lv_obj_t* card = setCardIn(b, "");
+  lv_obj_t* big = box(card);
+  lv_obj_set_size(big, s_settings_content_w, LV_SIZE_CONTENT);
+  lv_obj_set_flex_flow(big, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(big, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_END);
+  lv_obj_set_style_pad_column(big, SC(6), LV_PART_MAIN);
+  if (has && avail > 0) {
+    snprintf(line, sizeof line, "%d", avail);
+    label(big, line, &g_font_semi_16, padColor(avail));
+    snprintf(line, sizeof line, "B left of %u", (unsigned)t->pad.n);
+    label(big, line, &g_font_12, COLOR_SUB);
+  } else {
+    label(big, has ? TR("Pad used up") : TR("No pad yet"), &g_font_semi_16, has ? COLOR_STATUS_DANGER_TEXT : COLOR_TEXT);
+  }
+  if (t->pad.n > 0) {
+    lv_obj_t* g = lv_bar_create(card);
+    lv_obj_set_size(g, s_settings_content_w, SC(6));
+    lv_obj_set_style_radius(g, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+    lv_obj_set_style_radius(g, LV_RADIUS_CIRCLE, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(g, lv_color_hex(COLOR_TRACK), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(g, LV_OPA_COVER, LV_PART_MAIN);
+    lv_bar_set_range(g, 0, (int32_t)t->pad.n);
+    lv_bar_set_value(g, avail, LV_ANIM_OFF);
+    lv_obj_set_style_bg_color(g, lv_color_hex(avail < otp::kLowPadBytes ? (avail <= 0 ? COLOR_STATUS_DANGER : COLOR_STATUS_WARN) : accent()),
+                              LV_PART_INDICATOR);
+  }
   if (t->kind == otp::Kind::Dm) {
     const char ar = c.autoRole(*t);
     snprintf(line, sizeof line, "Role %c%s  ·  sent %u B  ·  received %u B", t->role,
              ar == t->role ? " (auto)" : " (manual)", (unsigned)t->ctr_mine, (unsigned)t->ctr_theirs);
   } else {
-    snprintf(line, sizeof line, "Channel offset %u  ·  shared by everyone on #%s", (unsigned)t->ctr, t->name);
+    snprintf(line, sizeof line, "Offset %u  ·  shared by everyone on #%s", (unsigned)t->ctr, t->name);
   }
-  para(b, line);
-  snprintf(line, sizeof line, "Sync: %s", t->sync_text[0] ? t->sync_text : TR("not checked yet"));
-  para(b, line, t->sync_ok == 1 ? th().ok : t->sync_ok == 0 ? th().encrypt : COLOR_SUB);
+  setNote(card, line);
+  snprintf(line, sizeof line, "%s %s", TR("Sync:"), t->sync_text[0] ? t->sync_text : TR("not checked yet"));
+  setNote(card, line, t->sync_ok == 1 ? SET_TONE_OK : t->sync_ok == 0 ? SET_TONE_DANGER : SET_TONE_INFO);
   if (t->wq_n) {
     snprintf(line, sizeof line, "%d message(s) waiting for a path", t->wq_n);
-    para(b, line, th().keyphrase);
+    setNote(card, line, SET_TONE_WARN);
   }
-
-  lv_obj_t* r1 = row(b);
-  button(r1, TR("Open chat"), [](lv_event_t*) { show(Screen::Chat); }, nullptr, th().channel);
-  button(r1, TR("Check sync"), [](lv_event_t*) {
+  if (has && avail > 0)
+    setButton(card, UI_ICON_MESSAGE_SQUARE, "Open chat", [](lv_event_t*) { show(Screen::Chat); }, nullptr, SET_PRIMARY);
+  setButton(card, UI_ICON_REFRESH_CW, "Check sync", [](lv_event_t*) {
     if (otp::Target* x = cur()) { OtpMessenger::core().requestSyncCheck(*x); show(Screen::Pad); }
   });
 
-  para(b, TR("Add pad bytes"), COLOR_TEXT);
-  lv_obj_t* r2 = row(b);
-  button(r2, TR("Generate 1000 B"), [](lv_event_t*) {
+  lv_obj_t* add = setCardIn(b, TR("Add pad bytes"));
+  setActionRow(add, UI_ICON_ZAP, "Generate 1000 random bytes", nullptr, [](lv_event_t*) {
     otp::Target* x = cur();
     if (!x) return;
     const int n = OtpMessenger::core().generate(*x, 1000);
@@ -807,45 +1204,45 @@ static void buildPad() {
     else snprintf(msg, sizeof msg, "The pad is at the %d byte cap", otp::kMaxTotalPadBytes);
     toast(msg);
     show(Screen::Pad);
-  });
-  button(r2, TR("Import file"), [](lv_event_t*) { show(Screen::Import); });
-  button(r2, TR("Paste hex"), [](lv_event_t*) {
+  }, nullptr, SET_NORMAL, false);
+  setActionRow(add, UI_ICON_FOLDER, "Import a file from the SD card", nullptr, [](lv_event_t*) { show(Screen::Import); });
+  setActionRow(add, UI_ICON_COPY, "Paste hex", nullptr, [](lv_event_t*) {
     prompt(TR("Pad as hex"), TR("Spaces and line breaks are ignored."), false, 16400, importHexText);
   });
-  button(r2, TR("Add text"), [](lv_event_t*) {
+  setActionRow(add, UI_ICON_FILE_TEXT, "Add text", nullptr, [](lv_event_t*) {
     prompt(TR("Pad text"), TR("Typed characters become pad bytes as-is. Both sides must add exactly the same text."),
            false, 2000, addTextBytes);
   });
 
-  para(b, TR("Share"), COLOR_TEXT);
-  lv_obj_t* r3 = row(b);
-  button(r3, TR("Export to SD"), [](lv_event_t*) { exportPadNow(); });
+  lv_obj_t* share = setCardIn(b, TR("Share"));
+  setActionRow(share, UI_ICON_SHARE_2, "Export to the SD card", nullptr, [](lv_event_t*) { exportPadNow(); }, nullptr, SET_NORMAL, false);
   if (t->kind == otp::Kind::Dm) {
-    button(r3, TR("Flip role"), [](lv_event_t*) {
+    char role[4] = {t->role, 0};
+    setActionRow(share, UI_ICON_USERS, "Flip role", role, [](lv_event_t*) {
       if (otp::Target* x = cur()) { OtpMessenger::core().flipRole(*x); show(Screen::Pad); }
-    });
+    }, nullptr, SET_NORMAL, false);
   }
-  para(b, TR("Export writes this pad, unused, to the SD card as hex. The other device imports the same file; "
-             "roles A/B are worked out from your keys, so both sides import it unchanged."));
+  setNote(share, "Export writes this pad, unused, to the SD card as hex. The other device imports the same file; "
+                 "roles A/B are worked out from your keys, so both sides import it unchanged.");
 
-  para(b, TR("Danger zone"), th().encrypt);
-  lv_obj_t* r4 = row(b);
+  lv_obj_t* danger = setCardIn(b, TR("Danger zone"));
   if (t->wq_n) {
-    button(r4, TR("Cancel waiting"), [](lv_event_t*) {
+    setActionRow(danger, UI_ICON_X, "Cancel waiting messages", nullptr, [](lv_event_t*) {
       if (otp::Target* x = cur()) { OtpMessenger::core().cancelWaiting(*x); show(Screen::Pad); }
-    });
+    }, nullptr, SET_NORMAL, false);
   }
-  button(r4, TR("Wipe pad"), [](lv_event_t*) {
+  setActionRow(danger, UI_ICON_TRASH_2, "Wipe pad", nullptr, [](lv_event_t*) {
     showConfirm(TR("Wipe this pad? Messages already received stay readable; nothing new can be sent or read until a new pad is added."),
                 TR("Wipe"), wipeConfirmed);
-  }, nullptr, COLOR_STATUS_DANGER);
-  button(r4, TR("Delete conversation"), [](lv_event_t*) {
+  }, nullptr, SET_DANGER, false);
+  setActionRow(danger, UI_ICON_TRASH_2, "Delete conversation", nullptr, [](lv_event_t*) {
     showConfirm(TR("Delete the pad and every message of this conversation?"), TR("Delete"), forgetConfirmed);
-  }, nullptr, COLOR_STATUS_DANGER);
+  }, nullptr, SET_DANGER, false);
 }
 
 // ---- Import from SD -------------------------------------------------------------------------
 static char s_import_names[24][40];
+static uint32_t s_import_sizes[24];
 static int s_import_n = 0;
 static void importFileCb(lv_event_t* e) {
   const int i = (int)(intptr_t)lv_event_get_user_data(e);
@@ -866,8 +1263,7 @@ static void importFileCb(lv_event_t* e) {
   const char* nm = s_import_names[i];
   const size_t nl = strlen(nm);
   const bool is_txt = nl > 4 && !strcasecmp(nm + nl - 4, ".txt");
-  if (is_txt) ok = OtpMessenger::core().addBytes(*t, (const uint8_t*)buf, rd, err, sizeof err) ||
-                   false;
+  if (is_txt) ok = OtpMessenger::core().addBytes(*t, (const uint8_t*)buf, rd, err, sizeof err);
   else ok = OtpMessenger::core().importHex(*t, buf, rd, err, sizeof err);
   memset(buf, 0, n + 1);
   heap_caps_free(buf);
@@ -888,6 +1284,7 @@ static void scanDir(fs::FS* sd, const char* dir) {
     base = base ? base + 1 : nm;
     const size_t n = strlen(base);
     if (n > 4 && (!strcasecmp(base + n - 4, ".hex") || !strcasecmp(base + n - 4, ".txt")) && f.size() > 0) {
+      s_import_sizes[s_import_n] = (uint32_t)f.size();
       snprintf(s_import_names[s_import_n++], sizeof s_import_names[0], "%s%s%s", dir, dir[1] ? "/" : "", base);
     }
     f.close();
@@ -898,19 +1295,24 @@ static void buildImport() {
   otp::Target* t = cur();
   if (!t) { show(Screen::List); return; }
   lv_obj_t* b = newBody();
-  heading(b, TR("Import pad file"));
-  para(b, TR(".hex files are imported as a new pad (replacing this one). .txt files are added as raw bytes."));
+  titleRow(b, TR("Import pad file"));
   fs::FS* sd = backupSdFs();
   s_import_n = 0;
-  if (!sd) { para(b, TR("No SD card found."), th().encrypt); return; }
+  if (!sd) { emptyState(b, UI_ICON_CIRCLE_ALERT, TR("No SD card found"), TR("Insert the card with the pad file and try again.")); return; }
   scanDir(sd, "/");
   scanDir(sd, "/otp");
-  if (!s_import_n) { para(b, TR("No .hex or .txt files in the SD card's top folder or /otp."), th().keyphrase); return; }
-  for (int i = 0; i < s_import_n; i++) {
-    lv_obj_t* bt = button(b, s_import_names[i], importFileCb, (void*)(intptr_t)i);
-    lv_obj_set_width(bt, LV_PCT(100));
-    lv_obj_align(lv_obj_get_child(bt, 0), LV_ALIGN_LEFT_MID, 0, 0);
+  if (!s_import_n) {
+    emptyState(b, UI_ICON_FOLDER, TR("No pad files"), TR("No .hex or .txt files in the SD card's top folder or /otp."));
+    return;
   }
+  lv_obj_t* card = setCardIn(b, TR("SD card"));
+  for (int i = 0; i < s_import_n; i++) {
+    char sz[24];
+    if (s_import_sizes[i] >= 1024) snprintf(sz, sizeof sz, "%.1f KB", s_import_sizes[i] / 1024.0f);
+    else snprintf(sz, sizeof sz, "%u B", (unsigned)s_import_sizes[i]);
+    setActionRowRaw(card, UI_ICON_FILE_TEXT, s_import_names[i], sz, importFileCb, (void*)(intptr_t)i, SET_NORMAL, false);
+  }
+  setNote(card, ".hex files are imported as a new pad, replacing this one. .txt files are added as raw bytes.");
 }
 
 // ---- moving over from the Lua app -----------------------------------------------------------------
@@ -1035,68 +1437,79 @@ static void passFirst(const char* p) {
 static void buildSettings() {
   otp::Core& c = OtpMessenger::core();
   lv_obj_t* b = newBody();
-  heading(b, TR("Settings"));
-  char line[96];
-  lv_obj_t* r = row(b);
-  snprintf(line, sizeof line, "%s: %s", TR("Theme"), th().name);
-  button(r, line, [](lv_event_t*) {
-    otp::Core& cc = OtpMessenger::core();
-    cc.theme = (uint8_t)((cc.theme + 1) % 6);
-    cc.saveSettings();
-    show(Screen::Settings);
-  }, nullptr, th().channel);
-  snprintf(line, sizeof line, "%s: %s", TR("Sound"), c.sound ? TR("on") : TR("off"));
-  button(r, line, [](lv_event_t*) {
-    otp::Core& cc = OtpMessenger::core();
-    cc.sound = !cc.sound;
-    cc.saveSettings();
-    show(Screen::Settings);
-  });
-  snprintf(line, sizeof line, "%s: %s", TR("Keep imported files"), c.keep_files ? TR("yes") : TR("no"));
-  button(r, line, [](lv_event_t*) {
-    otp::Core& cc = OtpMessenger::core();
-    cc.keep_files = !cc.keep_files;
-    cc.saveSettings();
-    show(Screen::Settings);
-  });
-  // theme swatch
-  lv_obj_t* sw = row(b, 3);
+  titleRow(b, TR("Settings"));
+
+  // Theme: the six OTP_3_RC1 themes as tiles, with the chosen one's colours under them.
+  lv_obj_t* look = setCardIn(b, TR("Appearance"));
+  const char* names[6];
+  for (int i = 0; i < 6; i++) names[i] = kThemes[i].name;
+  setChoiceRow(look, "Theme", "The accent for the send button, the pad gauge and the status words",
+               names, 6, c.theme % 6, [](lv_event_t* e) {
+                 otp::Core& cc = OtpMessenger::core();
+                 cc.theme = (uint8_t)(setChoiceIndex(e) % 6);
+                 cc.saveSettings();
+                 show(Screen::Settings);
+               });
+  lv_obj_t* sw = box(look);
+  lv_obj_set_size(sw, s_settings_content_w, LV_SIZE_CONTENT);
+  lv_obj_set_flex_flow(sw, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(sw, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
   const Theme& t = th();
-  const uint32_t cols[] = {t.encrypt, t.decrypt, t.ciphertext, t.plaintext, t.newpad, t.channel, t.ok, t.keyphrase, t.padinfo, t.ready};
+  const uint32_t cols[] = {t.channel, t.ok, t.decrypt, t.newpad, t.keyphrase, t.padinfo, t.encrypt, t.ciphertext, t.plaintext, t.ready};
+  const lv_coord_t dot = LV_MIN(SC(18), (lv_coord_t)(s_settings_content_w / 10 - 4));
   for (uint32_t col : cols) {
-    lv_obj_t* d = lv_obj_create(sw);
-    lv_obj_remove_style_all(d);
-    lv_obj_set_size(d, 18, 12);
-    styleSurface(d, col, 3);
+    lv_obj_t* d = box(sw);
+    lv_obj_set_size(d, dot, dot);
+    lv_obj_set_style_radius(d, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(d, lv_color_hex(col), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(d, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_color(d, lv_color_hex(COLOR_BORDER), LV_PART_MAIN);
+    lv_obj_set_style_border_width(d, 1, LV_PART_MAIN);
   }
 
-  para(b, TR("Passphrase lock"), COLOR_TEXT);
+  lv_obj_t* beh = setCardIn(b, TR("Behaviour"));
+  setSwitchRow(beh, "Sound", "Play the message sound when an OTP message arrives", c.sound, [](lv_event_t* e) {
+    otp::Core& cc = OtpMessenger::core();
+    cc.sound = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED);
+    cc.saveSettings();
+  });
+  setSwitchRow(beh, "Keep imported files", "Leave pad files on the SD card after importing them", c.keep_files, [](lv_event_t* e) {
+    otp::Core& cc = OtpMessenger::core();
+    cc.keep_files = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED);
+    cc.saveSettings();
+  });
+
+  lv_obj_t* lock = setCardIn(b, TR("Passphrase lock"));
   if (c.protectionEnabled()) {
-    para(b, TR("On: pads, messages and the conversation list are encrypted on this device."), th().ok);
-    lv_obj_t* r2 = row(b);
-    button(r2, TR("Lock now"), [](lv_event_t*) {
+    setNote(lock, "On: pads, messages and the conversation list are encrypted on this device.", SET_TONE_OK);
+    setButton(lock, UI_ICON_LOCK, "Lock now", [](lv_event_t*) {
       OtpMessenger::core().lockNow();
       s_tid[0] = 0;
       show(Screen::Lock);
-    }, nullptr, th().channel);
+    }, nullptr, SET_PRIMARY);
   } else {
-    para(b, TR("Off. With a passphrase, everything is encrypted on this device and the app asks for it "
-               "after every restart. Incoming messages wait until you unlock."));
-    button(b, TR("Set passphrase"), [](lv_event_t*) { prompt(TR("New passphrase"), nullptr, true, 64, passFirst); }, nullptr, th().channel);
+    setNote(lock, "Off. With a passphrase, everything is encrypted on this device and the app asks for it "
+                  "after every restart. Incoming messages wait until you unlock.");
+    setButton(lock, UI_ICON_LOCK, "Set passphrase", [](lv_event_t*) {
+      prompt(TR("New passphrase"), nullptr, true, 64, passFirst);
+    }, nullptr, SET_PRIMARY);
   }
-  button(b, TR("Panic wipe"), [](lv_event_t*) {
-    showConfirm(TR("Erase every pad and message on this device, and turn protection off?\n\nThis cannot be undone."),
-                TR("Wipe"), panicConfirmed);
-  }, nullptr, COLOR_STATUS_DANGER);
+  setButton(lock, UI_ICON_TRASH_2, "Panic wipe", panicAsk, nullptr, SET_DANGER);
+
 #if CAP_LUA_APPS
-  para(b, TR("Coming from the Lua app"), COLOR_TEXT);
-  para(b, TR("Moves its pads here with their counters, so you carry on in step with the other side. "
-             "Afterwards remove the Lua app: two apps using one pad would burn the same bytes twice."));
-  button(b, TR("Move pads from the Lua app"), [](lv_event_t*) { luaImport(); });
+  lv_obj_t* lua = setCardIn(b, TR("Coming from the Lua app"));
+  setNote(lua, "Moves its pads here with their counters, so you carry on in step with the other side. "
+               "Afterwards remove the Lua app: two apps using one pad would burn the same bytes twice.");
+  setActionRow(lua, UI_ICON_HISTORY, "Move pads from the Lua app", nullptr, [](lv_event_t*) { luaImport(); },
+               nullptr, SET_NORMAL, false);
 #endif
+  char line[120];
   snprintf(line, sizeof line, "OTP Messenger %s · wire-compatible with OTP_3_RC1 and MeshCore Open TAK", otp::Core::kBuildId);
-  para(b, line);
+  lv_obj_t* f = para(b, line, COLOR_TERTIARY);
+  lv_obj_set_width(f, rowW());
+  lv_obj_set_style_text_align(f, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
 }
+
 
 // ---- navigation -----------------------------------------------------------------------------------
 static void show(Screen s) {
@@ -1147,7 +1560,7 @@ static void close() {
   if (s_timer) { lv_timer_del(s_timer); s_timer = nullptr; }
   if (OtpMessenger::ready()) OtpMessenger::core().setOpenTarget(nullptr);
   hideKb();
-  s_body = s_list = s_ta = s_counter = s_info = s_parts = s_bar = s_send_btn = nullptr;
+  s_body = s_list = s_ta = s_counter = s_info = s_parts = s_bar = s_send_btn = s_parts_btn = nullptr;
   if (s_root) { lv_obj_t* r = s_root; s_root = nullptr; appPageDeleteRootAsync(r); }
   appPageEnd(back);
 }
