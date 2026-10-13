@@ -202,7 +202,13 @@ if(NOT WADA_FW_DATE)
 endif()
 idf_build_set_property(COMPILE_OPTIONS "-DFIRMWARE_RELEASE_TAG=\"${WADA_FW_TAG}\"" APPEND)
 idf_build_set_property(COMPILE_OPTIONS "-DFIRMWARE_BUILD_DATE=\"${WADA_FW_DATE}\"" APPEND)
-idf_build_set_property(COMPILE_OPTIONS "-DFIRMWARE_VERSION=\"wadamesh ${WADA_FW_TAG}\"" APPEND)
+# Wadamesh-tak: a fork tag tak-beta_93.3 reads "wadamesh-tak beta_93.3", as on the S3 boards.
+if(WADA_FW_TAG MATCHES "^tak-(.*)$")
+  set(WADA_FW_NAME "wadamesh-tak ${CMAKE_MATCH_1}")
+else()
+  set(WADA_FW_NAME "wadamesh ${WADA_FW_TAG}")
+endif()
+idf_build_set_property(COMPILE_OPTIONS "-DFIRMWARE_VERSION=\"${WADA_FW_NAME}\"" APPEND)
 
 # On-device OTA / update-channel UI (the "Get test builds (beta)" toggle + the Install-update button
 # in UITask.cpp) is gated on a NON-EMPTY FIRMWARE_OTA_ENV. The 8 S3 boards set this per-env in
