@@ -1128,22 +1128,9 @@ static void uiFitLabelWidth(lv_obj_t* lbl, lv_coord_t max_w) {
   lv_obj_set_style_text_font(lbl, &g_font_12, LV_PART_MAIN);   // still wide: 12 px beats clipping a bigger font
 }
 #if LV_USE_IMGFONT
-// lv_imgfont path callback: hand back the baked colour image for an emoji
-// codepoint (copied into the imgfont's scratch buffer as an lv_img_dsc_t), or
-// false so LVGL keeps walking the fallback chain for everything else.
-static bool emojiImgfontPathCb(const lv_font_t* /*font*/, void* img_src, uint16_t /*len*/,
-                               uint32_t unicode, uint32_t /*unicode_next*/) {
-  const lv_img_dsc_t* d = emojiGlyphLookup(unicode);
-  if (!d) return false;
-  lv_memcpy(img_src, d, sizeof(lv_img_dsc_t));
-  // The imgfont reuses ONE scratch buffer as the image source for every glyph, so
-  // LVGL's image cache (keyed on the src pointer) hands back the first-decoded
-  // emoji for all of them — every emoji renders identical. Drop the stale entry so
-  // the just-copied dsc is decoded fresh. (True-colour "decode" is a no-op copy, so
-  // this is cheap, and other images — map tiles — use distinct src ptrs, untouched.)
-  lv_img_cache_invalidate_src(img_src);
-  return true;
-}
+// Colour emoji in text: an lv_imgfont at the end of each text size's chain, its
+// images and metrics fitted to that text by EmojiFit.h (size, centring, spacing).
+#include "EmojiFit.h"
 static lv_font_t* s_emoji_font[3] = { nullptr, nullptr, nullptr };  // one per text size
 #endif
 
@@ -1361,8 +1348,12 @@ static void initTouchFontFallbacks() {
   }
 #endif
   for (int i = 0; i < 3; ++i) {
-    s_emoji_font[i] = lv_imgfont_create(16, emojiImgfontPathCb);   // 16 px baked glyphs (~15% larger; sit on the text baseline)
-    if (s_emoji_font[i]) { s_emoji_font[i]->fallback = extras[i]; prim[i]->fallback = s_emoji_font[i]; }
+    s_emoji_font[i] = lv_imgfont_create(16, emojifit::pathCb);   // baked 16 px, fitted to prim[i] (EmojiFit.h)
+    if (s_emoji_font[i]) {
+      emojifit::attach(s_emoji_font[i], prim[i]);
+      s_emoji_font[i]->fallback = extras[i];
+      prim[i]->fallback = s_emoji_font[i];
+    }
     else                 { prim[i]->fallback = extras[i]; }        // OOM: plain chain
   }
 #else
@@ -73597,9 +73588,15 @@ static void atGlanceEnsureFont() {
   s_glance_font_ready = true;
   const lv_font_t* glance_tail = &extras_16;
 #if LV_USE_IMGFONT
-  // initTouchFontFallbacks() creates this before any glance can be shown. Reuse
-  // it so glance messages resolve the same baked emoji set as normal chat.
-  if (s_emoji_font[2]) glance_tail = s_emoji_font[2];
+  // The same baked emoji set as normal chat, through an imgfont of its own so
+  // EmojiFit centres them in the glance's bigger line (attached below, once the
+  // body font is set).
+  static lv_font_t* s_glance_emoji = nullptr;
+  if (!s_glance_emoji) s_glance_emoji = lv_imgfont_create(16, emojifit::pathCb);
+  if (s_glance_emoji) {
+    s_glance_emoji->fallback = &extras_16;
+    glance_tail = s_glance_emoji;
+  }
 #endif
 // 20 px on the small screens. 28 px was chosen to be legible across a room, and
 // it is, but on a 240x320 panel it fills the glance and crowds out the message
@@ -73617,6 +73614,9 @@ static void atGlanceEnsureFont() {
   s_lat28.fallback = glance_tail;
   s_glance_body_font = lv_font_montserrat_28;
   s_glance_body_font.fallback = &s_lat28;
+#endif
+#if LV_USE_IMGFONT
+  if (glance_tail != &extras_16) emojifit::attach(const_cast<lv_font_t*>(glance_tail), &s_glance_body_font);
 #endif
 }
 
