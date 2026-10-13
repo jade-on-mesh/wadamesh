@@ -87,7 +87,8 @@ jobs:
         if: failure()
         shell: bash
         run: |
-          grep -E "error:|Error |undefined reference" build.log | head -40 | while IFS= read -r l; do echo "::error::${l}"; done
+          { grep -E "error:|Error|undefined reference|overflow|greater than|too big" build.log || tail -15 build.log; } \
+            | head -40 | while IFS= read -r l; do echo "::error::${l}"; done
       - name: Firmware size
         run: |
           ls -la .pio/build/${{ matrix.env }}/firmware.bin
