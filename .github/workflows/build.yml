@@ -90,8 +90,8 @@ jobs:
           grep -E "error:|undefined reference|overflowed|greater than|too big" build.log | head -30 \
             | while IFS= read -r l; do echo "::error::${l}"; done
           tail -12 build.log | while IFS= read -r l; do echo "::error title=build log tail::${l}"; done
-      - name: Where the flash goes (largest objects and symbols)
-        if: always()
+      - name: Where the flash goes (largest objects and symbols, when a build fails)
+        if: failure()
         shell: bash
         env:
           B: .pio/build/${{ matrix.env }}
