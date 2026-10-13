@@ -7838,10 +7838,25 @@ static void      buildThemeSettings();           // fwd: defined with the accent
 // This fork follows its OWN releases (tak_N on jade-on-mesh/wadamesh), never
 // upstream's: see ForkUpdateCore.h. Upstream's names stay for an upstream build.
 #include "ForkUpdateCore.h"
-#ifndef WADA_RELEASE_PREFIX
-#define WADA_RELEASE_PREFIX "beta_"
+#ifndef WADA_UPDATE_SITE
 #define WADA_UPDATE_SITE "flasher.wadamesh.com"
 #endif
+#ifndef WADA_BRAND
+#define WADA_BRAND "WADAMESH"
+#endif
+// A release number as shown: "beta_93.2" in this fork (upstream's version plus
+// the fork's build), "beta_93" upstream. A few rotating buffers, one printf each.
+static const char* relName(int n) {
+  static char b[4][20];
+  static uint8_t k = 0;
+  char* o = b[k++ & 3];
+#if WADA_FORK_RELEASES
+  forkupd::formatRelease(n, o, sizeof b[0]);
+#else
+  snprintf(o, sizeof b[0], "beta_%d", n);
+#endif
+  return o;
+}
 static lv_obj_t* s_update_badge     = nullptr;   // red "!" over the bottom-bar gear
 static lv_obj_t* s_chat_unread_badge = nullptr;  // red unread-count badge over the bottom-bar Chats icon
 static lv_obj_t* s_tab_indicator    = nullptr;   // thin rounded accent glow bar under the active tab
@@ -8131,7 +8146,10 @@ static void setupRerunCb(lv_event_t* e);  // fwd: "Run setup again" button callb
 // Our release number (the N in "beta_N"); -1 if this isn't a tagged build.
 static int firmwareReleaseN() {
   const char* t = FIRMWARE_RELEASE_TAG;
-  const char* pfx = WADA_RELEASE_PREFIX;
+#if WADA_FORK_RELEASES
+  return forkupd::releaseCode(t);   // tak-beta_93.2 -> 93002
+#endif
+  const char* pfx = "beta_";
   const size_t pl = strlen(pfx);
   if (strncmp(t, pfx, pl) != 0) return -1;
   if (t[pl] < '0' || t[pl] > '9') return -1;
@@ -8172,18 +8190,18 @@ static void versionCheckUpdateUi() {
     lv_obj_set_style_text_color(s_update_about_lbl, lv_color_hex(COLOR_SUB), LV_PART_MAIN);
   } else if (s_update_available && s_verchk_latest_n >= 0) {
     // Where to get it: the Install button when this install has one, else the flasher.
-    snprintf(b, sizeof b, s_ota_btn ? TR(LV_SYMBOL_DOWNLOAD "  Update available: " WADA_RELEASE_PREFIX "%d\nYou have " WADA_RELEASE_PREFIX "%d. Install it below.")
-                                    : TR(LV_SYMBOL_DOWNLOAD "  Update available: " WADA_RELEASE_PREFIX "%d\nYou have " WADA_RELEASE_PREFIX "%d. Get it at " WADA_UPDATE_SITE "."),
-             s_verchk_latest_n, my_n);
+    snprintf(b, sizeof b, s_ota_btn ? TR(LV_SYMBOL_DOWNLOAD "  Update available: %s\nYou have %s. Install it below.")
+                                    : TR(LV_SYMBOL_DOWNLOAD "  Update available: %s\nYou have %s. Get it at " WADA_UPDATE_SITE "."),
+             relName(s_verchk_latest_n), relName(my_n));
     lv_obj_set_style_text_color(s_update_about_lbl, lightSurfaceTextColor(0xE2A23A), LV_PART_MAIN);
   } else if (s_verchk_latest_n >= 0) {
-    snprintf(b, sizeof b, TR(LV_SYMBOL_OK "  Up to date (" WADA_RELEASE_PREFIX "%d)"), my_n);
+    snprintf(b, sizeof b, TR(LV_SYMBOL_OK "  Up to date (%s)"), relName(my_n));
     lv_obj_set_style_text_color(s_update_about_lbl, lightSurfaceTextColor(0x6FCF6F), LV_PART_MAIN);
   } else if (s_verchk_ran) {
-    snprintf(b, sizeof b, TR("Firmware " WADA_RELEASE_PREFIX "%d\nCouldn't reach the update server"), my_n);
+    snprintf(b, sizeof b, TR("Firmware %s\nCouldn't reach the update server"), relName(my_n));
     lv_obj_set_style_text_color(s_update_about_lbl, lv_color_hex(COLOR_SUB), LV_PART_MAIN);
   } else {
-    snprintf(b, sizeof b, TR("Firmware " WADA_RELEASE_PREFIX "%d\nChecking for updates over Wi-Fi…"), my_n);
+    snprintf(b, sizeof b, TR("Firmware %s\nChecking for updates over Wi-Fi…"), relName(my_n));
     lv_obj_set_style_text_color(s_update_about_lbl, lv_color_hex(COLOR_SUB), LV_PART_MAIN);
   }
   lv_label_set_text(s_update_about_lbl, b);
@@ -8203,6 +8221,16 @@ static void versionCheckUpdateUi() {
 // Enable the OTA button only when an update is actually available — or when the
 // check hasn't completed yet (offline / still checking), so the user isn't
 // blocked by a stale "up to date". Grey + non-clickable when current.
+// Is there an earlier release to go back to? In this fork: an earlier build on the
+// same upstream base (beta_93.2 -> beta_93.1).
+static bool hasEarlierRelease() {
+#if WADA_FORK_RELEASES
+  return s_verchk_latest_n >= 0 && s_verchk_latest_n % forkupd::kBuildsPerBase >= 2;
+#else
+  return s_verchk_latest_n >= 2;
+#endif
+}
+
 static void otaButtonRefreshState() {
   if (!s_ota_btn) return;
   // Known-current = a successful check (latest_n >= 0) that isn't newer than us.
@@ -8224,7 +8252,7 @@ static void otaButtonRefreshState() {
   // yields a latest_n with at least one earlier beta below it (latest_n >= 2).
   // Hidden until then; the popup it opens lists the actual betas.
   if (s_ota_prev_btn) {
-    if (s_verchk_latest_n >= 2) lv_obj_clear_flag(s_ota_prev_btn, LV_OBJ_FLAG_HIDDEN);
+    if (hasEarlierRelease()) lv_obj_clear_flag(s_ota_prev_btn, LV_OBJ_FLAG_HIDDEN);
     else                        lv_obj_add_flag(s_ota_prev_btn, LV_OBJ_FLAG_HIDDEN);
   }
 }
@@ -8358,7 +8386,7 @@ static void otaStartInstall(int target_n) {
   if (s_ota_btn) { lv_obj_add_state(s_ota_btn, LV_STATE_DISABLED); lv_obj_clear_flag(s_ota_btn, LV_OBJ_FLAG_CLICKABLE); }
   if (s_ota_status_lbl) {
     char sb[48];
-    snprintf(sb, sizeof sb, "Installing " WADA_RELEASE_PREFIX "%d...\nDo not power off.", target_n);
+    snprintf(sb, sizeof sb, "Installing %s...\nDo not power off.", relName(target_n));
     otaStatusText(sb);
     lv_obj_set_style_text_color(s_ota_status_lbl, lightSurfaceTextColor(0xE2A23A), LV_PART_MAIN);
   }
@@ -8396,7 +8424,7 @@ static void otaPrevPickCb(lv_event_t* e) {
   s_ota_pending_n = v;
   otaPrevModalClose();
   char m[96];
-  snprintf(m, sizeof m, TR("Install " WADA_RELEASE_PREFIX "%d?\nThis downgrades the firmware and reboots."), v);
+  snprintf(m, sizeof m, TR("Install %s?\nThis downgrades the firmware and reboots."), relName(v));
   showConfirm(m, TR("Install"), otaConfirmInstallApply);
 }
 
@@ -8404,7 +8432,7 @@ static void otaPrevPickCb(lv_event_t* e) {
 // the up-to-3 betas just below the latest. Tap-outside / X dismisses it.
 static void otaPrevVersionsCb(lv_event_t* e) {
   if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
-  if (s_verchk_latest_n < 2) {   // no earlier release exists yet
+  if (!hasEarlierRelease()) {   // no earlier release exists yet
     if (g_lv.task) g_lv.task->showAlert(TR("No earlier versions yet"), 1500);
     return;
   }
@@ -8447,6 +8475,9 @@ static void otaPrevVersionsCb(lv_event_t* e) {
 
   for (int k = 1; k <= 3; k++) {
     int v = s_verchk_latest_n - k;
+#if WADA_FORK_RELEASES
+    if (v % forkupd::kBuildsPerBase == 0) break;   // only earlier builds of the same upstream base
+#endif
     if (v < 1) break;
     lv_obj_t* b = lv_btn_create(card);
     lv_obj_set_size(b, lv_pct(90), 38);
@@ -8455,7 +8486,7 @@ static void otaPrevVersionsCb(lv_event_t* e) {
     lv_obj_add_event_cb(b, otaPrevPickCb, LV_EVENT_CLICKED, nullptr);
     lv_obj_t* l = lv_label_create(b);
     char bt[16];
-    snprintf(bt, sizeof bt, WADA_RELEASE_PREFIX "%d", v);
+    snprintf(bt, sizeof bt, "%s", relName(v));
     lv_label_set_text(l, bt);
     lv_obj_set_style_text_font(l, &g_font_14, LV_PART_MAIN);
     lv_obj_set_style_text_color(l, lv_color_hex(COLOR_TEXT), LV_PART_MAIN);
@@ -15441,7 +15472,7 @@ static void sysInfoTextRest(char* buf, size_t cap) {
     p += snprintf(buf + p, cap - p, "\n");
   }
   p += snprintf(buf + p, cap - p,
-                "Build\n  %s\n  %s\n  WADAMESH TOUCH\n",
+                "Build\n  %s\n  %s\n  " WADA_BRAND " TOUCH\n",
                 FIRMWARE_VERSION, FIRMWARE_BUILD_DATE);
 #if defined(WADAMESH_FORK_BUILD)
   // Defined in platformio.ini for this fork's builds; absent upstream.
@@ -33173,8 +33204,8 @@ static void sdFwWorkerRun(WiFiClient& client, HTTPClient& http) {
     snprintf(s_sdfw_msg, sizeof s_sdfw_msg, "can't create /BINS"); s_sdfw_state = 3; return;
   }
   char path[56];
-  snprintf(path, sizeof path, "/BINS/wadamesh-" WADA_RELEASE_PREFIX "%d-%s.bin",
-           s_sdfw_target_n, touchPrefsGetBetaUpdates() ? "beta" : "stable");
+  snprintf(path, sizeof path, "/BINS/wadamesh-%s-%s.bin",
+           relName(s_sdfw_target_n), touchPrefsGetBetaUpdates() ? "beta" : "stable");
 #if WADA_FORK_RELEASES
   (void)client; (void)http;
   if (forkSaveToSd(s_sdfw_target_n, path, &s_sdfw_pct, s_sdfw_msg, sizeof s_sdfw_msg)) {
@@ -54531,7 +54562,7 @@ static void buildGlobalStatusBar() {
   // Left zone — dynamic per-tab. Default to "MESHCOMOD"; updateGlobal-
   // StatusBar() swaps to the envelope+count on non-home tabs.
   g_statusbar.left_label = lv_label_create(g_statusbar.root);
-  lv_label_set_text(g_statusbar.left_label, TR("WADAMESH"));
+  lv_label_set_text(g_statusbar.left_label, TR(WADA_BRAND));
   lv_obj_set_style_text_color(g_statusbar.left_label, lv_color_hex(COLOR_TEXT), LV_PART_MAIN);
   lv_obj_set_style_text_font(g_statusbar.left_label, &g_font_semi_14, LV_PART_MAIN);
   lv_obj_align(g_statusbar.left_label, LV_ALIGN_LEFT_MID, 6, 0);
@@ -55587,7 +55618,7 @@ static void updateGlobalStatusBar() {
       // it, so it never runs into the clock or the status icons. Reconfigured only
       // when the name changes (re-setting the scroll every tick would restart it).
       const char* nm = g_lv.task->getNodeNameCstr();
-      if (!nm || !nm[0]) nm = "WADAMESH";
+      if (!nm || !nm[0]) nm = WADA_BRAND;
       if (strncmp(s_left_home_name, nm, sizeof(s_left_home_name)) != 0) {
         strncpy(s_left_home_name, nm, sizeof(s_left_home_name) - 1);
         s_left_home_name[sizeof(s_left_home_name) - 1] = '\0';

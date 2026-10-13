@@ -36,13 +36,22 @@ int main() {
   sha256(img.data(), img.size(), d);
   CHECK(!forkupd::verify("tak_7", "wadamesh-tdeck.bin", d, sig.data()));
 
-  CHECK(forkupd::releaseN("tak_12") == 12);
-  CHECK(forkupd::releaseN("https://github.com/jade-on-mesh/wadamesh/releases/tag/tak_3") == 3);
-  CHECK(forkupd::releaseN("https://github.com/x/releases/tag/tak_3\r\n") == 3);
-  CHECK(forkupd::releaseN("beta_93") == -1);
-  CHECK(forkupd::releaseN("tak_") == -1);
-  CHECK(forkupd::releaseN("tak_4x") == -1);
-  CHECK(forkupd::releaseN(nullptr) == -1);
+  CHECK(forkupd::releaseCode("tak-beta_93.12") == 93012);
+  CHECK(forkupd::releaseCode("beta_93.1") == 93001);
+  CHECK(forkupd::releaseCode("https://github.com/jade-on-mesh/wadamesh/releases/tag/tak-beta_94.3") == 94003);
+  CHECK(forkupd::releaseCode("https://github.com/x/releases/tag/tak-beta_94.3\r\n") == 94003);
+  CHECK(forkupd::releaseCode("beta_93") == -1);         // upstream's own release
+  CHECK(forkupd::releaseCode("tak_1") == -1);
+  CHECK(forkupd::releaseCode("tak-beta_93.") == -1);
+  CHECK(forkupd::releaseCode("tak-beta_93.0") == -1);
+  CHECK(forkupd::releaseCode("tak-beta_93.4x") == -1);
+  CHECK(forkupd::releaseCode(nullptr) == -1);
+  CHECK(forkupd::releaseCode("tak-beta_94.1") > forkupd::releaseCode("tak-beta_93.12"));
+  char b[24];
+  forkupd::formatRelease(93012, b, sizeof b);
+  CHECK(!strcmp(b, "beta_93.12"));
+  forkupd::tagFor(93012, b, sizeof b);
+  CHECK(!strcmp(b, "tak-beta_93.12"));
   if (g_fail) { printf("%d check(s) failed\n", g_fail); return 1; }
   printf("fork update checks passed\n");
   return 0;
