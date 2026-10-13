@@ -1,0 +1,22 @@
+# Wadamesh-tak: the T-LoRa Pager with bigger app slots.
+#
+# The Pager carries larger UI fonts than the T-Deck, and with the fork's photos,
+# voice, OTP Messenger and Team its image is about 4.17 MB, past upstream's
+# 3.875 MB slots. This table takes 640 KB from the map tile cache and gives
+# each app slot 320 KB more (4.1875 MB). spiffs (prefs, contacts, channels,
+# chat history) keeps its offset and size, so moving to this table by USB keeps
+# user data; the tile cache is reformatted (formatOnFail) and refills.
+#
+#   0x010000-0x440000  app0    4.1875 MB (ota_0)
+#   0x440000-0x870000  app1    4.1875 MB (ota_1)
+#   0x870000-0xC90000  tiles   4.125 MB  (LittleFS, 0x83)
+#   0xC90000-0xFF0000  spiffs  3.375 MB  [unchanged]
+
+# Name,   Type, SubType,  Offset,   Size,     Flags
+nvs,      data, nvs,      0x9000,   0x5000,
+otadata,  data, ota,      0xe000,   0x2000,
+app0,     app,  ota_0,    0x10000,  0x430000,
+app1,     app,  ota_1,    0x440000, 0x430000,
+tiles,    data, 0x83,     0x870000, 0x420000,
+spiffs,   data, spiffs,   0xC90000, 0x360000,
+coredump, data, coredump, 0xFF0000, 0x10000,

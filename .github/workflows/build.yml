@@ -60,7 +60,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        env: [LilyGo_TDeck_companion_radio_touch, ThinkNode_M9_companion_radio_touch]
+        env: [LilyGo_TDeck_companion_radio_touch, ThinkNode_M9_companion_radio_touch,
+              tlora_pager_sx1262_companion_radio_touch, tlora_pager_lr1121_companion_radio_touch]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -137,3 +138,42 @@ jobs:
           name: ${{ matrix.env }}
           path: .pio/build/${{ matrix.env }}/firmware*.bin
           if-no-files-found: warn
+
+  # The T-Display P4 (AMOLED, SX1262, esp-hosted C6) is an ESP-IDF project, built in
+  # Espressif's IDF image by scripts/build/ci-p4.sh. Its vendored libraries come from
+  # the T-Deck env's PlatformIO libdeps.
+  p4:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            .pio
+          key: pio-${{ runner.os }}-LilyGo_TDeck_companion_radio_touch-${{ hashFiles('platformio.ini') }}
+      - name: Libraries for the vendored components
+        run: |
+          pip install --upgrade platformio
+          pio pkg install -e LilyGo_TDeck_companion_radio_touch
+      - name: Build (espressif/idf:v5.5.1)
+        shell: bash
+        run: |
+          set -o pipefail
+          docker run --rm -v "$PWD:/w" -w /w espressif/idf:v5.5.1 \
+            bash scripts/build/ci-p4.sh dev-check dist tdisplay-p4 2>&1 | tee build.log
+      - name: Errors as annotations
+        if: failure()
+        shell: bash
+        run: |
+          { grep -E "error:|undefined reference|FAILED|Error" build.log || true; } | head -30 | while IFS= read -r l; do echo "::error::${l}"; done
+          echo "::error title=build log tail::$(tail -40 build.log | sed 's/%/%25/g' | sed ':a;N;$!ba;s/\n/%0A/g')"
+      - name: Size
+        run: echo "::notice title=tdisplay-p4 size::application.bin $(stat -c %s dist/wadamesh-tdisplay-p4.bin) bytes (4 MB slot)"
+
