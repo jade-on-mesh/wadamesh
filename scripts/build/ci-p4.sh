@@ -61,12 +61,13 @@ B="build/$d"
 APP="$B/application.bin"
 [ -f "$APP" ] || { echo "::error::no $APP"; exit 1; }
 
-python3 - "$APP" "wadamesh-$NAME" "$TAG" <<'PY'
+python3 - "$APP" "$NAME" "$TAG" <<'PY'
 import re, sys
 data = open(sys.argv[1], "rb").read()
 want, tag = sys.argv[2].encode(), sys.argv[3].encode()
-ids = sorted(set(re.findall(rb"wadamesh-tdisplay-p4[a-z0-9-]*", data)))
-if ids[:1] != [want]:
+# WADA_BOARD_ID as a C string of its own: the name the update URL is built from.
+ids = sorted(set(re.findall(rb"(?<=\0)tdisplay-p4[a-z0-9-]*(?=\0)", data)))
+if ids != [want]:
     sys.exit("image identifies as %r, expected %r: it would update to the wrong variant" % (ids, want))
 if tag not in data:
     sys.exit("%r is not embedded in the image" % tag)
