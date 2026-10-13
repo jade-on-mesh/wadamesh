@@ -322,6 +322,8 @@ static void roles() {
   char nm[32];
   c.roleName(2, nm, sizeof nm);
   CHECK(!strcmp(nm, "Medic") && c.roleLetter(2) == '+');
+  c.roleName(9, nm, sizeof nm);
+  CHECK(!strcmp(nm, "Press") && c.roleLetter(9) == 'P');
   v = unhex(kR1);
   c.onPayload("ops", v.data(), v.size());
   c.roleName(2, nm, sizeof nm);
@@ -332,7 +334,7 @@ static void roles() {
   snprintf(dog.name, sizeof dog.name, "Search dog");
   n = TeamWire::encode(dog, buf, sizeof buf);
   c.onPayload("ops", buf, n);
-  CHECK(c.roleAvailable(20) && !c.roleAvailable(19) && c.nextRole(8) == 20 && c.nextRole(20) == 0);
+  CHECK(c.roleAvailable(20) && !c.roleAvailable(19) && c.nextRole(8) == 9 && c.nextRole(9) == 20 && c.nextRole(20) == 0);
   c.roleName(20, nm, sizeof nm);
   CHECK(!strcmp(nm, "Search dog"));
   TeamWire::RoleDef older = dog;
@@ -350,7 +352,7 @@ static void roles() {
   gone.time += 5; gone.reset = true;
   n = TeamWire::encode(gone, buf, sizeof buf);
   c.onPayload("ops", buf, n);
-  CHECK(!c.roleAvailable(20) && c.nextRole(8) == 0);
+  CHECK(!c.roleAvailable(20) && c.nextRole(9) == 0);
   c.roleName(20, nm, sizeof nm);
   CHECK(!strcmp(nm, "Role 20"));
 }
