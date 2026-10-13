@@ -137,7 +137,18 @@ static void store() {
   CHECK_STR(buf, "3 days");
 }
 
+static void iceTag() {
+  CHECK(isIce("#icewatch", "Somebody"));
+  CHECK(isIce("#ibtest", "IceBot"));
+  CHECK(!isIce("#dronewatch", "DARS-C6L"));
+  Report r;
+  parse("\xF0\x9F\x9F\xA2 OBSERVED\n@Portland NE Killingsworth St\n45.5625,-122.6108", r);
+  tagIce(r);
+  CHECK_STR(r.title, "ICE Portland NE Killingsworth St");
+}
+
 int main() {
+  iceTag();
   iceBot();
   iceBotLinkOnly();
   drone();

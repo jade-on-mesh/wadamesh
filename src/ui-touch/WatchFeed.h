@@ -455,6 +455,26 @@ inline bool parse(const char* t, Report& r) {
   return has;
 }
 
+// "ICE" for ICE watch reports: a channel named for it (#icewatch) or IceBot
+// posting. The map labels those "ICE <place>" rather than with the channel name.
+inline bool isIce(const char* channel, const char* sender) {
+  return (channel && containsNoCase(channel, strlen(channel), "ice")) ||
+         (sender && containsNoCase(sender, strlen(sender), "icebot"));
+}
+
+// Puts "ICE " before a report's title.
+inline void tagIce(Report& r) {
+  char t[sizeof r.title + 8];
+  snprintf(t, sizeof t, "ICE%s%s", r.title[0] ? " " : "", r.title);
+  size_t n = strlen(t);
+  if (n >= sizeof r.title) {   // cut at a character boundary
+    n = sizeof r.title - 1;
+    while (n && ((uint8_t)t[n] & 0xC0) == 0x80) n--;
+  }
+  memcpy(r.title, t, n);
+  r.title[n] = 0;
+}
+
 // ---- the reports on the map -----------------------------------------------------------------
 constexpr int kMaxItems = 48;
 constexpr int kMaxWatched = 8;
