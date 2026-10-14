@@ -168,6 +168,16 @@ uint8_t* s_bits = nullptr;
 size_t s_len = 0;
 bool s_codec_on = false;
 
+// The capture task's stack, from internal RAM (FreeRTOS here won't take a
+// PSRAM stack). Codec2's deepest encoder path measures ~15 KB (analyse_one_frame
+// -> nlp -> FFT, -fstack-usage) and codec2_create ~10 KB; 40 KB was twice that.
+constexpr uint32_t kTaskStack = 28 * 1024;   // ~18-20 KB used on Xtensa; the rest is margin
+// Plus the I2S driver: 8 DMA buffers of 128 stereo frames (4 KB) and its state.
+constexpr size_t kDriverBytes = 8 * 1024;
+// What has to stay free for everything else while recording (Wi-Fi, BLE, LVGL).
+constexpr size_t kHeadroom = 8 * 1024;
+char s_mem_err[64];
+
 void captureTask(void*) {
   VoxMicPrep prep;
   VoxCodec2Encoder enc;
@@ -229,6 +239,9 @@ void captureTask(void*) {
   }
   s_len = (size_t)s_frames * (size_t)bpf;
   enc.end();
+  // How close the stack came to its end, for tuning kTaskStack.
+  Serial.printf("[VOX] mic task stack: %u bytes unused of %u\n",
+                (unsigned)uxTaskGetStackHighWaterMark(nullptr), (unsigned)kTaskStack);
   s_state = s_cancel ? kIdle : ok ? kReady : kFailed;
   s_task_running = false;
   vTaskDelete(nullptr);
@@ -269,10 +282,18 @@ bool start(const char** err) {
   if (s_task_running || s_state == kRecording) { *err = "Already recording"; return false; }
   dropClip();
   s_error = "";
-  // Codec2 needs ~25 KB of stack and the I2S driver its DMA buffers, both from
-  // internal RAM; refuse cleanly rather than let the driver abort().
-  if (heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) < 72 * 1024) {
-    *err = "Not enough memory to record";
+  // The capture task's stack and the I2S DMA buffers both come from internal
+  // RAM; refuse cleanly rather than let the driver abort(). The stack needs one
+  // contiguous block, so check the largest block as well as the total. (This
+  // used to demand 72 KB free in total, more than a T-Deck with Wi-Fi, BLE
+  // and the UI up usually has, so recording was refused on a healthy device.)
+  const size_t free_int = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  const size_t big_int = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  if (big_int < kTaskStack + 1024 || free_int < kTaskStack + kDriverBytes + kHeadroom) {
+    snprintf(s_mem_err, sizeof s_mem_err, "Not enough memory to record (%uK free, %uK block)",
+             (unsigned)(free_int / 1024), (unsigned)(big_int / 1024));
+    Serial.printf("[VOX] %s\n", s_mem_err);
+    *err = s_mem_err;
     return false;
   }
   s_bits = (uint8_t*)heap_caps_malloc(kMaxBits, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -296,7 +317,7 @@ bool start(const char** err) {
   s_level = 0;
   s_state = kRecording;
   s_task_running = true;
-  if (xTaskCreate(captureTask, "vox_mic", 40 * 1024, nullptr, 3, nullptr) != pdPASS) {
+  if (xTaskCreate(captureTask, "vox_mic", kTaskStack, nullptr, 3, nullptr) != pdPASS) {
     s_task_running = false;
     s_state = kIdle;
     shutdownHardware();
