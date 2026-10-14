@@ -10,6 +10,7 @@
 
 #include "../MyMesh.h"
 #include "ChannelSenderSplit.h"
+#include "VoxServe.h"
 #include "VoxVoice.h"
 #include "device_caps.h"
 
@@ -149,6 +150,50 @@ class MeshIo : public VoxFetchIo {
 MeshIo g_io;
 VoxFetch g_fetch(g_io);
 
+// Answers downloads of the clips this radio holds (VoxServe).
+class ServeIo : public VoxServeIo {
+ public:
+  uint32_t nowMs() override { return millis(); }
+  uint32_t random32() override { return esp_random(); }
+  void selfKey6(uint8_t out[6]) override { memcpy(out, the_mesh.getSelfPubKey(), 6); }
+
+  bool routeToKey6(const uint8_t key6[6], uint8_t* path, int* len) override {
+    ContactInfo* c = the_mesh.lookupContactByPubKey(key6, 6);
+    if (!c) return false;
+    uint8_t packed = 0;
+    uint8_t buf[MAX_PATH_SIZE];
+    if (!the_mesh.voxContactRoute(c->id.pub_key, buf, &packed)) return false;
+    if ((packed >> 6) != 0) return false;   // raw data takes 1-byte hashes only
+    const int n = packed & 0x3F;
+    memcpy(path, buf, (size_t)n);
+    *len = n;
+    return true;
+  }
+
+  bool sendRaw(const uint8_t* path, int len, const uint8_t* data, size_t n) override {
+    if (len < 0 || len > 63) return false;
+    return the_mesh.voxSendRaw(path, (uint8_t)len, data, n);
+  }
+
+  bool sendChannelData(int ch, uint16_t type, const uint8_t* data, size_t n) override {
+    return the_mesh.voxSendChannelData(ch, type, data, n);
+  }
+
+  uint32_t packetAirMs() override { return g_io.packetAirMs(); }
+
+  bool loadClip(uint32_t sid, uint8_t* mode, uint8_t** bits, size_t* len) override {
+    int m = 0;
+    if (!loadVoice(sid, &m, bits, len)) return false;
+    *mode = (uint8_t)m;
+    return true;
+  }
+  void freeClip(uint8_t* bits) override { free(bits); }
+  void log(const char* line) override { Serial.println(line); }
+};
+
+ServeIo g_serve_io;
+VoxServe g_serve(g_serve_io);
+
 bool parseChannelPost(const char* text, char* name, size_t name_cap, VoxWire::Envelope* env) {
   const char* body = ChannelSenderSplit::split(text, name, name_cap);
   return VoxWire::parseEnvelope(body, env);
@@ -171,11 +216,13 @@ bool canPlay(const VoxWire::Envelope& env) {
 
 void setStore(fs::FS* fs) { g_fs = fs; }
 
-void onDirectText(const char* text, const uint8_t sender_pub[32]) {
+bool onDirectText(const char* text, const uint8_t sender_pub[32]) {
+  if (g_serve.onDirectText(text)) return true;   // VR3: someone wants a clip of ours
   VoxWire::Envelope env;
-  if (!VoxWire::parseEnvelope(text, &env) || !canFetch(env)) return;
+  if (!VoxWire::parseEnvelope(text, &env) || !canFetch(env)) return false;
   remember(env);
   g_fetch.onEnvelope(env, sender_pub, nullptr, -1, false);
+  return false;
 }
 
 void onChannelText(const char* text, int channel_idx) {
@@ -186,9 +233,15 @@ void onChannelText(const char* text, int channel_idx) {
   g_fetch.onEnvelope(env, nullptr, name, channel_idx, false);
 }
 
-void onPayload(const uint8_t* data, size_t len, int channel_idx) { g_fetch.onPayload(data, len, channel_idx); }
+void onPayload(const uint8_t* data, size_t len, int channel_idx) {
+  g_fetch.onPayload(data, len, channel_idx);
+  g_serve.onPayload(data, len, channel_idx);
+}
 
-void tick() { g_fetch.tick(); }
+void tick() {
+  g_fetch.tick();
+  g_serve.tick();
+}
 
 bool parse(const char* text, VoxWire::Envelope* env) { return VoxWire::parseEnvelope(text, env); }
 
@@ -239,5 +292,48 @@ bool loadFile(uint32_t sid, bool voice, uint8_t** data, size_t* len) {
 }
 
 uint32_t version() { return g_version; }
+
+bool addRecording(uint8_t wire_mode, uint8_t* bits, size_t len, uint32_t ms, char* envelope, size_t cap,
+                  uint32_t* sid_out) {
+  const int pb = VoxWire::packetBytes(wire_mode);
+  if (!g_fs || !bits || len == 0 || pb <= 0) { free(bits); return false; }
+  const int total = (int)((len + (size_t)pb - 1) / (size_t)pb);
+  const int seconds = (int)((ms + 999) / 1000);
+  uint32_t sid = 0;
+  while (!sid) sid = esp_random();
+  if (total > VoxWire::kMaxClipPackets || !VoxWire::encodeVoiceEnvelope(sid, wire_mode, total, seconds, envelope, cap)) {
+    free(bits);
+    return false;
+  }
+  // Stored like a downloaded clip ([wire mode][frames]), so the bubble plays it
+  // and VoxServe can answer for it after a reboot too.
+  char path[32];
+  storePath(sid, true, path, sizeof path);
+  File f = g_fs->open(path, "w");
+  bool ok = (bool)f;
+  if (ok) {
+    ok = f.write(&wire_mode, 1) == 1 && f.write(bits, len) == len;
+    f.close();
+    if (!ok) g_fs->remove(path);
+  }
+  free(bits);
+  if (!ok) return false;
+  VoxWire::Envelope env;
+  VoxWire::parseEnvelope(envelope, &env);
+  remember(env);
+  g_serve.markOwn(sid);
+  g_version++;
+  if (sid_out) *sid_out = sid;
+  Serial.printf("[VOX] recorded clip %08lx: %u bytes, %d packets, %d s\n", (unsigned long)sid, (unsigned)len, total,
+                seconds);
+  return true;
+}
+
+bool haveVoice(uint32_t sid) {
+  if (!g_fs) return false;
+  char path[32];
+  storePath(sid, true, path, sizeof path);
+  return g_fs->exists(path);
+}
 
 }  // namespace VoxPhotos
