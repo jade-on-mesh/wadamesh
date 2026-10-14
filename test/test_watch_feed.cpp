@@ -147,7 +147,43 @@ static void iceTag() {
   CHECK_STR(r.title, "ICE Portland NE Killingsworth St");
 }
 
+static bool posOf(const char* t, double la, double lo) {
+  Report r;
+  return parse(t, r) && fabs(r.lat - la) < 1e-4 && fabs(r.lon - lo) < 1e-4;
+}
+
+static void quakesAndFormats() {
+  Report r;
+  CHECK(parse("Earthquake M3.9 mw | 24 km ESE of Castle Rock, Washington | 11:09:28 UTC | depth 9 km | "
+              "46.22N 122.60W", r));
+  CHECK(r.quake_m10 == 39 && r.level == kOther);
+  CHECK(near(r.lat, 46.22) && near(r.lon, -122.60));
+  CHECK_STR(r.title, "QUAKE M3.9 Castle Rock");
+  CHECK_STR(r.body, "24 km ESE of Castle Rock, Washington \xC2\xB7 depth 9 km \xC2\xB7 11:09:28 UTC");
+  CHECK(parse("Earthquake M5.2 ml | 5 km WNW of Wauna, Washington | 21:05:56 UTC | depth 26 km | 47.40N 122.71W", r));
+  CHECK(r.level == kCritical);
+  CHECK_STR(r.title, "QUAKE M5.2 Wauna");
+
+  CHECK(posOf("seen at 46.22N 122.60W", 46.22, -122.60));
+  CHECK(posOf("fire 33.9\xC2\xB0 S, 18.4\xC2\xB0 E", -33.9, 18.4));
+  CHECK(posOf("N47.6 W122.3 smoke", 47.6, -122.3));
+  CHECK(posOf("lat: 45.52 lon: -122.68", 45.52, -122.68));
+  CHECK(posOf("Latitude=45.5 Longitude=-122.6", 45.5, -122.6));
+  CHECK(posOf("pos 45.5625 -122.6108", 45.5625, -122.6108));
+  CHECK(posOf("45\xC2\xB0" "31'30\"N 122\xC2\xB0" "40'30\"W", 45.525, -122.675));
+  CHECK(posOf("45\xC2\xB0 31.5' N, 122\xC2\xB0 40.5' W", 45.525, -122.675));
+  // Maidenhead: CN85 is 45-46N 124-122W; CN85pm is one subsquare of it.
+  CHECK(posOf("net control CN85pm", 45.5208, -122.7083));
+  CHECK(posOf("grid CN85", 45.5, -123.0));
+  CHECK(posOf("cn85pm42", 45.5104, -122.7125));
+  CHECK(!parse("M3.9 at 11:09 UTC, 5 km away", r));
+  CHECK(!parse("Room 5 Steps north", r));
+  CHECK(!parse("version 1.2.3 build 45", r));
+  CHECK(!parse("the AB12 bus", r));   // a 4-character square needs a cue
+}
+
 int main() {
+  quakesAndFormats();
   iceTag();
   iceBot();
   iceBotLinkOnly();
