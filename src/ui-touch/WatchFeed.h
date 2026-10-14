@@ -50,6 +50,7 @@ struct Report {
   char label2[12] = {0};      // "Op"
   char title[48] = {0};       // the place, else the status, else the first line
   char body[128] = {0};       // the rest, one line, " · " between parts
+  uint8_t quake_m10 = 0;      // an earthquake's magnitude x10 (39 = M3.9); 0: not one
 };
 
 // ---- small text helpers -------------------------------------------------------------------
@@ -134,6 +135,202 @@ inline bool coordAt(const char* p, double* la, double* lo, const char** end) {
 }
 
 inline bool validPos(double la, double lo) { return fabs(la) <= 90 && fabs(lo) <= 180; }
+
+// \d{1,maxInt}(\.\d+)? at p (no sign)
+inline bool plainNum(const char* p, int maxInt, double* v, const char** end) {
+  int d = 0;
+  while (isDigit(p[d])) d++;
+  if (d < 1 || d > maxInt) return false;
+  const char* e = p + d;
+  if (*e == '.' && isDigit(e[1])) { e++; while (isDigit(*e)) e++; }
+  *v = strtod(p, nullptr);
+  *end = e;
+  return true;
+}
+inline const char* skipDeg(const char* p) {
+  while (*p == ' ') p++;
+  if ((uint8_t)p[0] == 0xC2 && (uint8_t)p[1] == 0xB0) p += 2;
+  while (*p == ' ') p++;
+  return p;
+}
+inline bool isAlpha(char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); }
+inline bool hemi(char c, const char* set) { return c && strchr(set, c); }
+
+// "46.22N 122.60W", "33.9° S, 18.4° E"
+inline bool hemiAt(const char* t, const char* p, double* la, double* lo, const char** end) {
+  if (p > t && (isDigit(p[-1]) || p[-1] == '.')) return false;
+  const char* e;
+  double a, b;
+  if (!plainNum(p, 2, &a, &e)) return false;
+  e = skipDeg(e);
+  if (!hemi(*e, "NSns") || isAlpha(e[1])) return false;
+  if (*e == 'S' || *e == 's') a = -a;
+  e++;
+  while (isSpace(*e) || *e == ',' || *e == ';' || *e == '/') e++;
+  if (!plainNum(e, 3, &b, &e)) return false;
+  e = skipDeg(e);
+  if (!hemi(*e, "EWew") || isAlpha(e[1])) return false;
+  if (*e == 'W' || *e == 'w') b = -b;
+  *la = a; *lo = b; *end = e + 1;
+  return true;
+}
+
+// "N47.6 W122.3"
+inline bool hemiPreAt(const char* t, const char* p, double* la, double* lo, const char** end) {
+  if (!hemi(*p, "NSns") || (p > t && isAlpha(p[-1]))) return false;
+  const bool south = *p == 'S' || *p == 's';
+  const char* e = p + 1;
+  while (*e == ' ') e++;
+  double a, b;
+  if (!plainNum(e, 2, &a, &e)) return false;
+  e = skipDeg(e);
+  while (isSpace(*e) || *e == ',' || *e == ';' || *e == '/') e++;
+  if (!hemi(*e, "EWew")) return false;
+  const bool west = *e == 'W' || *e == 'w';
+  e++;
+  while (*e == ' ') e++;
+  if (!plainNum(e, 3, &b, &e)) return false;
+  e = skipDeg(e);
+  if (isDigit(*e) || *e == '.') return false;
+  *la = south ? -a : a; *lo = west ? -b : b; *end = e;
+  return true;
+}
+
+// -?\d{1,maxInt}(\.\d+)?
+inline bool signedNum(const char* p, int maxInt, double* v, const char** end) {
+  const bool neg = *p == '-';
+  if (!plainNum(p + (neg ? 1 : 0), maxInt, v, end)) return false;
+  if (neg) *v = -*v;
+  return true;
+}
+
+// "lat: 45.52 lon: -122.68", "Latitude=45.5 Longitude=-122.6"
+inline bool latLonWordAt(const char* t, const char* p, double* la, double* lo, const char** end) {
+  if ((p > t && isWord(p[-1])) || !startsNoCase(p, "lat")) return false;
+  const char* e = p + 3;
+  if (startsNoCase(e, "itude")) e += 5;
+  while (*e == ' ' || *e == ':' || *e == '=') e++;
+  double a, b;
+  if (!signedNum(e, 2, &a, &e)) return false;
+  for (int k = 0; k <= 12; k++, e++) {
+    if (!*e || *e == '\n' || isDigit(*e) || *e == '-') return false;
+    if (isWord(e[-1])) continue;
+    const char* w = e;
+    if (startsNoCase(w, "longitude")) w += 9;
+    else if (startsNoCase(w, "long") || startsNoCase(w, "lng")) w += startsNoCase(w, "long") ? 4 : 3;
+    else if (startsNoCase(w, "lon")) w += 3;
+    else continue;
+    while (*w == ' ' || *w == ':' || *w == '=') w++;
+    if (!signedNum(w, 3, &b, &w)) return false;
+    *la = a; *lo = b; *end = w;
+    return true;
+  }
+  return false;
+}
+
+// "45.5625 -122.6108": two plain decimals, 4+ places each
+inline bool spaceAt(const char* t, const char* p, double* la, double* lo, const char** end) {
+  if (p > t && (isDigit(p[-1]) || p[-1] == '.')) return false;
+  const char* e;
+  double a, b;
+  if (!number(p, 2, 4, &a, &e) || !isSpace(*e)) return false;
+  while (isSpace(*e)) e++;
+  if (!number(e, 3, 4, &b, &e) || isDigit(*e) || *e == '.') return false;
+  *la = a; *lo = b; *end = e;
+  return true;
+}
+
+// One degrees-minutes(-seconds) value: 45°31'22.5"N, 45° 31.37' N, 45d31m22sN.
+inline bool dmsOne(const char* p, int maxDeg, const char* hemis, double* v, const char** end) {
+  const char* e;
+  double d, m = 0, s = 0;
+  if (!plainNum(p, maxDeg, &d, &e)) return false;
+  if ((uint8_t)e[0] == 0xC2 && (uint8_t)e[1] == 0xB0) e += 2;
+  else if (*e == 'd' || *e == 'D') e++;
+  else return false;
+  while (*e == ' ') e++;
+  if (plainNum(e, 2, &m, &e)) {
+    if (*e == '\'' || *e == 'm') e++;
+    else if ((uint8_t)e[0] == 0xE2 && (uint8_t)e[1] == 0x80 && (uint8_t)e[2] == 0xB2) e += 3;   // ′
+    else return false;
+    while (*e == ' ') e++;
+    const char* se;
+    if (plainNum(e, 2, &s, &se)) {
+      e = se;
+      if (*e == '"' || *e == 's') e++;
+      else if (e[0] == '\'' && e[1] == '\'') e += 2;
+      else if ((uint8_t)e[0] == 0xE2 && (uint8_t)e[1] == 0x80 && (uint8_t)e[2] == 0xB3) e += 3;   // ″
+      else return false;
+      while (*e == ' ') e++;
+    }
+  }
+  if (!hemi(*e, hemis) || isAlpha(e[1])) return false;
+  double x = d + m / 60 + s / 3600;
+  if (*e == 'S' || *e == 's' || *e == 'W' || *e == 'w') x = -x;
+  *v = x;
+  *end = e + 1;
+  return true;
+}
+
+// 45°31'22"N 122°40'30"W
+inline bool dmsAt(const char* t, const char* p, double* la, double* lo, const char** end) {
+  if (p > t && (isDigit(p[-1]) || p[-1] == '.')) return false;
+  const char* e;
+  double a, b;
+  if (!dmsOne(p, 2, "NSns", &a, &e)) return false;
+  while (isSpace(*e) || *e == ',' || *e == ';' || *e == '/') e++;
+  if (!dmsOne(e, 3, "EWew", &b, &e)) return false;
+  *la = a; *lo = b; *end = e;
+  return true;
+}
+
+// A Maidenhead grid locator: CN85pm, CN85pm42 (any case), or a 4-character
+// square (CN85) after "grid"/"locator"/"loc"; the middle of the square.
+inline bool maidenheadAt(const char* t, const char* p, double* la, double* lo, const char** end) {
+  if (p > t && isWord(p[-1])) return false;
+  auto up = [](char c) { return (char)(c >= 'a' && c <= 'z' ? c - 32 : c); };
+  const char A = up(p[0]), B = up(p[1]);
+  if (A < 'A' || A > 'R' || B < 'A' || B > 'R' || !isDigit(p[2]) || !isDigit(p[3])) return false;
+  double lon = (A - 'A') * 20 - 180 + (p[2] - '0') * 2;
+  double lat = (B - 'A') * 10 - 90 + (p[3] - '0');
+  double w = 2, h = 1;
+  int n = 4;
+  const char C = up(p[4]), D = up(p[5]);
+  if (C >= 'A' && C <= 'X' && D >= 'A' && D <= 'X') {
+    lon += (C - 'A') * (2.0 / 24);
+    lat += (D - 'A') * (1.0 / 24);
+    w = 2.0 / 24; h = 1.0 / 24;
+    n = 6;
+    if (isDigit(p[6]) && isDigit(p[7])) {
+      lon += (p[6] - '0') * (w / 10);
+      lat += (p[7] - '0') * (h / 10);
+      w /= 10; h /= 10;
+      n = 8;
+    }
+  }
+  if (isWord(p[n])) return false;
+  if (n == 4) {   // too easy to mistake for anything else without a cue
+    const char* q = p;
+    while (q > t && (q[-1] == ' ' || q[-1] == ':' || q[-1] == '=')) q--;
+    const char* w0 = q;
+    while (w0 > t && isAlpha(w0[-1])) w0--;
+    const size_t wl = (size_t)(q - w0);
+    if (!(wl == 4 && startsNoCase(w0, "grid")) && !(wl == 7 && startsNoCase(w0, "locator")) &&
+        !(wl == 3 && startsNoCase(w0, "loc")))
+      return false;
+  }
+  *la = lat + h / 2;
+  *lo = lon + w / 2;
+  *end = p + n;
+  return true;
+}
+
+// A position written any of those ways, starting at p.
+inline bool posAt(const char* t, const char* p, double* la, double* lo, const char** end) {
+  return coordAt(p, la, lo, end) || dmsAt(t, p, la, lo, end) || hemiAt(t, p, la, lo, end) ||
+         hemiPreAt(t, p, la, lo, end) || latLonWordAt(t, p, la, lo, end) || spaceAt(t, p, la, lo, end) ||
+         maidenheadAt(t, p, la, lo, end);
+}
 
 // "045° NE"
 inline void bearingLabel(float b, char* out, size_t cap) {
@@ -291,7 +488,7 @@ inline bool onlyCoords(const char* s, size_t n) {
   while (i < n) {
     double a, b;
     const char* e;
-    if (coordAt(s + i, &a, &b, &e) && (size_t)(e - s) <= n) { i = (size_t)(e - s); continue; }
+    if (posAt(s, s + i, &a, &b, &e) && (size_t)(e - s) <= n) { i = (size_t)(e - s); continue; }
     if (!strncmp(s + i, "\xF0\x9F\x93\x8D", 4)) { i += 4; continue; }   // 📍
     const char c = s[i];
     if (isSpace(c) || c == ',' || c == ';' || c == ':') { i++; continue; }
@@ -307,6 +504,72 @@ inline const char* messageText(const char* text, char* sender, size_t cap) {
   if (!c || c - text > 40 || memchr(text, '\n', (size_t)(c - text))) return text;
   if (sender) copyN(sender, cap, text, (size_t)(c - text));
   return c + 2;
+}
+
+// Fills in an earthquake report; false if t isn't one.
+inline bool parseQuake(const char* t, Report& r) {
+  const char* q = nullptr;
+  for (const char* p = t; *p && !q; ++p) {
+    if (p > t && isWord(p[-1])) continue;
+    if (startsNoCase(p, "earthquake") && !isWord(p[10])) q = p + 10;
+    else if (startsNoCase(p, "quake") && !isWord(p[5])) q = p + 5;
+  }
+  if (!q) return false;
+  double mag = -1;
+  for (int k = 0; k < 20 && q[k] && q[k] != '|' && q[k] != '\n'; k++) {
+    if ((q[k] == 'M' || q[k] == 'm') && !isWord(q[k - 1])) {
+      const char* d = q + k + 1;
+      if (*d == ' ') d++;
+      const char* e;
+      if (plainNum(d, 1, &mag, &e)) break;
+    }
+  }
+  if (mag < 0) return false;
+  r.quake_m10 = (uint8_t)lround(mag * 10);
+  r.level = mag >= 5 ? kCritical : mag >= 4 ? kActive : kOther;
+  // The place: the "... of <town>" part; the town goes in the title.
+  char place[96] = "", town[32] = "";
+  for (const char* s = t; *s;) {
+    const char* e = s;
+    while (*e && *e != '|' && *e != '\n') e++;
+    const char* a = s;
+    const char* b = e;
+    while (a < b && isSpace(*a)) a++;
+    while (b > a && isSpace(b[-1])) b--;
+    if (!place[0] && containsNoCase(a, (size_t)(b - a), " of ")) {
+      copyN(place, sizeof place, a, (size_t)(b - a));
+      const char* of = nullptr;
+      for (const char* x = a; x + 4 <= b; ++x)
+        if (startsNoCase(x, " of ")) of = x + 4;
+      const char* te = of;
+      while (te < b && *te != ',') te++;
+      if (of) copyN(town, sizeof town, of, (size_t)(te - of));
+    }
+    s = *e ? e + 1 : e;
+  }
+  snprintf(r.title, sizeof r.title, "QUAKE M%.1f%s%s", mag, town[0] ? " " : "", town);
+  if (place[0]) append(r.body, sizeof r.body, place, strlen(place));
+  for (const char* p = t; *p; ++p) {
+    if (!startsNoCase(p, "depth")) continue;
+    const char* e = p + 5;
+    while (*e == ' ' || *e == ':') e++;
+    double d;
+    if (plainNum(e, 4, &d, &e)) {
+      snprintf(r.detail, sizeof r.detail, "depth %.0f km", d);
+      append(r.body, sizeof r.body, r.detail, strlen(r.detail));
+    }
+    break;
+  }
+  for (const char* p = t; *p; ++p) {   // "11:09:28 UTC"
+    const char* u = strstr(p, "UTC");
+    if (!u) break;
+    const char* s = u;
+    while (s > t && (isDigit(s[-1]) || s[-1] == ':' || s[-1] == ' ')) s--;
+    while (*s == ' ') s++;
+    if (u - s >= 4 && strchr(s, ':') && strchr(s, ':') < u) append(r.body, sizeof r.body, s, (size_t)(u - s) + 3);
+    break;
+  }
+  return true;
 }
 
 // Parses a message (without its sender prefix). True when it has a position,
@@ -330,7 +593,7 @@ inline bool parse(const char* t, Report& r) {
     for (const char* p = t; *p;) {
       double a, b;
       const char* e;
-      if (!coordAt(p, &a, &b, &e)) { ++p; continue; }
+      if (!posAt(t, p, &a, &b, &e)) { ++p; continue; }
       if (validPos(a, b)) {
         if (!has) {
           r.lat = a; r.lon = b; has = true;
@@ -385,6 +648,10 @@ inline bool parse(const char* t, Report& r) {
     if (r.detail[0]) append(r.body, sizeof r.body, r.detail, strlen(r.detail));
     return has;
   }
+
+  // An earthquake: "Earthquake M3.9 mw | 24 km ESE of Castle Rock, Washington |
+  // 11:09:28 UTC | depth 9 km | 46.22N 122.60W" (SeaBot and other quake feeds).
+  if (parseQuake(t, r)) return has;
 
   // A report: status dot, time, @place, then whatever else.
   bool status = false, when = false, place = false;

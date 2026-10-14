@@ -457,6 +457,13 @@ static void teamDrawMapOverlay(lv_obj_t* parent, double cwx, double cwy) {
         char lbl[64];
         watchfeed::droneLabel(it.r, it.has_course, it.course, lbl, sizeof lbl);
         mapLabel(parent, sx, sy, lbl, 0xFFCC80);
+      } else if (it.r.quake_m10) {
+        // An earthquake: a ring that grows with the magnitude, always labelled.
+        const int m = it.r.quake_m10 < 20 ? 0 : it.r.quake_m10 > 80 ? 60 : it.r.quake_m10 - 20;
+        lv_obj_t* d = mapDot(parent, sx, sy, 12 + m / 4, watchfeed::levelRgb(it.r.level), watchfeed::levelRgb(it.r.level),
+                             LV_RADIUS_CIRCLE, LV_OPA_50);
+        lv_obj_set_style_border_width(d, 3, LV_PART_MAIN);
+        mapLabel(parent, sx, sy, it.r.title, 0xFFFFFF);
       } else {
         mapDot(parent, sx, sy, 12, watchfeed::levelRgb(it.r.level), 0xFFFFFF, LV_RADIUS_CIRCLE, LV_OPA_COVER);
         if (it.r.title[0] && s_map_zoom >= 13) mapLabel(parent, sx, sy, it.r.title, 0xFFFFFF);
@@ -739,7 +746,7 @@ void teamOnChannelText(int idx, const char* text, uint32_t sent) {
   watchfeed::Report r;
   char sender[40];
   if (!watchfeed::parse(watchfeed::messageText(text, sender, sizeof sender), r)) return;
-  if (!r.track[0] && watchfeed::isIce(cd.name, sender)) watchfeed::tagIce(r);
+  if (!r.track[0] && !r.quake_m10 && watchfeed::isIce(cd.name, sender)) watchfeed::tagIce(r);
   // When it happened: the sender's time if both clocks are plausible (a
   // report that waited in the mesh is older), else now.
   uint32_t at = millis();
