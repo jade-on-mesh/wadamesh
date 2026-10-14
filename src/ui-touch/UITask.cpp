@@ -68105,7 +68105,7 @@ static void voxMicSend() {
     g_lv.task->showAlert(TR("Couldn't save the voice message"), 2000);
     return;
   }
-  if (g_lv.task->sendComposerToActiveThread(env)) {
+  if (g_lv.task->composerSend(env)) {
     if (p) refreshChatDetailAsync(*p);
     g_lv.dirty_threads = true;
   }
