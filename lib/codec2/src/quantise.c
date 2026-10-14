@@ -34,6 +34,7 @@
 #include <string.h>
 
 #include "codec2_fft.h"
+#include "debug_alloc.h"
 #include "defines.h"
 #include "dump.h"
 #include "lpc.h"
@@ -323,9 +324,12 @@ void lpc_post_filter(codec2_fftr_cfg fftr_fwd_cfg, float Pw[], float ak[],
                      int order, int dump, float beta, float gamma,
                      int bass_boost, float E) {
   int i;
-  float x[FFT_ENC];          /* input to FFTs                */
-  COMP Ww[FFT_ENC / 2 + 1];  /* weighting spectrum           */
-  float Rw[FFT_ENC / 2 + 1]; /* R = WA                       */
+  /* wadamesh: on the heap, not the stack */
+  float *x = (float *)MALLOC(FFT_ENC * sizeof(float) +
+                             (FFT_ENC / 2 + 1) * (sizeof(COMP) + sizeof(float)));
+  if (x == NULL) return;      /* x[FFT_ENC]: input to FFTs    */
+  COMP *Ww = (COMP *)(x + FFT_ENC);         /* weighting spectrum */
+  float *Rw = (float *)(Ww + FFT_ENC / 2 + 1); /* R = WA          */
   float e_before, e_after, gain;
   float Pfw;
   float max_Rw, min_Rw;
@@ -409,6 +413,7 @@ void lpc_post_filter(codec2_fftr_cfg fftr_fwd_cfg, float Pw[], float ak[],
   }
 
   PROFILE_SAMPLE_AND_LOG2(tr, "        filt");
+  FREE(x);
 }
 
 /*---------------------------------------------------------------------------*\

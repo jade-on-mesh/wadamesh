@@ -18,7 +18,7 @@ FILES="dump lpc nlp postfilter sine codec2 codec2_fft kiss_fft kiss_fftr interp 
        newamp1 phase quantise pack codebook codebookd codebookjmv codebookge
        codebooknewamp1 codebooknewamp1_energy codebooknewamp2 codebooknewamp2_energy"
 
-rm -rf "$DST/src" "$DST/include" "$DST/COPYING"
+rm -rf "$DST/src" "$DST/include" "$DST/COPYING"   # keeps wadamesh-stack.patch
 mkdir -p "$DST/src" "$DST/include/codec2"
 cp "$SRC/COPYING" "$DST/"
 # Only the headers the speech codec includes (the rest are FreeDV/LDPC tables).
@@ -30,5 +30,11 @@ for f in $FILES; do cp "$SRC/src/$f.c" "$DST/src/"; done
 cp "$SRC/include/codec2/version.h" "$DST/include/codec2/"
 # The public header, where users include it from.
 cp "$SRC/src/codec2.h" "$DST/include/codec2/codec2.h"
+
+# Wadamesh's change: Codec2 keeps ~12 KB of scratch arrays on the stack per
+# call; this moves them into the codec instance (PSRAM on ESP32) so the record
+# and playback tasks fit in a small internal-RAM stack. Output is unchanged
+# (test/build_vox_record_test.sh checks the bits against the app's Codec2).
+patch -d "$DST" -p1 < "$DST/wadamesh-stack.patch"
 
 echo "Codec2 speech codec vendored into lib/codec2"

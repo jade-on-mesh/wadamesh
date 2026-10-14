@@ -41,3 +41,10 @@ g++ -std=c++17 -O2 -g $SAN -Wall -Wextra -I "$ROOT/src" -I "$ROOT/test" -I "$L/i
     "$ROOT/test/test_vox_record.cpp" "$ROOT/src/ui-touch/VoxVoice.cpp" "$OUT"/obj/*.o \
     -lm -o "$OUT/test_vox_record"
 "$OUT/test_vox_record" "$ROOT/test/data/vox"
+
+# How much stack Codec2 needs (no sanitizers: they inflate stack frames).
+mkdir -p "$OUT/stack"
+gcc -std=gnu11 -O2 -D__EMBEDDED__ -DCODEC2_MODE_700C_EN=0 -DGIT_HASH='"vendored"' \
+    -I "$L/src" -I "$L/include" "$L"/src/*.c "$ROOT/test/test_codec2_stack.c" -lm -lpthread \
+    -o "$OUT/stack/test_codec2_stack"
+"$OUT/stack/test_codec2_stack"

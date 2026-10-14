@@ -28,6 +28,7 @@
 #include "nlp.h"
 
 #include "codec2_fft.h"
+#include "debug_alloc.h"
 #include "defines.h"
 #include "dump.h"
 #undef PROFILE
@@ -93,6 +94,7 @@ typedef struct {
   float mem_fir[NLP_NTAP]; /* decimation FIR filter memory */
   codec2_fft_cfg fft_cfg;  /* kiss FFT config              */
   float *Sn16k;            /* Fs=16kHz input speech vector */
+  COMP Fw[PE_FFT_SIZE];    /* nlp() scratch (wadamesh: heap, not stack) */
   FILE *f;
 } NLP;
 
@@ -114,7 +116,7 @@ void *nlp_create(C2CONST *c2const) {
   int m = c2const->m_pitch;
   int Fs = c2const->Fs;
 
-  nlp = (NLP *)malloc(sizeof(NLP));
+  nlp = (NLP *)MALLOC(sizeof(NLP));
   if (nlp == NULL) return NULL;
 
   assert((Fs == 8000) || (Fs == 16000));
@@ -131,7 +133,7 @@ void *nlp_create(C2CONST *c2const) {
       nlp->Sn16k[i] = 0.0;
     }
     if (nlp->Sn16k == NULL) {
-      free(nlp);
+      FREE(nlp);
       return NULL;
     }
 
@@ -174,7 +176,7 @@ void nlp_destroy(void *nlp_state) {
   if (nlp->Fs == 16000) {
     free(nlp->Sn16k);
   }
-  free(nlp_state);
+  FREE(nlp_state);
 }
 
 /*---------------------------------------------------------------------------*\
@@ -217,7 +219,6 @@ float nlp(
 ) {
   NLP *nlp;
   float notch;          /* current notch filter output          */
-  COMP Fw[PE_FFT_SIZE]; /* DFT of squared signal (input/output) */
   float gmax;
   int gmax_bin;
   int m, i, j;
@@ -226,6 +227,7 @@ float nlp(
 
   assert(nlp_state != NULL);
   nlp = (NLP *)nlp_state;
+  COMP *Fw = nlp->Fw; /* DFT of squared signal (input/output) */
   m = nlp->m;
 
   /* Square, notch filter at DC, and LP filter vector */

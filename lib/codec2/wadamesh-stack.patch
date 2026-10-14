@@ -1,0 +1,338 @@
+diff --git a/src/codec2.c b/src/codec2.c
+index b27626a..b6cb0a6 100644
+--- a/src/codec2.c
++++ b/src/codec2.c
+@@ -479,7 +479,7 @@ void codec2_encode_3200(struct CODEC2 *c2, unsigned char *bits,
+ 
+ void codec2_decode_3200(struct CODEC2 *c2, short speech[],
+                         const unsigned char *bits) {
+-  MODEL model[2];
++  MODEL *model = c2->model_dec; /* wadamesh: on the heap, not the stack */
+   int lspd_indexes[LPC_ORD];
+   float lsps[2][LPC_ORD];
+   int Wo_index, e_index;
+@@ -488,7 +488,7 @@ void codec2_decode_3200(struct CODEC2 *c2, short speech[],
+   float ak[2][LPC_ORD + 1];
+   int i, j;
+   unsigned int nbit = 0;
+-  COMP Aw[FFT_ENC];
++  COMP *Aw = c2->Aw_dec; /* wadamesh: on the heap, not the stack */
+ 
+   assert(c2 != NULL);
+ 
+@@ -622,7 +622,7 @@ void codec2_encode_2400(struct CODEC2 *c2, unsigned char *bits,
+ 
+ void codec2_decode_2400(struct CODEC2 *c2, short speech[],
+                         const unsigned char *bits) {
+-  MODEL model[2];
++  MODEL *model = c2->model_dec; /* wadamesh: on the heap, not the stack */
+   int lsp_indexes[LPC_ORD];
+   float lsps[2][LPC_ORD];
+   int WoE_index;
+@@ -631,7 +631,7 @@ void codec2_decode_2400(struct CODEC2 *c2, short speech[],
+   float ak[2][LPC_ORD + 1];
+   int i, j;
+   unsigned int nbit = 0;
+-  COMP Aw[FFT_ENC];
++  COMP *Aw = c2->Aw_dec; /* wadamesh: on the heap, not the stack */
+ 
+   assert(c2 != NULL);
+ 
+@@ -796,7 +796,7 @@ void codec2_encode_1600(struct CODEC2 *c2, unsigned char *bits,
+ 
+ void codec2_decode_1600(struct CODEC2 *c2, short speech[],
+                         const unsigned char *bits) {
+-  MODEL model[4];
++  MODEL *model = c2->model_dec; /* wadamesh: on the heap, not the stack */
+   int lsp_indexes[LPC_ORD];
+   float lsps[4][LPC_ORD];
+   int Wo_index, e_index;
+@@ -806,7 +806,7 @@ void codec2_decode_1600(struct CODEC2 *c2, short speech[],
+   int i, j;
+   unsigned int nbit = 0;
+   float weight;
+-  COMP Aw[FFT_ENC];
++  COMP *Aw = c2->Aw_dec; /* wadamesh: on the heap, not the stack */
+ 
+   assert(c2 != NULL);
+ 
+@@ -971,7 +971,7 @@ void codec2_encode_1400(struct CODEC2 *c2, unsigned char *bits,
+ 
+ void codec2_decode_1400(struct CODEC2 *c2, short speech[],
+                         const unsigned char *bits) {
+-  MODEL model[4];
++  MODEL *model = c2->model_dec; /* wadamesh: on the heap, not the stack */
+   int lsp_indexes[LPC_ORD];
+   float lsps[4][LPC_ORD];
+   int WoE_index;
+@@ -981,7 +981,7 @@ void codec2_decode_1400(struct CODEC2 *c2, short speech[],
+   int i, j;
+   unsigned int nbit = 0;
+   float weight;
+-  COMP Aw[FFT_ENC];
++  COMP *Aw = c2->Aw_dec; /* wadamesh: on the heap, not the stack */
+ 
+   assert(c2 != NULL);
+ 
+@@ -1136,7 +1136,7 @@ void codec2_encode_1300(struct CODEC2 *c2, unsigned char *bits,
+ 
+ void codec2_decode_1300(struct CODEC2 *c2, short speech[],
+                         const unsigned char *bits, float ber_est) {
+-  MODEL model[4];
++  MODEL *model = c2->model_dec; /* wadamesh: on the heap, not the stack */
+   int lsp_indexes[LPC_ORD];
+   float lsps[4][LPC_ORD];
+   int Wo_index, e_index;
+@@ -1146,7 +1146,7 @@ void codec2_decode_1300(struct CODEC2 *c2, short speech[],
+   int i, j;
+   unsigned int nbit = 0;
+   float weight;
+-  COMP Aw[FFT_ENC];
++  COMP *Aw = c2->Aw_dec; /* wadamesh: on the heap, not the stack */
+ 
+   assert(c2 != NULL);
+ 
+@@ -1329,7 +1329,7 @@ void codec2_encode_1200(struct CODEC2 *c2, unsigned char *bits,
+ 
+ void codec2_decode_1200(struct CODEC2 *c2, short speech[],
+                         const unsigned char *bits) {
+-  MODEL model[4];
++  MODEL *model = c2->model_dec; /* wadamesh: on the heap, not the stack */
+   int lsp_indexes[LPC_ORD];
+   float lsps[4][LPC_ORD];
+   int WoE_index;
+@@ -1339,7 +1339,7 @@ void codec2_decode_1200(struct CODEC2 *c2, short speech[],
+   int i, j;
+   unsigned int nbit = 0;
+   float weight;
+-  COMP Aw[FFT_ENC];
++  COMP *Aw = c2->Aw_dec; /* wadamesh: on the heap, not the stack */
+ 
+   assert(c2 != NULL);
+ 
+@@ -1662,7 +1662,8 @@ void synthesise_one_frame(struct CODEC2 *c2, short speech[], MODEL *model,
+   }
+ 
+   postfilter(model, &c2->bg_est);
+-  synthesise(c2->n_samp, c2->fftr_inv_cfg, c2->Sn_, model, c2->Pn, 1);
++  synthesise(c2->n_samp, c2->fftr_inv_cfg, c2->Sn_, model, c2->Pn, 1,
++             c2->Sw_dec, c2->sw_dec);
+ 
+   for (i = 0; i < c2->n_samp; i++) {
+     c2->Sn_[i] *= gain;
+@@ -1692,7 +1693,7 @@ void synthesise_one_frame(struct CODEC2 *c2, short speech[], MODEL *model,
+ \*---------------------------------------------------------------------------*/
+ 
+ void analyse_one_frame(struct CODEC2 *c2, MODEL *model, short speech[]) {
+-  COMP Sw[FFT_ENC];
++  COMP *Sw = c2->Sw_enc; /* wadamesh: on the heap, not the stack */
+   float pitch;
+   int i;
+   int n_samp = c2->n_samp;
+diff --git a/src/codec2_fft.c b/src/codec2_fft.c
+index 7a75062..05ebc90 100644
+--- a/src/codec2_fft.c
++++ b/src/codec2_fft.c
+@@ -132,10 +132,11 @@ void codec2_fft_inplace(codec2_fft_cfg cfg, codec2_fft_cpx* inout) {
+   // or to allow kiss_fft to allocate RAM
+   // second part is just to play safe since first method
+   // is much faster and uses less RAM
+-  if (cfg->nfft <= 512) {
+-    kiss_fft_cpx in[512];
++  kiss_fft_cpx* in = (kiss_fft_cpx*)MALLOC(cfg->nfft * sizeof(kiss_fft_cpx));  /* wadamesh: on the heap, not the stack */
++  if (in) {
+     memcpy(in, inout, cfg->nfft * sizeof(kiss_fft_cpx));
+     kiss_fft(cfg, in, (kiss_fft_cpx*)inout);
++    FREE(in);
+   } else {
+     kiss_fft(cfg, (kiss_fft_cpx*)inout, (kiss_fft_cpx*)inout);
+   }
+diff --git a/src/codec2_internal.h b/src/codec2_internal.h
+index 32cd7eb..29e10d8 100644
+--- a/src/codec2_internal.h
++++ b/src/codec2_internal.h
+@@ -70,6 +70,14 @@ struct CODEC2 {
+   int smoothing;  /* enable smoothing for channels with errors */
+   float *softdec; /* optional soft decn bits from demod        */
+ 
++  /* wadamesh: scratch that upstream keeps on the stack (~12 KB), here in
++     the instance (PSRAM on ESP32) so a codec task needs a small stack */
++  COMP Sw_enc[FFT_ENC];         /* analyse_one_frame: DFT of the input       */
++  COMP Aw_dec[FFT_ENC];         /* decoders: LPC spectrum                    */
++  COMP Sw_dec[FFT_DEC / 2 + 1]; /* synthesise: DFT of the output             */
++  float sw_dec[FFT_DEC];        /* synthesise: time domain output            */
++  MODEL model_dec[4];           /* decoders: the frames being decoded        */
++
+   /* newamp1 states */
+ 
+   float rate_K_sample_freqs_kHz[NEWAMP1_K];
+diff --git a/src/nlp.c b/src/nlp.c
+index 53cf040..e89ec0a 100644
+--- a/src/nlp.c
++++ b/src/nlp.c
+@@ -28,6 +28,7 @@
+ #include "nlp.h"
+ 
+ #include "codec2_fft.h"
++#include "debug_alloc.h"
+ #include "defines.h"
+ #include "dump.h"
+ #undef PROFILE
+@@ -93,6 +94,7 @@ typedef struct {
+   float mem_fir[NLP_NTAP]; /* decimation FIR filter memory */
+   codec2_fft_cfg fft_cfg;  /* kiss FFT config              */
+   float *Sn16k;            /* Fs=16kHz input speech vector */
++  COMP Fw[PE_FFT_SIZE];    /* nlp() scratch (wadamesh: heap, not stack) */
+   FILE *f;
+ } NLP;
+ 
+@@ -114,7 +116,7 @@ void *nlp_create(C2CONST *c2const) {
+   int m = c2const->m_pitch;
+   int Fs = c2const->Fs;
+ 
+-  nlp = (NLP *)malloc(sizeof(NLP));
++  nlp = (NLP *)MALLOC(sizeof(NLP));
+   if (nlp == NULL) return NULL;
+ 
+   assert((Fs == 8000) || (Fs == 16000));
+@@ -131,7 +133,7 @@ void *nlp_create(C2CONST *c2const) {
+       nlp->Sn16k[i] = 0.0;
+     }
+     if (nlp->Sn16k == NULL) {
+-      free(nlp);
++      FREE(nlp);
+       return NULL;
+     }
+ 
+@@ -174,7 +176,7 @@ void nlp_destroy(void *nlp_state) {
+   if (nlp->Fs == 16000) {
+     free(nlp->Sn16k);
+   }
+-  free(nlp_state);
++  FREE(nlp_state);
+ }
+ 
+ /*---------------------------------------------------------------------------*\
+@@ -217,7 +219,6 @@ float nlp(
+ ) {
+   NLP *nlp;
+   float notch;          /* current notch filter output          */
+-  COMP Fw[PE_FFT_SIZE]; /* DFT of squared signal (input/output) */
+   float gmax;
+   int gmax_bin;
+   int m, i, j;
+@@ -226,6 +227,7 @@ float nlp(
+ 
+   assert(nlp_state != NULL);
+   nlp = (NLP *)nlp_state;
++  COMP *Fw = nlp->Fw; /* DFT of squared signal (input/output) */
+   m = nlp->m;
+ 
+   /* Square, notch filter at DC, and LP filter vector */
+diff --git a/src/quantise.c b/src/quantise.c
+index da1d821..112de79 100644
+--- a/src/quantise.c
++++ b/src/quantise.c
+@@ -34,6 +34,7 @@
+ #include <string.h>
+ 
+ #include "codec2_fft.h"
++#include "debug_alloc.h"
+ #include "defines.h"
+ #include "dump.h"
+ #include "lpc.h"
+@@ -323,9 +324,12 @@ void lpc_post_filter(codec2_fftr_cfg fftr_fwd_cfg, float Pw[], float ak[],
+                      int order, int dump, float beta, float gamma,
+                      int bass_boost, float E) {
+   int i;
+-  float x[FFT_ENC];          /* input to FFTs                */
+-  COMP Ww[FFT_ENC / 2 + 1];  /* weighting spectrum           */
+-  float Rw[FFT_ENC / 2 + 1]; /* R = WA                       */
++  /* wadamesh: on the heap, not the stack */
++  float *x = (float *)MALLOC(FFT_ENC * sizeof(float) +
++                             (FFT_ENC / 2 + 1) * (sizeof(COMP) + sizeof(float)));
++  if (x == NULL) return;      /* x[FFT_ENC]: input to FFTs    */
++  COMP *Ww = (COMP *)(x + FFT_ENC);         /* weighting spectrum */
++  float *Rw = (float *)(Ww + FFT_ENC / 2 + 1); /* R = WA          */
+   float e_before, e_after, gain;
+   float Pfw;
+   float max_Rw, min_Rw;
+@@ -409,6 +413,7 @@ void lpc_post_filter(codec2_fftr_cfg fftr_fwd_cfg, float Pw[], float ak[],
+   }
+ 
+   PROFILE_SAMPLE_AND_LOG2(tr, "        filt");
++  FREE(x);
+ }
+ 
+ /*---------------------------------------------------------------------------*\
+diff --git a/src/sine.c b/src/sine.c
+index 814c269..8a16d56 100644
+--- a/src/sine.c
++++ b/src/sine.c
+@@ -39,6 +39,7 @@
+ 
+ #include "defines.h"
+ #include "kiss_fft.h"
++#include "debug_alloc.h"
+ 
+ #define HPF_BETA 0.125
+ 
+@@ -102,7 +103,6 @@ C2CONST c2const_create(int Fs, float framelength_s) {
+ void make_analysis_window(C2CONST *c2const, codec2_fft_cfg fft_fwd_cfg,
+                           float w[], float W[]) {
+   float m;
+-  COMP wshift[FFT_ENC];
+   int i, j;
+   int m_pitch = c2const->m_pitch;
+   int nw = c2const->nw;
+@@ -155,7 +155,12 @@ void make_analysis_window(C2CONST *c2const, codec2_fft_cfg fft_fwd_cfg,
+        nw/2              nw/2
+   */
+ 
+-  COMP temp[FFT_ENC];
++  COMP *wshift = (COMP *)MALLOC(2 * FFT_ENC * sizeof(COMP)); /* wadamesh: on the heap, not the stack */
++  if (wshift == NULL) {
++    for (i = 0; i < FFT_ENC; i++) W[i] = 0.0;
++    return;
++  }
++  COMP *temp = wshift + FFT_ENC;
+ 
+   for (i = 0; i < FFT_ENC; i++) {
+     wshift[i].real = 0.0;
+@@ -194,6 +199,7 @@ void make_analysis_window(C2CONST *c2const, codec2_fft_cfg fft_fwd_cfg,
+     W[i] = temp[i + FFT_ENC / 2].real;
+     W[i + FFT_ENC / 2] = temp[i].real;
+   }
++  FREE(wshift);
+ }
+ 
+ /*---------------------------------------------------------------------------*\
+@@ -594,11 +600,11 @@ void synthesise(int n_samp, codec2_fftr_cfg fftr_inv_cfg,
+                 float Sn_[],  /* time domain synthesised signal              */
+                 MODEL *model, /* ptr to model parameters for this frame      */
+                 float Pn[],   /* time domain Parzen window                   */
+-                int shift     /* flag used to handle transition frames       */
++                int shift,    /* flag used to handle transition frames       */
++                COMP Sw_[],   /* [FFT_DEC/2+1] scratch: DFT of synthesised signal */
++                float sw_[]   /* [FFT_DEC] scratch: synthesised signal       */
+ ) {
+   int i, l, j, b;            /* loop variables */
+-  COMP Sw_[FFT_DEC / 2 + 1]; /* DFT of synthesised signal */
+-  float sw_[FFT_DEC];        /* synthesised signal */
+ 
+   if (shift) {
+     /* Update memories */
+diff --git a/src/sine.h b/src/sine.h
+index 3f709b2..78c9576 100644
+--- a/src/sine.h
++++ b/src/sine.h
+@@ -44,7 +44,8 @@ void estimate_amplitudes(MODEL *model, COMP Sw[], float W[], int est_phase);
+ float est_voicing_mbe(C2CONST *c2const, MODEL *model, COMP Sw[], float W[]);
+ void make_synthesis_window(C2CONST *c2const, float Pn[]);
+ void synthesise(int n_samp, codec2_fftr_cfg fftr_inv_cfg, float Sn_[],
+-                MODEL *model, float Pn[], int shift);
++                MODEL *model, float Pn[], int shift,
++                COMP Sw_[], float sw_[]);
+ 
+ #define CODEC2_RAND_MAX 32767
+ int codec2_rand(void);

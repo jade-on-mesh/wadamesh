@@ -479,7 +479,7 @@ void codec2_encode_3200(struct CODEC2 *c2, unsigned char *bits,
 
 void codec2_decode_3200(struct CODEC2 *c2, short speech[],
                         const unsigned char *bits) {
-  MODEL model[2];
+  MODEL *model = c2->model_dec; /* wadamesh: on the heap, not the stack */
   int lspd_indexes[LPC_ORD];
   float lsps[2][LPC_ORD];
   int Wo_index, e_index;
@@ -488,7 +488,7 @@ void codec2_decode_3200(struct CODEC2 *c2, short speech[],
   float ak[2][LPC_ORD + 1];
   int i, j;
   unsigned int nbit = 0;
-  COMP Aw[FFT_ENC];
+  COMP *Aw = c2->Aw_dec; /* wadamesh: on the heap, not the stack */
 
   assert(c2 != NULL);
 
@@ -622,7 +622,7 @@ void codec2_encode_2400(struct CODEC2 *c2, unsigned char *bits,
 
 void codec2_decode_2400(struct CODEC2 *c2, short speech[],
                         const unsigned char *bits) {
-  MODEL model[2];
+  MODEL *model = c2->model_dec; /* wadamesh: on the heap, not the stack */
   int lsp_indexes[LPC_ORD];
   float lsps[2][LPC_ORD];
   int WoE_index;
@@ -631,7 +631,7 @@ void codec2_decode_2400(struct CODEC2 *c2, short speech[],
   float ak[2][LPC_ORD + 1];
   int i, j;
   unsigned int nbit = 0;
-  COMP Aw[FFT_ENC];
+  COMP *Aw = c2->Aw_dec; /* wadamesh: on the heap, not the stack */
 
   assert(c2 != NULL);
 
@@ -796,7 +796,7 @@ void codec2_encode_1600(struct CODEC2 *c2, unsigned char *bits,
 
 void codec2_decode_1600(struct CODEC2 *c2, short speech[],
                         const unsigned char *bits) {
-  MODEL model[4];
+  MODEL *model = c2->model_dec; /* wadamesh: on the heap, not the stack */
   int lsp_indexes[LPC_ORD];
   float lsps[4][LPC_ORD];
   int Wo_index, e_index;
@@ -806,7 +806,7 @@ void codec2_decode_1600(struct CODEC2 *c2, short speech[],
   int i, j;
   unsigned int nbit = 0;
   float weight;
-  COMP Aw[FFT_ENC];
+  COMP *Aw = c2->Aw_dec; /* wadamesh: on the heap, not the stack */
 
   assert(c2 != NULL);
 
@@ -971,7 +971,7 @@ void codec2_encode_1400(struct CODEC2 *c2, unsigned char *bits,
 
 void codec2_decode_1400(struct CODEC2 *c2, short speech[],
                         const unsigned char *bits) {
-  MODEL model[4];
+  MODEL *model = c2->model_dec; /* wadamesh: on the heap, not the stack */
   int lsp_indexes[LPC_ORD];
   float lsps[4][LPC_ORD];
   int WoE_index;
@@ -981,7 +981,7 @@ void codec2_decode_1400(struct CODEC2 *c2, short speech[],
   int i, j;
   unsigned int nbit = 0;
   float weight;
-  COMP Aw[FFT_ENC];
+  COMP *Aw = c2->Aw_dec; /* wadamesh: on the heap, not the stack */
 
   assert(c2 != NULL);
 
@@ -1136,7 +1136,7 @@ void codec2_encode_1300(struct CODEC2 *c2, unsigned char *bits,
 
 void codec2_decode_1300(struct CODEC2 *c2, short speech[],
                         const unsigned char *bits, float ber_est) {
-  MODEL model[4];
+  MODEL *model = c2->model_dec; /* wadamesh: on the heap, not the stack */
   int lsp_indexes[LPC_ORD];
   float lsps[4][LPC_ORD];
   int Wo_index, e_index;
@@ -1146,7 +1146,7 @@ void codec2_decode_1300(struct CODEC2 *c2, short speech[],
   int i, j;
   unsigned int nbit = 0;
   float weight;
-  COMP Aw[FFT_ENC];
+  COMP *Aw = c2->Aw_dec; /* wadamesh: on the heap, not the stack */
 
   assert(c2 != NULL);
 
@@ -1329,7 +1329,7 @@ void codec2_encode_1200(struct CODEC2 *c2, unsigned char *bits,
 
 void codec2_decode_1200(struct CODEC2 *c2, short speech[],
                         const unsigned char *bits) {
-  MODEL model[4];
+  MODEL *model = c2->model_dec; /* wadamesh: on the heap, not the stack */
   int lsp_indexes[LPC_ORD];
   float lsps[4][LPC_ORD];
   int WoE_index;
@@ -1339,7 +1339,7 @@ void codec2_decode_1200(struct CODEC2 *c2, short speech[],
   int i, j;
   unsigned int nbit = 0;
   float weight;
-  COMP Aw[FFT_ENC];
+  COMP *Aw = c2->Aw_dec; /* wadamesh: on the heap, not the stack */
 
   assert(c2 != NULL);
 
@@ -1662,7 +1662,8 @@ void synthesise_one_frame(struct CODEC2 *c2, short speech[], MODEL *model,
   }
 
   postfilter(model, &c2->bg_est);
-  synthesise(c2->n_samp, c2->fftr_inv_cfg, c2->Sn_, model, c2->Pn, 1);
+  synthesise(c2->n_samp, c2->fftr_inv_cfg, c2->Sn_, model, c2->Pn, 1,
+             c2->Sw_dec, c2->sw_dec);
 
   for (i = 0; i < c2->n_samp; i++) {
     c2->Sn_[i] *= gain;
@@ -1692,7 +1693,7 @@ void synthesise_one_frame(struct CODEC2 *c2, short speech[], MODEL *model,
 \*---------------------------------------------------------------------------*/
 
 void analyse_one_frame(struct CODEC2 *c2, MODEL *model, short speech[]) {
-  COMP Sw[FFT_ENC];
+  COMP *Sw = c2->Sw_enc; /* wadamesh: on the heap, not the stack */
   float pitch;
   int i;
   int n_samp = c2->n_samp;

@@ -70,6 +70,14 @@ struct CODEC2 {
   int smoothing;  /* enable smoothing for channels with errors */
   float *softdec; /* optional soft decn bits from demod        */
 
+  /* wadamesh: scratch that upstream keeps on the stack (~12 KB), here in
+     the instance (PSRAM on ESP32) so a codec task needs a small stack */
+  COMP Sw_enc[FFT_ENC];         /* analyse_one_frame: DFT of the input       */
+  COMP Aw_dec[FFT_ENC];         /* decoders: LPC spectrum                    */
+  COMP Sw_dec[FFT_DEC / 2 + 1]; /* synthesise: DFT of the output             */
+  float sw_dec[FFT_DEC];        /* synthesise: time domain output            */
+  MODEL model_dec[4];           /* decoders: the frames being decoded        */
+
   /* newamp1 states */
 
   float rate_K_sample_freqs_kHz[NEWAMP1_K];

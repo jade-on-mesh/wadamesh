@@ -154,7 +154,7 @@ bool i2sStart() {
 
 // ---- capture task --------------------------------------------------------------
 
-constexpr size_t kMaxBits = (size_t)kVoxMaxRecordSeconds * 1000 / 40 * 8;   // 20 s at up to 8 B / 40 ms
+constexpr size_t kMaxBits = (size_t)kVoxMaxRecordSeconds * 3200 / 8;   // 20 s at up to 3200 bps
 constexpr uint32_t kSettleMs = 150;   // the ADC's power-up thump (also used to measure the stream)
 
 volatile State s_state = kIdle;
@@ -162,6 +162,8 @@ volatile bool s_stop = false;
 volatile bool s_cancel = false;
 volatile bool s_task_running = false;
 volatile uint32_t s_frames = 0;       // codec frames captured
+int s_mode = kVoxRecordWireMode;      // VE3 wire mode of the recording
+uint32_t s_frame_ms = 40;             // 40 ms frames, 20 ms at 2400/3200
 volatile int s_level = 0;
 const char* s_error = "";
 uint8_t* s_bits = nullptr;
@@ -169,9 +171,11 @@ size_t s_len = 0;
 bool s_codec_on = false;
 
 // The capture task's stack, from internal RAM (FreeRTOS here won't take a
-// PSRAM stack). Codec2's deepest encoder path measures ~15 KB (analyse_one_frame
-// -> nlp -> FFT, -fstack-usage) and codec2_create ~10 KB; 40 KB was twice that.
-constexpr uint32_t kTaskStack = 28 * 1024;   // ~18-20 KB used on Xtensa; the rest is margin
+// PSRAM stack). lib/codec2 keeps its big scratch arrays in the codec instance
+// (PSRAM) rather than on the stack, so the encoder needs ~8 KB, not ~19 KB
+// (test/test_codec2_stack.c). It used to be 28 KB, more than one contiguous
+// block a busy T-Deck could spare.
+constexpr uint32_t kTaskStack = 16 * 1024;   // ~10 KB used; the rest is margin (the high-water mark is logged)
 // Plus the I2S driver: 8 DMA buffers of 128 stereo frames (4 KB) and its state.
 constexpr size_t kDriverBytes = 8 * 1024;
 // What has to stay free for everything else while recording (Wi-Fi, BLE, LVGL).
@@ -181,11 +185,12 @@ char s_mem_err[64];
 void captureTask(void*) {
   VoxMicPrep prep;
   VoxCodec2Encoder enc;
-  bool ok = enc.begin(kVoxRecordWireMode);
+  bool ok = enc.begin(s_mode);
   if (!ok) s_error = "Codec2 couldn't start";
   const int spf = ok ? enc.samplesPerFrame() : 320;
   const int bpf = ok ? enc.bytesPerFrame() : 6;
   const size_t max_frames = ok ? (size_t)kVoxMaxRecordSeconds * 8000 / (size_t)spf : 0;
+  s_frame_ms = (uint32_t)spf / 8;
   static int16_t rx[2 * 256];         // 256 stereo frames = 16 ms
   static int16_t pcm8[2 * 256 / 2 + 2];   // 8 kHz out of one read, stereo or mono
   static int16_t frame[320];
@@ -277,11 +282,13 @@ namespace VoxMic {
 
 bool available() { return true; }
 
-bool start(const char** err) {
+bool start(int wire_mode, const char** err) {
   reap();
   if (s_task_running || s_state == kRecording) { *err = "Already recording"; return false; }
   dropClip();
   s_error = "";
+  s_mode = voxRecordModeOk(wire_mode) ? wire_mode : kVoxRecordWireMode;
+  s_frame_ms = (s_mode == 2 || s_mode == 6) ? 20 : 40;
   // The capture task's stack and the I2S DMA buffers both come from internal
   // RAM; refuse cleanly rather than let the driver abort(). The stack needs one
   // contiguous block, so check the largest block as well as the total. (This
@@ -326,7 +333,7 @@ bool start(const char** err) {
     return false;
   }
   reap();   // note the hardware is up
-  Serial.println("[VOX] recording");
+  Serial.printf("[VOX] recording, mode %d\n", s_mode);
   return true;
 }
 
@@ -348,7 +355,7 @@ State state() {
 
 const char* error() { return s_error; }
 
-uint32_t elapsedMs() { return s_frames * 40u; }
+uint32_t elapsedMs() { return s_frames * s_frame_ms; }
 
 int level() {
   const int v = s_level;
@@ -360,13 +367,13 @@ bool take(uint8_t* mode, uint8_t** bits, size_t* len, uint32_t* ms, uint32_t min
   reap();
   if (s_state != kReady || !s_bits) return false;
   s_state = kIdle;
-  const uint32_t dur = s_frames * 40u;
+  const uint32_t dur = s_frames * s_frame_ms;
   Serial.printf("[VOX] recorded %lu ms, %u bytes\n", (unsigned long)dur, (unsigned)s_len);
   if (dur < min_ms || s_len == 0) {
     dropClip();
     return false;
   }
-  *mode = (uint8_t)kVoxRecordWireMode;
+  *mode = (uint8_t)s_mode;
   *bits = s_bits;
   *len = s_len;
   *ms = dur;
@@ -382,7 +389,7 @@ bool take(uint8_t* mode, uint8_t** bits, size_t* len, uint32_t* ms, uint32_t min
 
 namespace VoxMic {
 bool available() { return false; }
-bool start(const char** err) { *err = "This radio has no microphone"; return false; }
+bool start(int, const char** err) { *err = "This radio has no microphone"; return false; }
 void stop() {}
 void cancel() {}
 State state() { return kIdle; }

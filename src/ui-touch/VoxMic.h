@@ -2,7 +2,7 @@
 #pragma once
 
 // Records MeshCore Open TAK voice clips on the radio: the board's microphone,
-// through VoxMicPrep, encoded to Codec2 1200 as it's captured, so a clip is
+// through VoxMicPrep, encoded to Codec2 (1200, 1600 or 3200) as it's captured, so a clip is
 // ready the moment the user lets go.
 //
 // LilyGo T-Deck / T-Deck Plus: ES7210 mic ADC (I2C 0x40, MIC1+MIC2 on SDOUT1 ->
@@ -29,8 +29,9 @@ enum State : uint8_t {
 // Whether this build has a microphone it can record from.
 bool available();
 
-// Starts recording. False with `err` set when it can't (busy, no memory...).
-bool start(const char** err);
+// Starts recording in `wire_mode` (a VE3 id, see voxRecordModeOk; anything else
+// records 1200). False with `err` set when it can't (busy, no memory...).
+bool start(int wire_mode, const char** err);
 // Stops; the clip becomes ready (state kReady) within a frame.
 void stop();
 // Stops and throws the recording away.
