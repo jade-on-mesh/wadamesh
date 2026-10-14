@@ -180,9 +180,22 @@ jobs:
           else
             why="Wadamesh **$REL** merges cleanly into \`$BRANCH\`, but the build (host tests or firmware) failed on the result, so \`main\` was left alone. Fix the branch, then merge this pull request."
           fi
-          pr=$(gh api "repos/$REPO/pulls?state=open&head=${REPO%%/*}:$BRANCH" --jq '.[0].html_url // empty')
+          pr=$(gh api "repos/$REPO/pulls?state=open&head=${REPO%%/*}:$BRANCH" --jq '.[0].html_url // empty' || true)
           if [ -z "$pr" ]; then
-            pr=$(gh api "repos/$REPO/pulls" -f title="Sync Wadamesh $REL" -f head="$BRANCH" -f base=main \
-                   -f body="$why"$'\n\n'"Opened by the [upstream sync]($RUN)." --jq .html_url)
+            # The default token may not open pull requests (Settings > Actions >
+            # "Allow GitHub Actions to create and approve pull requests"). Then say
+            # so in the issue rather than fail before the issue is filed: a sync
+            # that needs a hand must never end silently (beta_94 did).
+            if ! pr=$(gh api "repos/$REPO/pulls" -f title="Sync Wadamesh $REL" -f head="$BRANCH" -f base=main \
+                        -f body="$why"$'\n\n'"Opened by the [upstream sync]($RUN)." --jq .html_url 2>/tmp/pr.err); then
+              echo "::warning::Could not open the pull request: $(tr '\n' ' ' </tmp/pr.err)"
+              pr="none: this workflow couldn't open one ($(head -c 200 /tmp/pr.err | tr '\n' ' ')). Open one from \`$BRANCH\` into \`main\`."
+            fi
           fi
-          gh api "repos/$REPO/issues" -f title="$title" -f body="$why"$'\n\n'"Pull request: $pr" --jq .html_url
+          # One issue per release: update it rather than file a second.
+          num=$(gh api "repos/$REPO/issues?state=open&per_page=100" --jq "[.[] | select(.title == \"$title\")][0].number // empty")
+          if [ -n "$num" ]; then
+            gh api -X PATCH "repos/$REPO/issues/$num" -f body="$why"$'\n\n'"Pull request: $pr" --jq .html_url
+          else
+            gh api "repos/$REPO/issues" -f title="$title" -f body="$why"$'\n\n'"Pull request: $pr" --jq .html_url
+          fi
