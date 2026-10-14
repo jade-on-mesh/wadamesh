@@ -226,6 +226,7 @@ static_assert(ChannelSenderSplit::kMaxWireName >= (size_t)UITask::MAX_SENDER_NAM
     // its include path, so an angle include picks that up and misses accessors we
     // add here (e.g. the signal-probe prefs). Quotes force the local src/ copy.
     #include "../helpers/esp32/TouchPrefsStore.h"
+    #include "../helpers/MediaMesh.h"   // MediaMesh Settings (radio2)
     // A block-list slot narrower than a sender name stores a cut name that the full-width
     // RX check can never match again — the block shows in Settings and silently never
     // fires. TouchPrefsStore.h stated this invariant in prose; prose is what let it rot.
@@ -14985,6 +14986,113 @@ static void knownRegionsOpenCb(lv_event_t* e) {
   openRegionsModal();
 }
 
+// ---- MediaMesh Settings (radio2): photos and voice on a second frequency ----
+// One radio scans the main mesh and the MediaMesh profile in turn (see
+// MEDIAMESH.md). The switch turns radio2 on (listen + send) and routes MeshCore
+// Open TAK photos and voice clips to it; the fields set the MediaMesh radio.
+static lv_obj_t* s_mm_freq_ta = nullptr;
+static lv_obj_t* s_mm_bw_ta = nullptr;
+static lv_obj_t* s_mm_sf_ta = nullptr;
+static lv_obj_t* s_mm_cr_ta = nullptr;
+static lv_obj_t* s_mm_scan_val = nullptr;
+static lv_obj_t* s_mm_pre_val = nullptr;
+static lv_obj_t* s_mm_toa_val = nullptr;
+
+static void mediaMeshInfoRefresh() {
+  const mediamesh::Config& c = mediamesh::config();
+  const mediamesh::Status st = mediamesh::status();
+  char v[48];
+  if (s_mm_scan_val && lv_obj_is_valid(s_mm_scan_val)) {
+    if (c.mode == mediamesh::MODE_OFF) snprintf(v, sizeof v, "%s", TR("Off"));
+    else if (!st.timing.valid) snprintf(v, sizeof v, "%s", TR("Starting"));
+    else snprintf(v, sizeof v, "%.1f / %.1f ms", st.timing.dwell_us[0] / 1000.0, st.timing.dwell_us[1] / 1000.0);
+    lv_label_set_text(s_mm_scan_val, v);
+  }
+  if (s_mm_pre_val && lv_obj_is_valid(s_mm_pre_val)) {
+    if (st.timing.valid) snprintf(v, sizeof v, "%u symbols%s", st.timing.preamble[1], st.timing.main_ok ? "" : " (!)");
+    else snprintf(v, sizeof v, "-");
+    lv_label_set_text(s_mm_pre_val, v);
+  }
+  if (s_mm_toa_val && lv_obj_is_valid(s_mm_toa_val)) {
+    const uint16_t pre = st.timing.valid ? st.timing.preamble[1] : 32;
+    snprintf(v, sizeof v, "~%lu ms / 200 B", (unsigned long)(mediamesh::timeOnAirUs(c.p, pre, 200) / 1000));
+    lv_label_set_text(s_mm_toa_val, v);
+  }
+}
+
+static void mediaMeshToggleCb(lv_event_t* e) {
+  if (lv_event_get_code(e) != LV_EVENT_VALUE_CHANGED) return;
+  const bool on = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED);
+  mediamesh::Config c = mediamesh::config();
+  c.mode = on ? mediamesh::MODE_RXTX : mediamesh::MODE_OFF;
+  c.route = on ? mediamesh::ROUTE_RADIO2 : mediamesh::ROUTE_RADIO;
+  mediamesh::set(c);
+  mediaMeshInfoRefresh();
+  if (g_lv.task) g_lv.task->showAlert(on ? TR("Photos and voice on MediaMesh") : TR("MediaMesh off"), 1400);
+}
+
+static void mediaMeshSaveCb(lv_event_t* e) {
+  if (blurFromDelete(e)) return;   // the widget is being destroyed
+  const lv_event_code_t code = lv_event_get_code(e);
+  if (code != LV_EVENT_DEFOCUSED || !g_lv.task) return;
+  kbMirrorSyncToReal();
+  float freq = 0.0f, bw = 0.0f;
+  int sf = 0, cr = 0;
+  if (!parseFloatField(s_mm_freq_ta, freq) || !parseFloatField(s_mm_bw_ta, bw) ||
+      !parseIntField(s_mm_sf_ta, sf) || !parseIntField(s_mm_cr_ta, cr)) return;   // quiet until complete
+  mediamesh::Config c = mediamesh::config();
+  mediamesh::Params p = c.p;
+  p.freq = freq; p.bw = bw; p.sf = (uint8_t)sf; p.cr = (uint8_t)cr;
+  if (mediamesh::sameParams(p, c.p)) return;   // focus moved without an edit
+  if (!mediamesh::validParams(p)) { g_lv.task->showAlert(TR("Invalid MediaMesh values"), 1400); return; }
+  NodePrefs* prefs = the_mesh.getNodePrefs();
+  if (prefs) {
+    mediamesh::Params main;
+    main.freq = prefs->freq; main.bw = prefs->bw; main.sf = prefs->sf; main.cr = prefs->cr;
+    if (mediamesh::sameChannel(p, main)) {
+      g_lv.task->showAlert(TR("MediaMesh must differ from the main radio"), 1800);
+      return;
+    }
+  }
+  c.p = p;
+  mediamesh::set(c);
+  mediaMeshInfoRefresh();
+  g_lv.task->showAlert(TR("MediaMesh radio saved"), 1100);
+}
+
+static void buildMediaMeshCard() {
+  lv_obj_t* c = setCard("MediaMesh Settings");
+  if (!mediamesh::supported()) {
+    s_mm_freq_ta = s_mm_bw_ta = s_mm_sf_ta = s_mm_cr_ta = nullptr;
+    s_mm_scan_val = s_mm_pre_val = s_mm_toa_val = nullptr;
+    setNote(c, "This radio can't run MediaMesh. It needs an SX1262 board such as the T-Deck or Heltec V4.");
+    return;
+  }
+  const mediamesh::Config& cfg = mediamesh::config();
+  setSwitchRow(c, "Photos & voice on MediaMesh",
+               "Sends and receives Open TAK photos and voice clips on a second, faster frequency. Text stays on the main mesh.",
+               mediamesh::mediaOnRadio2(cfg), mediaMeshToggleCb);
+  lv_obj_t* r1 = setFieldRow(c);
+  s_mm_freq_ta = setField(r1, "Frequency (MHz)", "MHz", 15, setFieldW(2));
+  s_mm_bw_ta   = setField(r1, "Bandwidth (kHz)", "kHz", 10, setFieldW(2));
+  lv_obj_t* r2 = setFieldRow(c);
+  s_mm_sf_ta = setField(r2, "SF", "SF", 2, setFieldW(2));
+  s_mm_cr_ta = setField(r2, "CR", "CR", 2, setFieldW(2));
+  char buf[24];
+  snprintf(buf, sizeof buf, "%.3f", cfg.p.freq); lv_textarea_set_text(s_mm_freq_ta, buf);
+  snprintf(buf, sizeof buf, "%.1f", cfg.p.bw); lv_textarea_set_text(s_mm_bw_ta, buf);
+  snprintf(buf, sizeof buf, "%u", (unsigned)cfg.p.sf); lv_textarea_set_text(s_mm_sf_ta, buf);
+  snprintf(buf, sizeof buf, "%u", (unsigned)cfg.p.cr); lv_textarea_set_text(s_mm_cr_ta, buf);
+  lv_obj_t* const fields[] = { s_mm_freq_ta, s_mm_bw_ta, s_mm_sf_ta, s_mm_cr_ta };
+  for (lv_obj_t* ta : fields) lv_obj_add_event_cb(ta, mediaMeshSaveCb, LV_EVENT_DEFOCUSED, nullptr);
+  setNote(c, "Everyone sharing photos must use the same MediaMesh settings. The radio switches between both "
+             "frequencies, so heavy media traffic costs some main-mesh reception.");
+  s_mm_scan_val = setInfoRow(c, "Listen main / media", "");
+  s_mm_pre_val  = setInfoRow(c, "MediaMesh preamble", "");
+  s_mm_toa_val  = setInfoRow(c, "Time on air", "");
+  mediaMeshInfoRefresh();
+}
+
 static void buildRadioSettings() {
   NodePrefs* prefs = the_mesh.getNodePrefs();
 
@@ -15036,6 +15144,9 @@ static void buildRadioSettings() {
     g_set_modal.radio_toa_val  = setInfoRow(c, "Time on air", "");
     radioAirtimeRefresh();
   }
+
+  // radio2: photos and voice on their own frequency, under the main radio.
+  buildMediaMeshCard();
 
   // What this node answers and what it drops.
   {

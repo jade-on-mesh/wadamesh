@@ -109,6 +109,7 @@
 #include <helpers/BaseChatMesh.h>
 #include <helpers/TransportKeyStore.h>
 #include "RegionRegistry.h"
+#include "helpers/MediaMesh.h"   // MediaMesh media marking (voxSendRaw / sendGroupDataMedia)
 
 /* -------------------------------------------------------------------------------------- */
 
@@ -1055,6 +1056,7 @@ public:
   bool voxSendRaw(const uint8_t* path, uint8_t path_len, const uint8_t* data, size_t len) {
     mesh::Packet* pkt = createRawData(data, len);
     if (!pkt) return false;
+    mediamesh::markPacket(pkt);   // photo/voice transfer: radio2 when MediaMesh is on
     sendDirect(pkt, path, path_len);
     return true;
   }
@@ -1062,8 +1064,11 @@ public:
   bool voxSendChannelData(int idx, uint16_t type, const uint8_t* data, size_t len) {
     ChannelDetails cd;
     if (idx < 0 || idx >= MAX_GROUP_CHANNELS || !getChannel(idx, cd) || !channelSlotConfigured(cd)) return false;
-    return sendGroupData(cd.channel, nullptr, OUT_PATH_UNKNOWN, type, data, (int)len);
+    return sendGroupDataMedia(cd.channel, nullptr, OUT_PATH_UNKNOWN, type, data, (int)len);
   }
+  /** sendGroupData that marks Open TAK photo/voice datagrams for MediaMesh. */
+  bool sendGroupDataMedia(mesh::GroupChannel& channel, uint8_t* path, uint8_t path_len, uint16_t data_type,
+                          const uint8_t* data, int data_len);
   /** A contact's route for raw data: packed out_path_len and its bytes. */
   bool voxContactRoute(const uint8_t pub[32], uint8_t* path, uint8_t* packed_len) {
     ContactInfo* c = lookupContactByPubKey(pub, PUB_KEY_SIZE);

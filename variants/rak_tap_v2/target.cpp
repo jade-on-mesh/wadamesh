@@ -14,7 +14,7 @@ RAKTapV2Board board;
   RADIO_CLASS radio = new Module(P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY);
 #endif
 
-WRAPPER_CLASS radio_driver(radio, board);
+RADIO_DRIVER_CLASS radio_driver(radio, board);
 
 SPIClass* rakTapV2SharedSPI() {
 #if defined(P_LORA_SCLK)

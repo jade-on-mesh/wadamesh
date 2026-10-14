@@ -15,8 +15,10 @@
 #include "../../src/helpers/ClockFloorRTC.h"
 #include "helpers/sensors/EnvironmentSensorManager.h"
 
+#include "../../src/helpers/MediaMeshRadio.h"   // RADIO_DRIVER_CLASS (MediaMesh radio2 scan)
+
 extern TDeckMaxBoard board;
-extern WRAPPER_CLASS radio_driver;
+extern RADIO_DRIVER_CLASS radio_driver;   // MediaMesh-capable wrapper where supported
 extern RADIO_CLASS radio;
 extern ClockFloorRTC rtc_clock;
 extern EnvironmentSensorManager sensors;
