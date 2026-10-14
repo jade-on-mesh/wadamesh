@@ -58,24 +58,77 @@ static void assetUrl(char* out, size_t cap, const char* tag, const char* file) {
   snprintf(out, cap, "https://github.com/" WADA_FORK_REPO "/releases/download/%s/%s", tag, file);
 }
 
+// One HTTPS GET that may be redirected (a release file on github.com is a 302
+// to release-assets.githubusercontent.com, with a long signed URL). Each hop
+// gets a fresh TLS client of its own: following the redirect on the same
+// client, as HTTPClient does by itself, failed on the device with HTTP -1
+// (connection refused) when the second host was reached. Up to 5 hops, and
+// one retry of a hop that couldn't connect.
+struct Get {
+  WiFiClientSecure* c = nullptr;
+  HTTPClient* h = nullptr;
+  int code = 0;
+  void close() {
+    if (h) { h->end(); delete h; h = nullptr; }
+    if (c) { c->stop(); delete c; c = nullptr; }
+  }
+  ~Get() { close(); }
+};
+
+static void hostOf(const String& url, char* out, size_t cap) {
+  int a = url.indexOf("://");
+  a = a < 0 ? 0 : a + 3;
+  int b = url.indexOf('/', a);
+  if (b < 0) b = url.length();
+  snprintf(out, cap, "%s", url.substring(a, b).c_str());
+}
+
+// True with g.code 200 and the body ready to read; else a message in j.
+static bool getFollowing(Job& j, const char* first, Get& g, const char* what) {
+  String url = first;
+  for (int hop = 0; hop < 5; hop++) {
+    for (int attempt = 0; attempt < 2; attempt++) {
+      g.close();
+      g.c = new (std::nothrow) WiFiClientSecure();
+      g.h = new (std::nothrow) HTTPClient();
+      if (!g.c || !g.h) { say(j, "out of memory"); return false; }
+      g.c->setInsecure();
+      setup(*g.h, false);
+      const char* keys[] = {"Location"};
+      g.h->collectHeaders(keys, 1);
+      if (!g.h->begin(*g.c, url)) { g.code = -1; break; }
+      g.code = g.h->GET();
+      if (g.code > 0) break;
+      vTaskDelay(pdMS_TO_TICKS(1000));   // could not connect: once more
+    }
+    if (g.code == 200) return true;
+    if (g.code == 301 || g.code == 302 || g.code == 303 || g.code == 307 || g.code == 308) {
+      const String next = g.h->header("Location");
+      if (next.length() < 8) break;
+      url = next;
+      continue;
+    }
+    char host[64], m[112];
+    hostOf(url, host, sizeof host);
+    if (g.code == 404) snprintf(m, sizeof m, "%s not in the release", what);
+    else if (g.code < 0) snprintf(m, sizeof m, "%s: can't connect to %s (%d)", what, host, g.code);
+    else snprintf(m, sizeof m, "%s: HTTP %d from %s", what, g.code, host);
+    say(j, m);
+    return false;
+  }
+  char m[64];
+  snprintf(m, sizeof m, "%s: too many redirects", what);
+  say(j, m);
+  return false;
+}
+
 static bool fetchSig(Job& j, const char* tag, const char* file, uint8_t sig[forkupd::kSigBytes]) {
   char name[64], url[192];
   snprintf(name, sizeof name, "%s.sig", file);
   assetUrl(url, sizeof url, tag, name);
-  WiFiClientSecure c;
-  c.setInsecure();
-  HTTPClient h;
-  setup(h, true);
-  if (!h.begin(c, url)) { say(j, "connect failed"); return false; }
-  const int code = h.GET();
-  if (code != 200) {
-    char m[40];
-    snprintf(m, sizeof m, code == 404 ? "no signed image" : "signature HTTP %d", code);
-    say(j, m);
-    h.end();
-    return false;
-  }
-  auto* st = h.getStreamPtr();   // NetworkClient* on arduino 3.x
+  Get g;
+  if (!getFollowing(j, url, g, "signature")) return false;
+  auto* st = g.h->getStreamPtr();
   size_t got = 0;
   const uint32_t t0 = millis();
   while (st && got < forkupd::kSigBytes && millis() - t0 < 15000) {
@@ -88,7 +141,7 @@ static bool fetchSig(Job& j, const char* tag, const char* file, uint8_t sig[fork
     const int r = st->read(sig + got, forkupd::kSigBytes - got);
     if (r > 0) got += (size_t)r;
   }
-  h.end();
+  g.close();
   if (got != forkupd::kSigBytes) { say(j, "bad signature file"); return false; }
   return true;
 }
@@ -103,21 +156,11 @@ static bool fetchImage(Job& j) {
   if (!fetchSig(j, tag, file, sig)) return false;
 
   assetUrl(url, sizeof url, tag, file);
-  WiFiClientSecure c;
-  c.setInsecure();
-  HTTPClient h;
-  setup(h, true);
-  if (!h.begin(c, url)) { say(j, "connect failed"); return false; }
-  const int code = h.GET();
-  if (code != 200) {
-    char m[24];
-    snprintf(m, sizeof m, "HTTP %d", code);
-    say(j, m);
-    h.end();
-    return false;
-  }
+  Get g;
+  if (!getFollowing(j, url, g, "firmware")) return false;
+  HTTPClient& h = *g.h;
   const int len = h.getSize();
-  if (len <= 0) { say(j, "bad length"); h.end(); return false; }
+  if (len <= 0) { say(j, "bad length"); return false; }
 
 #if CAP_SD
   File f;
