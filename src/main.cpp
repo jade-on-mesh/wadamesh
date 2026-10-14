@@ -254,6 +254,7 @@ bool g_full_data_on_sd = false;
 // could not be proven complete. Settings surfaces the recovery action; contacts
 // may still use SD as the secondary store while identity/prefs remain internal.
 bool g_sd_migration_blocked = false;
+extern bool g_sd_fallback_boot;   // UITask.cpp: the SD store was chosen but did not mount this boot
 #endif
 
 
@@ -874,7 +875,7 @@ void setup() {
 #endif
       if (r == 1)      display.setDisplayRotation(1);
       else if (r == 3) display.setDisplayRotation(3);
-#if defined(HAS_CROWPANEL_35)
+#if defined(HAS_CROWPANEL_35) || defined(HAS_CROWPANEL_50)
       else             display.setDisplayRotation(0);  // restore saved portrait
 #endif
     }
@@ -1430,6 +1431,14 @@ void setup() {
   if (!sd_storage && !spiffs_ok) SPIFFS.begin(true);   // last resort: format SPIFFS
   Serial.printf("[BOOT] storage: %s\n", sd_storage ? "SD /meshcomod" : "SPIFFS");
 #if defined(ESP32_PLATFORM) && defined(HAS_TOUCH_UI)
+  // The card holds this device's data but did not mount: say so on screen, and keep the
+  // first-boot setup away (its "done" mark lives on the card too).
+  if (!sd_storage && touchPrefsReadUseSdAtBoot()) {
+    g_sd_fallback_boot = true;
+    Serial.println("[BOOT] SD storage chosen but the card did not mount: running from internal storage");
+  }
+#endif
+#if defined(ESP32_PLATFORM) && defined(HAS_TOUCH_UI)
   // Route touch settings + Wi-Fi creds to the active filesystem (SD when that's
   // the data store, else SPIFFS) instead of NVS. Old NVS values still load and
   // migrate on their next save, so this is a transparent in-place upgrade.
@@ -1498,7 +1507,7 @@ void setup() {
    * normal boot path a few lines down reads the persisted Wi-Fi/BLE intent
    * flags, which this never touches, and proceeds exactly as it always did.
    *
-   * Opt-in, power-on-reset only, and bounded (~12 s worst case); it returns
+   * Opt-in, power-on-reset only, and bounded (~16 s worst case); it returns
    * Skipped without spending anything when the board already knows the time,
    * which is every boot on a T-Pager or an M9 whose RTC is healthy. */
   {
