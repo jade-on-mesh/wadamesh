@@ -329,6 +329,15 @@ bool addRecording(uint8_t wire_mode, uint8_t* bits, size_t len, uint32_t ms, cha
   return true;
 }
 
+void discardRecording(uint32_t sid) {
+  if (!g_fs || !sid) return;
+  char path[32];
+  storePath(sid, true, path, sizeof path);
+  g_fs->remove(path);
+  g_version++;
+  Serial.printf("[VOX] discarded clip %08lx\n", (unsigned long)sid);
+}
+
 bool haveVoice(uint32_t sid) {
   if (!g_fs) return false;
   char path[32];

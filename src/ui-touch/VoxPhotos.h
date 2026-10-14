@@ -53,6 +53,8 @@ uint32_t version();
 // to post in the chat) to `envelope`. False if it couldn't be stored.
 bool addRecording(uint8_t wire_mode, uint8_t* bits, size_t len, uint32_t ms, char* envelope, size_t cap,
                   uint32_t* sid_out = nullptr);
+// Deletes a recording made with addRecording that was never sent.
+void discardRecording(uint32_t sid);
 // Whether a voice clip with this session id is stored here (recorded or
 // downloaded), so the bubble can play it.
 bool haveVoice(uint32_t sid);
