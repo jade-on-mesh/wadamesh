@@ -69368,52 +69368,195 @@ static void voxVoiceStop() { if (s_vox_voice_sid) s_vox_voice_stop = true; }
 #if defined(HAS_TDECK_GT911) && CAP_LUA_AUDIO
 // ---- Recording voice messages: hold the send button ------------------------------
 // On a board with a microphone (VoxMic: the T-Deck), the send button records
-// while the composer is empty: hold to talk, release to send, slide off to cancel.
-// The clip is Codec2 1200 in a VE3 envelope, exactly what MeshCore Open TAK sends,
-// so the app plays it with no setting; this radio then answers the download
-// itself (VoxServe, via VoxPhotos). The overlay shows the time and input level.
+// while the composer is empty. Hold to talk; lifting the finger stops, and a
+// review card offers Play, Delete and Send (as MeshCore Open TAK does), so
+// nothing goes out by accident. The clip is Codec2 in a VE3 envelope, exactly
+// what the app sends, so the app plays it with no setting; this radio then
+// answers the download itself (VoxServe, via VoxPhotos).
+//
+// Lifting the finger is read from the touch panel itself, not from the button's
+// RELEASED event: hiding the keyboard as recording starts moves the button out
+// from under the finger, and LVGL reports that as PRESS_LOST, which used to
+// cancel the recording a moment after it began.
 static LvChatPanel* s_mic_panel = nullptr;   // the composer being recorded from
 static lv_obj_t*    s_mic_pill = nullptr;    // "recording" overlay above the composer
 static lv_obj_t*    s_mic_time = nullptr;
 static lv_obj_t*    s_mic_bar = nullptr;
+static lv_obj_t*    s_mic_hint = nullptr;
 static lv_timer_t*  s_mic_timer = nullptr;
+static lv_indev_t*  s_mic_indev = nullptr;      // the touch panel the hold is on
 static bool         s_mic_owns_audio = false;   // we set s_lua_audio_active (chimes off)
+// The review card, once the recording has stopped.
+static lv_obj_t*    s_mic_review = nullptr;
+static lv_obj_t*    s_mic_play_lbl = nullptr;
+static uint32_t     s_mic_sid = 0;              // the stored, not yet sent, clip
+static char         s_mic_env[48] = "";         // its VE3 envelope
+static int          s_mic_thread = -1;          // the chat it was recorded in
 
-static void voxMicUiClose() {
-  if (s_mic_timer) { lv_timer_del(s_mic_timer); s_mic_timer = nullptr; }
-  if (s_mic_pill) { lv_obj_del(s_mic_pill); s_mic_pill = nullptr; }
-  s_mic_time = s_mic_bar = nullptr;
+static void voxMicReleaseAudio() {
   if (s_mic_owns_audio) {
     __atomic_store_n(&s_lua_audio_active, false, __ATOMIC_RELEASE);
     s_mic_owns_audio = false;
   }
-  s_mic_panel = nullptr;
 }
 
-static void voxMicSend() {
-  LvChatPanel* p = s_mic_panel;
+static void voxMicPillClose() {
+  if (s_mic_pill) { lv_obj_del(s_mic_pill); s_mic_pill = nullptr; }
+  s_mic_time = s_mic_bar = s_mic_hint = nullptr;
+}
+
+static void voxMicUiClose() {
+  if (s_mic_timer) { lv_timer_del(s_mic_timer); s_mic_timer = nullptr; }
+  voxMicPillClose();
+  if (s_mic_review) { lv_obj_del(s_mic_review); s_mic_review = nullptr; }
+  s_mic_play_lbl = nullptr;
+  voxMicReleaseAudio();
+  s_mic_panel = nullptr;
+  s_mic_indev = nullptr;
+}
+
+// Close the review card, deleting the clip unless it was sent.
+static void voxMicReviewEnd(bool sent) {
+  if (s_mic_sid && s_vox_voice_sid == s_mic_sid) voxVoiceStop();
+  if (!sent && s_mic_sid) VoxPhotos::discardRecording(s_mic_sid);
+  s_mic_sid = 0;
+  s_mic_env[0] = 0;
+  s_mic_thread = -1;
   voxMicUiClose();
+}
+
+static void voxMicReviewPlayCb(lv_event_t* e) {
+  if (lv_event_get_code(e) != LV_EVENT_CLICKED || !s_mic_sid || !g_lv.task) return;
+  if (s_vox_voice_sid == s_mic_sid) { voxVoiceStop(); return; }
+  const char* err = nullptr;
+  if (!voxVoicePlay(s_mic_sid, &err)) g_lv.task->showAlert(TR(err ? err : "Couldn't play it"), 1800);
+}
+
+static void voxMicReviewDeleteCb(lv_event_t* e) {
+  if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+  voxMicReviewEnd(false);
+  if (g_lv.task) g_lv.task->showAlert(TR("Voice message deleted"), 1200);
+}
+
+static void voxMicReviewSendCb(lv_event_t* e) {
+  if (lv_event_get_code(e) != LV_EVENT_CLICKED || !g_lv.task || !s_mic_sid) return;
+  LvChatPanel* p = s_mic_panel;
+  char env[sizeof s_mic_env];
+  snprintf(env, sizeof env, "%s", s_mic_env);
+  if (s_vox_voice_sid == s_mic_sid) voxVoiceStop();
+  s_mic_sid = 0;   // sent: keep the clip (the bubble plays it, VoxServe serves it)
+  voxMicReviewEnd(true);
+  if (g_lv.task->composerSend(env)) {
+    if (p) refreshChatDetailAsync(*p);
+    g_lv.dirty_threads = true;
+  } else {
+    g_lv.task->showAlert(TR("Couldn't send the voice message"), 2000);
+  }
+}
+
+static lv_obj_t* voxMicReviewButton(lv_obj_t* row, const char* icon, const char* text, lv_event_cb_t cb, int kind) {
+  lv_obj_t* b = lv_btn_create(row);
+  styleButton(b);
+  if (kind == 1) stylePrimary(b);
+  if (kind == 2) styleDanger(b);
+  lv_obj_set_height(b, SC(34));
+  lv_obj_set_flex_grow(b, 1);
+  lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, nullptr);
+  lv_obj_t* l = lv_label_create(b);
+  lv_label_set_text_fmt(l, "%s %s", icon, TR(text));
+  lv_obj_set_style_text_font(l, &g_font_14, LV_PART_MAIN);
+  lv_obj_set_style_text_color(l, lv_color_hex(kind == 1 ? COLOR_ON_GLOW : kind == 2 ? COLOR_STATUS_DANGER_TEXT : COLOR_TEXT),
+                              LV_PART_MAIN);
+  lv_obj_center(l);
+  if (s_nav_group) lv_group_add_obj(s_nav_group, b);
+  return b;
+}
+
+static void voxMicShowReview(uint32_t ms) {
+  LvChatPanel* p = s_mic_panel;
+  s_mic_review = lv_obj_create(lv_layer_top());
+  lv_obj_t* card = s_mic_review;
+  styleCard(card);
+  lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+  const lv_coord_t sw = lv_disp_get_hor_res(nullptr);
+  lv_obj_set_width(card, LV_MIN((lv_coord_t)(sw - SC(16)), (lv_coord_t)SC(320)));
+  lv_obj_set_height(card, LV_SIZE_CONTENT);
+  lv_obj_set_style_pad_all(card, SC(8), LV_PART_MAIN);
+  lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_style_pad_row(card, SC(6), LV_PART_MAIN);
+
+  lv_obj_t* head = lv_obj_create(card);   // [mic] Voice message 0:07
+  lv_obj_remove_style_all(head);
+  lv_obj_set_size(head, lv_pct(100), LV_SIZE_CONTENT);
+  lv_obj_set_flex_flow(head, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(head, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lv_obj_set_style_pad_column(head, SC(6), LV_PART_MAIN);
+  lv_obj_t* mic = lv_label_create(head);   // the icon font has the mic; the text font doesn't
+  lv_label_set_text(mic, UI_ICON_MIC);
+  lv_obj_set_style_text_font(mic, &ui_icons_16, LV_PART_MAIN);
+  lv_obj_set_style_text_color(mic, lv_color_hex(COLOR_GLOW), LV_PART_MAIN);
+  lv_obj_t* title = lv_label_create(head);
+  lv_label_set_text_fmt(title, "%s %lu:%02lu", TR("Voice message"), (unsigned long)(ms / 60000),
+                        (unsigned long)((ms / 1000) % 60));
+  lv_obj_set_style_text_font(title, &g_font_14, LV_PART_MAIN);
+  lv_obj_set_style_text_color(title, lv_color_hex(COLOR_TEXT), LV_PART_MAIN);
+
+  lv_obj_t* row = lv_obj_create(card);
+  lv_obj_remove_style_all(row);
+  lv_obj_set_size(row, lv_pct(100), LV_SIZE_CONTENT);
+  lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+  lv_obj_set_style_pad_column(row, SC(6), LV_PART_MAIN);
+  lv_obj_t* play = voxMicReviewButton(row, LV_SYMBOL_PLAY, "Play", voxMicReviewPlayCb, 0);
+  s_mic_play_lbl = lv_obj_get_child(play, 0);
+  voxMicReviewButton(row, LV_SYMBOL_TRASH, "Delete", voxMicReviewDeleteCb, 2);
+  lv_obj_t* send = voxMicReviewButton(row, LV_SYMBOL_OK, "Send", voxMicReviewSendCb, 1);
+  if (s_nav_group) lv_group_focus_obj(send);
+
+  lv_obj_update_layout(card);
+  if (p && p->composer_row) lv_obj_align_to(card, p->composer_row, LV_ALIGN_OUT_TOP_MID, 0, -SC(6));
+  else lv_obj_align(card, LV_ALIGN_BOTTOM_MID, 0, -SC(48));
+}
+
+// The recording has stopped: keep the clip and offer Play / Delete / Send.
+static void voxMicFinish() {
+  voxMicPillClose();
+  voxMicReleaseAudio();   // playback needs the audio path
   uint8_t mode = 0;
   uint8_t* bits = nullptr;
   size_t len = 0;
   uint32_t ms = 0;
-  if (!g_lv.task) return;
+  if (!g_lv.task) { voxMicUiClose(); return; }
   if (!VoxMic::take(&mode, &bits, &len, &ms)) {   // a tap, not a hold
+    voxMicUiClose();
     g_lv.task->showAlert(TR("Hold to record a voice message"), 1600);
     return;
   }
-  char env[48];
-  if (!VoxPhotos::addRecording(mode, bits, len, ms, env, sizeof env)) {
+  uint32_t sid = 0;
+  if (!VoxPhotos::addRecording(mode, bits, len, ms, s_mic_env, sizeof s_mic_env, &sid)) {
+    voxMicUiClose();
     g_lv.task->showAlert(TR("Couldn't save the voice message"), 2000);
     return;
   }
-  if (g_lv.task->composerSend(env)) {
-    if (p) refreshChatDetailAsync(*p);
-    g_lv.dirty_threads = true;
-  }
+  s_mic_sid = sid;
+  voxMicShowReview(ms);
+}
+
+static bool voxMicFingerDown() {
+  return s_mic_indev && s_mic_indev->proc.state == LV_INDEV_STATE_PRESSED;
 }
 
 static void voxMicTimerCb(lv_timer_t*) {
+  if (s_mic_review) {
+    // Reviewing: keep the Play button's face in step with playback, and drop
+    // the card if the user left the chat it was recorded in.
+    if (!g_lv.task || g_lv.task->activeThreadIdx() != s_mic_thread) { voxMicReviewEnd(false); return; }
+    if (s_mic_play_lbl) {
+      const bool playing = s_mic_sid && s_vox_voice_sid == s_mic_sid;
+      const char* want = playing ? LV_SYMBOL_STOP " Stop" : LV_SYMBOL_PLAY " Play";
+      if (strcmp(lv_label_get_text(s_mic_play_lbl), want) != 0) lv_label_set_text(s_mic_play_lbl, want);
+    }
+    return;
+  }
   const VoxMic::State st = VoxMic::state();
   if (st == VoxMic::kFailed) {
     const char* why = VoxMic::error();
@@ -69422,8 +69565,9 @@ static void voxMicTimerCb(lv_timer_t*) {
     if (g_lv.task) g_lv.task->showAlert(TR(why && *why ? why : "Recording failed"), 2200);
     return;
   }
-  if (st == VoxMic::kReady) { voxMicSend(); return; }   // released, or 20 s while held
+  if (st == VoxMic::kReady) { voxMicFinish(); return; }   // stopped, or 20 s while held
   if (st != VoxMic::kRecording) { voxMicUiClose(); return; }
+  if (!voxMicFingerDown()) VoxMic::stop();   // finger lifted: the next tick finishes
   const uint32_t ms = VoxMic::elapsedMs();
   const uint32_t left = (uint32_t)kVoxMaxRecordSeconds * 1000u > ms ? (uint32_t)kVoxMaxRecordSeconds * 1000u - ms : 0;
   if (s_mic_time) lv_label_set_text_fmt(s_mic_time, "%lu:%02lu", (unsigned long)(ms / 60000), (unsigned long)((ms / 1000) % 60));
@@ -69464,10 +69608,10 @@ static void voxMicShowPill(LvChatPanel* p) {
   lv_obj_set_style_bg_color(s_mic_bar, lv_color_hex(COLOR_BORDER), LV_PART_MAIN);
   lv_obj_set_style_bg_color(s_mic_bar, lv_color_hex(COLOR_STATUS_OK), LV_PART_INDICATOR);
 
-  lv_obj_t* hint = lv_label_create(pill);
-  lv_label_set_text(hint, TR("Release to send, slide off to cancel"));
-  lv_obj_set_style_text_font(hint, &g_font_12, LV_PART_MAIN);
-  lv_obj_set_style_text_color(hint, lv_color_hex(COLOR_SUB), LV_PART_MAIN);
+  s_mic_hint = lv_label_create(pill);
+  lv_label_set_text(s_mic_hint, TR("Lift your finger to stop"));
+  lv_obj_set_style_text_font(s_mic_hint, &g_font_12, LV_PART_MAIN);
+  lv_obj_set_style_text_color(s_mic_hint, lv_color_hex(COLOR_SUB), LV_PART_MAIN);
 
   lv_obj_update_layout(pill);
   if (p && p->composer_row) lv_obj_align_to(pill, p->composer_row, LV_ALIGN_OUT_TOP_MID, 0, -SC(6));
@@ -69481,12 +69625,12 @@ static void voxMicButtonCb(lv_event_t* e) {
   if (code == LV_EVENT_PRESSED) {
     const char* text = lv_textarea_get_text(p->composer_ta);
     if (text && text[0]) return;   // there's typed text: the button sends that
+    if (s_mic_review) return;      // finish reviewing the last one first
     if (s_mic_pill || g_lv.task->activeThreadIdx() < 0) return;
     if (luaAudioActive() || s_notify_playing || s_vox_voice_sid) {
       g_lv.task->showAlert(TR("Audio is busy"), 1500);
       return;
     }
-    hideKb();
     // Keep notification chimes off while the mic is open (they'd be recorded).
     __atomic_store_n(&s_lua_audio_active, true, __ATOMIC_RELEASE);
     s_mic_owns_audio = true;
@@ -69497,16 +69641,15 @@ static void voxMicButtonCb(lv_event_t* e) {
       return;
     }
     s_mic_panel = p;
+    s_mic_indev = lv_indev_get_act();
+    s_mic_thread = g_lv.task->activeThreadIdx();
+    hideKb();
     voxMicShowPill(p);
     s_mic_timer = lv_timer_create(voxMicTimerCb, 100, nullptr);
   } else if (code == LV_EVENT_RELEASED) {
-    if (s_mic_pill) VoxMic::stop();   // the timer sends once the last frame is in
-  } else if (code == LV_EVENT_PRESS_LOST) {
-    if (!s_mic_pill) return;
-    VoxMic::cancel();
-    voxMicUiClose();
-    g_lv.task->showAlert(TR("Voice message cancelled"), 1200);
+    if (s_mic_pill) VoxMic::stop();   // the timer opens the review once the last frame is in
   }
+  // PRESS_LOST is ignored on purpose: the finger is still down (see above).
 }
 
 // The send button shows a microphone while there's nothing typed. Both glyphs
@@ -69531,7 +69674,6 @@ static void voxMicAttach(LvChatPanel* p) {
   if (!VoxMic::available() || !p || !p->send_btn || !p->composer_ta) return;
   lv_obj_add_event_cb(p->send_btn, voxMicButtonCb, LV_EVENT_PRESSED, p);
   lv_obj_add_event_cb(p->send_btn, voxMicButtonCb, LV_EVENT_RELEASED, p);
-  lv_obj_add_event_cb(p->send_btn, voxMicButtonCb, LV_EVENT_PRESS_LOST, p);
   lv_obj_add_event_cb(p->composer_ta, voxMicComposerChangedCb, LV_EVENT_VALUE_CHANGED, p);
   voxMicIconSync(p);
 }
