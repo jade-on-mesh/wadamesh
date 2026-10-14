@@ -1357,6 +1357,12 @@ static void exportPadNow() {
   toast(msg, 3500);
 }
 
+// Pad sizes to generate, as in MeshCore Open TAK (1700 B still fits one QR
+// code on a phone). Remembered while the device is on; 4096 B to start.
+static const int kGenSizes[] = {512, 1700, 4096, otp::kMaxTotalPadBytes};
+constexpr int kGenSizeCount = sizeof kGenSizes / sizeof kGenSizes[0];
+static uint8_t s_gen_size = 2;
+
 static void buildPad() {
   otp::Target* t = cur();
   if (!t) { show(Screen::List); return; }
@@ -1432,16 +1438,31 @@ static void buildPad() {
   });
 
   lv_obj_t* add = setCardIn(b, TR("Add pad bytes"));
-  setActionRow(add, UI_ICON_ZAP, "Generate 1000 random bytes", nullptr, [](lv_event_t*) {
-    otp::Target* x = cur();
-    if (!x) return;
-    const int n = OtpMessenger::core().generate(*x, 1000);
-    char msg[80];
-    if (n > 0) snprintf(msg, sizeof msg, "Added %d random bytes (hardware RNG)", n);
-    else snprintf(msg, sizeof msg, "The pad is at the %d byte cap", otp::kMaxTotalPadBytes);
-    toast(msg);
-    show(Screen::Pad);
-  }, nullptr, SET_NORMAL, false);
+  // Generate: the same sizes as MeshCore Open TAK's pad screen. Tap the size
+  // to change it; Generate adds that many bytes (up to the pad cap).
+  {
+    char sz[24];
+    const int gs = kGenSizes[s_gen_size % kGenSizeCount];
+    snprintf(sz, sizeof sz, gs == otp::kMaxTotalPadBytes ? "%d B (max)" : gs == 1700 ? "%d B (QR-safe)" : "%d B", gs);
+    setActionRow(add, UI_ICON_HASH, "Size to generate", sz, [](lv_event_t*) {
+      s_gen_size = (uint8_t)((s_gen_size + 1) % kGenSizeCount);
+      show(Screen::Pad);
+    }, nullptr, SET_NORMAL, false);
+    char gl[40];
+    snprintf(gl, sizeof gl, "Generate %d random bytes", gs);
+    setActionRow(add, UI_ICON_ZAP, gl, nullptr, [](lv_event_t*) {
+      otp::Target* x = cur();
+      if (!x) return;
+      const int want = kGenSizes[s_gen_size % kGenSizeCount];
+      const int n = OtpMessenger::core().generate(*x, want);
+      char msg[96];
+      if (n == want) snprintf(msg, sizeof msg, "Added %d random bytes (hardware RNG)", n);
+      else if (n > 0) snprintf(msg, sizeof msg, "Added %d random bytes: the pad is now at the %d byte cap", n, otp::kMaxTotalPadBytes);
+      else snprintf(msg, sizeof msg, "The pad is at the %d byte cap", otp::kMaxTotalPadBytes);
+      toast(msg, 2200);
+      show(Screen::Pad);
+    }, nullptr, SET_NORMAL, false);
+  }
   setActionRow(add, UI_ICON_FOLDER, "Import a file from the SD card", nullptr, [](lv_event_t*) { show(Screen::Import); });
   setActionRow(add, UI_ICON_COPY, "Paste hex", nullptr, [](lv_event_t*) {
     prompt(TR("Pad as hex"), TR("Spaces and line breaks are ignored."), false, 16400, importHexText);
