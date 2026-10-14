@@ -1,0 +1,140 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+#pragma once
+
+// Answers fetch requests for voice clips this radio holds, so MeshCore Open TAK
+// (or another wadamesh) can download a clip recorded here. Mirrors
+// VoxVoiceService._serve in jade-on-mesh/meshcore-open-tak
+// (lib/vox/voice_service.dart) so both ends behave the same on air:
+//
+//   raw request    0x72 via raw data, sent along a direct route. Answered along
+//                  the reverse of the request's own path when it carries one
+//                  (known to work right now), else along our stored route to
+//                  the requester, waiting up to 3 s for one.
+//   VR3 DM         the text request a listener floods when it has no route. The
+//                  flood makes both radios learn a route a few seconds later, so
+//                  we wait up to 25 s for it, then answer as raw data.
+//   channel        0x72 as GRP_DATA 0x5643 on the channel the clip was posted in;
+//                  answered on that channel. The clip's author answers after
+//                  300 ms; this radio doesn't stand in for other authors.
+//
+// Packets are paced so we never talk over our own repeaters (same formula as
+// the app), salted (0x57) when the requester says it takes them, one request
+// served at a time, a repeat of the same request inside 6 s is ignored, and a
+// newer request from the same listener for the same clip replaces one in progress.
+//
+// Pure C++ against VoxServeIo, host-tested in test/test_vox_serve.cpp.
+
+#include <stddef.h>
+#include <stdint.h>
+
+#include "VoxWire.h"
+
+class VoxServeIo {
+ public:
+  virtual ~VoxServeIo() {}
+  virtual uint32_t nowMs() = 0;
+  virtual uint32_t random32() = 0;
+  virtual void selfKey6(uint8_t out[6]) = 0;
+  // Our stored route to the contact whose public key starts with `key6`, for raw
+  // data: 1-byte hop hashes, sender -> requester order. False when the contact
+  // is unknown, has no direct route, or uses multi-byte path hashes.
+  virtual bool routeToKey6(const uint8_t key6[6], uint8_t* path, int* len) = 0;
+  virtual bool sendRaw(const uint8_t* path, int len, const uint8_t* data, size_t n) = 0;
+  virtual bool sendChannelData(int channel, uint16_t type, const uint8_t* data, size_t n) = 0;
+  // Airtime of one full voice packet at the radio's current settings.
+  virtual uint32_t packetAirMs() = 0;
+  // A clip this radio holds (recorded here or downloaded): its VE3 wire mode and
+  // codec frames, copied into a buffer from alloc(). False if we don't have it.
+  virtual bool loadClip(uint32_t sid, uint8_t* mode, uint8_t** bits, size_t* len) = 0;
+  virtual void freeClip(uint8_t* bits) = 0;
+  virtual void log(const char* line) { (void)line; }
+};
+
+class VoxServe {
+ public:
+  static constexpr int kMaxQueued = 6;
+  static constexpr int kMaxOwn = 16;
+  static constexpr uint32_t kDupWindowMs = 6000;
+  static constexpr uint32_t kRouteWaitMs = 3000;
+  static constexpr uint32_t kRouteWaitDmMs = 25000;
+  static constexpr uint32_t kOwnChannelDelayMs = 300;
+
+  explicit VoxServe(VoxServeIo& io) : io_(io) {}
+  ~VoxServe();
+
+  // A clip recorded here: answer channel requests for it as its author.
+  void markOwn(uint32_t sid);
+  bool isOwn(uint32_t sid) const;
+
+  // A raw-data payload (channel < 0) or a GRP_DATA 0x5643 payload on `channel`.
+  // Anything but a fetch request is ignored.
+  void onPayload(const uint8_t* data, size_t len, int channel);
+  // A DM's text. Returns true if it was a VR3 request (never shown in a chat).
+  bool onDirectText(const char* text);
+
+  void tick();
+
+  // For the UI and tests.
+  bool busy() const { return active_ >= 0 || queued_ > 0; }
+  int packetsSent() const { return sent_total_; }
+
+ private:
+  struct Job {
+    bool used = false;
+    uint32_t sid = 0;
+    uint8_t key6[6] = {0};
+    int channel = -1;              // >= 0: answer on this channel
+    bool all = true;
+    uint8_t want[VoxWire::kMaxPackets];
+    int n_want = 0;
+    bool salt_ok = false;
+    bool have_route = false;
+    uint8_t route[64];             // sender -> requester, 1-byte hashes
+    int route_len = 0;
+    uint32_t seq = 0;              // arrival order (served first come, first served)
+    uint32_t route_try_at = 0;
+    int send_failures = 0;
+    uint32_t not_before = 0;       // channel: the author's 300 ms
+    uint32_t route_deadline = 0;
+    uint32_t gen = 0;
+    // While serving
+    uint8_t mode = 0;
+    uint8_t* bits = nullptr;
+    size_t len = 0;
+    int next = 0;                  // index into the packets being sent
+    int total = 0;
+    uint32_t next_at = 0;
+    uint32_t gap = 0;
+  };
+
+  struct Recent { uint32_t sig; uint32_t at; };
+
+  void enqueue(const VoxWire::FetchRequest& r, int channel, bool from_dm);
+  bool start(Job& j);
+  void finish(Job& j, const char* why);
+  int  packetCount(const Job& j) const;
+  int  packetIndex(const Job& j, int k) const;
+  uint32_t packetGap(bool flood, int hops);
+  uint32_t signature(const Job& j) const;
+  uint32_t listenerKey(uint32_t sid, const uint8_t key6[6], int channel) const;
+  void logf(const char* fmt, ...);
+
+  VoxServeIo& io_;
+  Job jobs_[kMaxQueued];
+  int active_ = -1;
+  int queued_ = 0;
+  uint32_t own_[kMaxOwn] = {0};
+  int own_next_ = 0;
+  Recent recent_[16] = {};
+  int recent_next_ = 0;
+  // Generation per listener (sid + requester or channel): a newer request bumps
+  // it, and a job whose generation is stale stops.
+  struct Gen { uint32_t key; uint32_t gen; };
+  Gen gens_[16] = {};
+  int gens_next_ = 0;
+  int sent_total_ = 0;
+  uint32_t seq_ = 0;
+
+  uint32_t bumpGen(uint32_t key);
+  uint32_t currentGen(uint32_t key) const;
+};

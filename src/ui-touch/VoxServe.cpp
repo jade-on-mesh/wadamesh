@@ -1,0 +1,283 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+#include "VoxServe.h"
+
+#include <stdarg.h>
+#include <stdio.h>
+#include <string.h>
+
+namespace {
+
+uint32_t fnv(uint32_t h, const void* p, size_t n) {
+  const uint8_t* b = static_cast<const uint8_t*>(p);
+  for (size_t i = 0; i < n; i++) h = (h ^ b[i]) * 16777619u;
+  return h;
+}
+
+bool after(uint32_t now, uint32_t t) { return (int32_t)(now - t) >= 0; }
+
+}  // namespace
+
+VoxServe::~VoxServe() {
+  for (Job& j : jobs_)
+    if (j.bits) io_.freeClip(j.bits);
+}
+
+void VoxServe::logf(const char* fmt, ...) {
+  char line[160];
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(line, sizeof line, fmt, ap);
+  va_end(ap);
+  io_.log(line);
+}
+
+void VoxServe::markOwn(uint32_t sid) {
+  if (isOwn(sid)) return;
+  own_[own_next_] = sid;
+  own_next_ = (own_next_ + 1) % kMaxOwn;
+}
+
+bool VoxServe::isOwn(uint32_t sid) const {
+  if (!sid) return false;
+  for (uint32_t s : own_) if (s == sid) return true;
+  return false;
+}
+
+uint32_t VoxServe::listenerKey(uint32_t sid, const uint8_t key6[6], int channel) const {
+  uint32_t h = fnv(2166136261u, &sid, sizeof sid);
+  if (channel >= 0) {
+    const uint8_t tag = 0xC0;
+    h = fnv(h, &tag, 1);
+    return fnv(h, &channel, sizeof channel);
+  }
+  return fnv(h, key6, 6);
+}
+
+uint32_t VoxServe::signature(const Job& j) const {
+  uint32_t h = listenerKey(j.sid, j.key6, j.channel);
+  const uint8_t all = j.all ? 1 : 0;
+  h = fnv(h, &all, 1);
+  return fnv(h, j.want, (size_t)j.n_want);
+}
+
+uint32_t VoxServe::bumpGen(uint32_t key) {
+  for (Gen& g : gens_)
+    if (g.key == key && g.gen) return ++g.gen;
+  gens_[gens_next_] = Gen{key, 1};
+  gens_next_ = (gens_next_ + 1) % (int)(sizeof gens_ / sizeof gens_[0]);
+  return 1;
+}
+
+uint32_t VoxServe::currentGen(uint32_t key) const {
+  for (const Gen& g : gens_)
+    if (g.key == key && g.gen) return g.gen;
+  return 0;
+}
+
+void VoxServe::onPayload(const uint8_t* data, size_t len, int channel) {
+  VoxWire::FetchRequest r;
+  if (!VoxWire::parseFetch(data, len, &r)) return;
+  uint8_t self[6];
+  io_.selfKey6(self);
+  if (memcmp(self, r.key6, 6) == 0) return;   // our own request, heard back from a repeater
+  // On a channel the clip's author answers; anyone else holding it (the app's
+  // 5-8 s stand-in) is left to the apps, so a radio and the phone connected to
+  // it never both answer.
+  if (channel >= 0 && !isOwn(r.sid)) return;
+  enqueue(r, channel, false);
+}
+
+bool VoxServe::onDirectText(const char* text) {
+  if (!VoxWire::isControlText(text)) return false;
+  VoxWire::FetchRequest r;
+  if (!VoxWire::parseTextFetch(text, &r)) {
+    logf("[VOX] VR3 DM could not be parsed");
+    return true;
+  }
+  uint8_t self[6];
+  io_.selfKey6(self);
+  if (memcmp(self, r.key6, 6) != 0) enqueue(r, -1, true);
+  return true;
+}
+
+void VoxServe::enqueue(const VoxWire::FetchRequest& r, int channel, bool from_dm) {
+  const uint32_t now = io_.nowMs();
+  Job t;
+  t.used = true;
+  t.sid = r.sid;
+  memcpy(t.key6, r.key6, 6);
+  t.channel = channel;
+  t.all = r.all;
+  t.n_want = r.all ? 0 : r.n_missing;
+  if (t.n_want) memcpy(t.want, r.missing, (size_t)t.n_want);
+  t.salt_ok = r.salt_ok;
+  if (channel < 0 && r.has_path) {
+    // The way the request just reached us, reversed: known to work right now.
+    t.have_route = true;
+    t.route_len = r.path_len;
+    for (int i = 0; i < r.path_len; i++) t.route[i] = r.path[r.path_len - 1 - i];
+  }
+  t.not_before = channel >= 0 ? now + kOwnChannelDelayMs : now;
+  t.route_deadline = now + (from_dm ? kRouteWaitDmMs : kRouteWaitMs);
+
+  // The same request again (heard twice, or a quick retry): ignore it.
+  const uint32_t sig = signature(t);
+  for (const Recent& e : recent_) {
+    if (e.sig == sig && e.at && !after(now, e.at + kDupWindowMs)) {
+      logf("[VOX] serve %08lx: ignoring a repeated request", (unsigned long)r.sid);
+      return;
+    }
+  }
+  recent_[recent_next_] = Recent{sig, now ? now : 1};
+  recent_next_ = (recent_next_ + 1) % (int)(sizeof recent_ / sizeof recent_[0]);
+
+  // A newer request from the same listener replaces anything still queued or
+  // in progress for it, so we never keep sending stale packets.
+  const uint32_t lk = listenerKey(t.sid, t.key6, t.channel);
+  t.gen = bumpGen(lk);
+  for (int i = 0; i < kMaxQueued; i++) {
+    Job& q = jobs_[i];
+    if (!q.used || i == active_) continue;
+    if (listenerKey(q.sid, q.key6, q.channel) == lk) {
+      q.used = false;
+      queued_--;
+    }
+  }
+
+  int slot = -1;
+  for (int i = 0; i < kMaxQueued; i++)
+    if (!jobs_[i].used && i != active_) { slot = i; break; }
+  if (slot < 0) {
+    logf("[VOX] serve %08lx: too many requests queued, dropping this one", (unsigned long)r.sid);
+    return;
+  }
+  t.seq = ++seq_;
+  jobs_[slot] = t;
+  queued_++;
+  char key[13];
+  for (int i = 0; i < 6; i++) snprintf(key + 2 * i, 3, "%02x", t.key6[i]);
+  logf("[VOX] serve %08lx: %s request from %s for %s%s", (unsigned long)t.sid,
+       channel >= 0 ? "channel" : from_dm ? "VR3 DM" : "raw", key, t.all ? "all packets" : "missing packets",
+       t.have_route ? " (reply along its path)" : "");
+}
+
+int VoxServe::packetCount(const Job& j) const {
+  if (j.all) return j.total;
+  int n = 0;
+  for (int i = 0; i < j.n_want; i++) if (j.want[i] < j.total) n++;
+  return n;
+}
+
+int VoxServe::packetIndex(const Job& j, int k) const {
+  if (j.all) return k;
+  int n = 0;
+  for (int i = 0; i < j.n_want; i++) {
+    if (j.want[i] >= j.total) continue;
+    if (n == k) return j.want[i];
+    n++;
+  }
+  return -1;
+}
+
+// Pause between packets so we don't talk over our own relays: a stock repeater
+// waits a random 0..1.5 airtimes before relaying, then a full airtime relaying,
+// maybe at a slower coding rate (the 1.15). Same as VoxVoiceService._packetGap.
+uint32_t VoxServe::packetGap(bool flood, int hops) {
+  const uint32_t air = io_.packetAirMs();
+  if (flood) return air * 4 + 150 > 800 ? air * 4 + 150 : 800;
+  if (hops <= 0) return air * 2 + 150 > 400 ? air * 2 + 150 : 400;
+  const int h = hops < 2 ? hops : 2;
+  return (uint32_t)(air + h * 2.5 * (air * 1.15) + 400 + 0.5);
+}
+
+bool VoxServe::start(Job& j) {
+  if (!io_.loadClip(j.sid, &j.mode, &j.bits, &j.len) || !j.bits) {
+    j.bits = nullptr;
+    finish(j, "asked for a clip we do not have");
+    return false;
+  }
+  const int pb = VoxWire::packetBytes(j.mode);
+  if (pb <= 0 || j.len == 0) {
+    finish(j, "stored clip is unreadable");
+    return false;
+  }
+  j.total = (int)((j.len + (size_t)pb - 1) / (size_t)pb);
+  if (j.total > VoxWire::kMaxPackets) j.total = VoxWire::kMaxPackets;
+  if (packetCount(j) == 0) {
+    finish(j, "nothing it asked for exists");
+    return false;
+  }
+  return true;
+}
+
+void VoxServe::finish(Job& j, const char* why) {
+  logf("[VOX] serve %08lx: %s (%d/%d sent)", (unsigned long)j.sid, why, j.next, j.bits ? packetCount(j) : 0);
+  if (j.bits) io_.freeClip(j.bits);
+  j = Job();
+  active_ = -1;
+}
+
+void VoxServe::tick() {
+  const uint32_t now = io_.nowMs();
+  if (active_ < 0) {
+    int pick = -1;
+    for (int i = 0; i < kMaxQueued; i++)
+      if (jobs_[i].used && (pick < 0 || jobs_[i].seq < jobs_[pick].seq)) pick = i;
+    if (pick < 0 || !after(now, jobs_[pick].not_before)) return;
+    active_ = pick;
+    queued_--;
+  }
+  Job& j = jobs_[active_];
+  if (currentGen(listenerKey(j.sid, j.key6, j.channel)) != j.gen) {
+    finish(j, "stopped: a newer request replaced this one");
+    return;
+  }
+  if (!j.bits && !start(j)) return;
+
+  // Direct answers need a route back: the request's own path, or our route to
+  // the requester (which a VR3 flood teaches both radios a few seconds later).
+  if (j.channel < 0 && !j.have_route) {
+    if (!after(now, j.route_try_at)) return;
+    j.route_try_at = now + 500;
+    int len = 0;
+    if (io_.routeToKey6(j.key6, j.route, &len) && len >= 0 && len <= (int)sizeof j.route) {
+      j.have_route = true;
+      j.route_len = len;
+    } else if (after(now, j.route_deadline)) {
+      finish(j, "no direct route back to the requester");
+      return;
+    } else {
+      return;
+    }
+  }
+  if (!j.gap) {
+    j.gap = packetGap(j.channel >= 0, j.channel >= 0 ? 0 : j.route_len);
+    j.next_at = now;
+    logf("[VOX] serve %08lx: sending %d packets %s, %lu ms apart", (unsigned long)j.sid, packetCount(j),
+         j.channel >= 0 ? "on the channel" : "direct", (unsigned long)j.gap);
+  }
+  if (!after(now, j.next_at)) return;
+
+  const int idx = packetIndex(j, j.next);
+  const int pb = VoxWire::packetBytes(j.mode);
+  const size_t off = (size_t)idx * (size_t)pb;
+  const int n = (int)(j.len - off < (size_t)pb ? j.len - off : (size_t)pb);
+  uint8_t pkt[VoxWire::kPacketHeaderLen + VoxWire::kBytesPerPacket + 1];
+  // Salt each send so a resend is never dropped as a duplicate by a radio that
+  // saw an earlier copy (channel data must still fit GRP_DATA's 163 bytes).
+  const bool salt = j.salt_ok && (j.channel < 0 || VoxWire::kPacketHeaderLen + n + 1 <= 163);
+  const int plen = VoxWire::encodePacket(j.sid, (uint8_t)idx, j.bits + off, n,
+                                         salt ? (int)(io_.random32() & 0xFF) : -1, pkt, sizeof pkt);
+  const bool ok = plen > 0 && (j.channel >= 0 ? io_.sendChannelData(j.channel, VoxWire::kChannelDataType, pkt, (size_t)plen)
+                                              : io_.sendRaw(j.route, j.route_len, pkt, (size_t)plen));
+  if (!ok) {
+    // The mesh's packet pool can be momentarily full; try again shortly.
+    if (++j.send_failures > 8) { finish(j, "the radio wouldn't take the packets"); return; }
+    j.next_at = now + 250;
+    return;
+  }
+  sent_total_++;
+  j.next++;
+  j.next_at = now + j.gap;
+  if (j.next >= packetCount(j)) finish(j, "served");
+}

@@ -272,6 +272,152 @@ inline int encodeTextFetch(uint32_t sid, const uint8_t key6[6], const uint8_t* m
   return pos;
 }
 
+// A parsed fetch request, binary or VR3 text. `all` asks for every packet;
+// otherwise `missing[0..n_missing)` (sorted, de-duplicated). `has_path` means
+// `path[0..path_len)` is the route the request took (requester -> sender).
+struct FetchRequest {
+  uint32_t sid = 0;
+  uint8_t  key6[6] = {0};
+  bool     all = true;
+  uint8_t  missing[kMaxPackets];
+  int      n_missing = 0;
+  bool     salt_ok = false;
+  bool     has_path = false;
+  uint8_t  path[kMaxReplyPathBytes];
+  int      path_len = 0;
+};
+
+// Binary request (see encodeFetch). Like the Dart parser it drops indices
+// >= 255 and ignores a reply path longer than kMaxReplyPathBytes.
+inline bool parseFetch(const uint8_t* buf, size_t len, FetchRequest* r) {
+  if (!r || !isFetchRequest(buf, len)) return false;
+  *r = FetchRequest();
+  r->sid = readSid(buf + 1);
+  const uint8_t flags = buf[5];
+  memcpy(r->key6, buf + 6, 6);
+  const int count = buf[12];
+  r->salt_ok = (flags & kFetchFlagSaltOk) != 0;
+  if (flags & kFetchFlagMissing) {
+    if (len < (size_t)kFetchMinLen + (size_t)count) return false;
+    bool seen[kMaxPackets] = {false};
+    for (int i = 0; i < count; i++) {
+      const uint8_t v = buf[kFetchMinLen + i];
+      if (v < kMaxPackets) seen[v] = true;
+    }
+    for (int v = 0; v < kMaxPackets; v++) if (seen[v]) r->missing[r->n_missing++] = (uint8_t)v;
+    r->all = false;
+  }
+  const size_t at = (size_t)kFetchMinLen + (size_t)count;
+  if ((flags & kFetchFlagHasPath) && len > at) {
+    const int n = buf[at];
+    if (n <= kMaxReplyPathBytes && len >= at + 1 + (size_t)n) {
+      r->has_path = true;
+      r->path_len = n;
+      if (n) memcpy(r->path, buf + at + 1, (size_t)n);
+    }
+  }
+  return true;
+}
+
+// "VR3:{sid}:{a | m<ranges>}:{key6 hex}", as voice_wire.dart parses it.
+inline bool parseTextFetch(const char* text, FetchRequest* r) {
+  if (!text || !r) return false;
+  while (*text == ' ' || *text == '\t' || *text == '\n' || *text == '\r') text++;
+  if (strncmp(text, "VR3:", 4) != 0) return false;
+  *r = FetchRequest();
+  const char* p = text + 4;
+  const char* q = p;
+  while (*q && *q != ':') q++;
+  if (*q != ':' || !parseBase36(p, (size_t)(q - p), &r->sid)) return false;
+  p = q + 1;
+  q = p;
+  while (*q && *q != ':') q++;
+  if (*q != ':') return false;
+  const char* want_end = q;
+  if (q - p == 1 && *p == 'a') {
+    r->all = true;
+  } else if (q - p > 1 && *p == 'm') {
+    bool seen[kMaxPackets] = {false};
+    const char* t = p + 1;
+    while (t < want_end) {
+      const char* e = t;
+      while (e < want_end && *e != '.') e++;
+      if (e > t) {
+        const char* dash = t;
+        while (dash < e && *dash != '-') dash++;
+        uint32_t a, b;
+        if (!parseBase36(t, (size_t)(dash - t), &a)) return false;
+        if (dash < e) {
+          const char* d2 = dash + 1;
+          for (const char* c = d2; c < e; c++) if (*c == '-') return false;   // "1-2-3"
+          if (!parseBase36(d2, (size_t)(e - d2), &b)) return false;
+        } else {
+          b = a;
+        }
+        if (a > b || b >= (uint32_t)kMaxPackets) return false;
+        for (uint32_t v = a; v <= b; v++) seen[v] = true;
+      }
+      t = e < want_end ? e + 1 : e;
+    }
+    for (int v = 0; v < kMaxPackets; v++) if (seen[v]) r->missing[r->n_missing++] = (uint8_t)v;
+    if (r->n_missing == 0) return false;
+    r->all = false;
+  } else {
+    return false;
+  }
+  p = q + 1;
+  for (int i = 0; i < 6; i++) {
+    uint8_t v = 0;
+    for (int k = 0; k < 2; k++) {
+      char c = p[2 * i + k];
+      if (c >= 'A' && c <= 'F') c = (char)(c - 'A' + 'a');
+      int d;
+      if (c >= '0' && c <= '9') d = c - '0';
+      else if (c >= 'a' && c <= 'f') d = c - 'a' + 10;
+      else return false;
+      v = (uint8_t)(v << 4 | d);
+    }
+    r->key6[i] = v;
+  }
+  const char* tail = p + 12;
+  while (*tail == ' ' || *tail == '\t' || *tail == '\n' || *tail == '\r') tail++;
+  return *tail == '\0';
+}
+
+// The VE3 envelope for a Codec2 clip this radio recorded. Returns chars written
+// (excluding NUL), or 0 if `cap` is too small or the fields are out of range.
+inline int encodeVoiceEnvelope(uint32_t sid, int wire_mode, int total, int seconds, char* out, size_t cap) {
+  if (wire_mode < 0 || wire_mode > 6 || total < 1 || total > kMaxPackets || seconds < 0 || seconds > 600)
+    return 0;
+  char buf[48];
+  int n = snprintf(buf, sizeof buf, "VE3:");
+  n += toBase36(sid, buf + n);
+  buf[n++] = ':';
+  n += toBase36((uint32_t)wire_mode, buf + n);
+  buf[n++] = ':';
+  n += toBase36((uint32_t)total, buf + n);
+  buf[n++] = ':';
+  n += toBase36((uint32_t)seconds, buf + n);
+  if ((size_t)n + 1 > cap) return 0;
+  memcpy(out, buf, (size_t)n);
+  out[n] = '\0';
+  return n;
+}
+
+// One data packet for a clip: `[0x56][sid][index][bytes]`, or with `salt` >= 0
+// the salted form `[0x57]...[salt]`. Returns bytes written, or 0.
+inline int encodePacket(uint32_t sid, uint8_t index, const uint8_t* data, int len, int salt, uint8_t* out,
+                        size_t cap) {
+  const size_t need = (size_t)kPacketHeaderLen + (size_t)len + (salt >= 0 ? 1 : 0);
+  if (len < 1 || cap < need) return 0;
+  out[0] = salt >= 0 ? kPacketSaltedMagic : kPacketMagic;
+  writeSid(sid, out + 1);
+  out[5] = index;
+  memcpy(out + kPacketHeaderLen, data, (size_t)len);
+  if (salt >= 0) out[need - 1] = (uint8_t)salt;
+  return (int)need;
+}
+
 // Collects one clip's packets into caller-owned storage of
 // total * packet_bytes bytes (PSRAM on the device).
 class Assembly {
