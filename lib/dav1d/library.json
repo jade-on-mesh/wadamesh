@@ -6,11 +6,16 @@
   "build": {
     "srcDir": ".",
     "includeDir": "include",
-    "srcFilter": ["-<*>", "+<src/*.c>", "-<src/*_tmpl.c>", "+<src/8bpc/*.c>"],
+    "srcFilter": [
+      "-<*>",
+      "+<src/*.c>",
+      "-<src/*_tmpl.c>",
+      "+<src/8bpc/*.c>"
+    ],
     "flags": [
       "-I gen",
       "-I .",
-      "-O2",
+      "-Os",
       "-DNDEBUG",
       "-Wno-unused-parameter",
       "-Wno-missing-field-initializers",
