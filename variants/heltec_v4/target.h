@@ -26,8 +26,10 @@ extern "C" void set_boot_phase(int phase);
   #include <helpers/ui/MomentaryButton.h>
 #endif
 
+#include "../../src/helpers/MediaMeshRadio.h"   // RADIO_DRIVER_CLASS (MediaMesh radio2 scan)
+
 extern HeltecV4Board board;
-extern WRAPPER_CLASS radio_driver;
+extern RADIO_DRIVER_CLASS radio_driver;   // MediaMesh-capable wrapper where supported
 extern RADIO_CLASS radio;   // raw SX1262 — driven directly by the Spectrum analyzer sweep
 extern ClockFloorRTC rtc_clock;
 extern EnvironmentSensorManager sensors;

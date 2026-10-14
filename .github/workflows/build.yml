@@ -34,6 +34,11 @@ jobs:
           g++ -std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined -I src \
               -o /tmp/test_vox_fetch test/test_vox_fetch.cpp src/ui-touch/VoxFetch.cpp
           /tmp/test_vox_fetch
+      - name: MediaMesh settings, CLI and scan timing
+        run: |
+          g++ -std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined -I src \
+              -o /tmp/test_mediamesh test/test_mediamesh_core.cpp
+          /tmp/test_mediamesh
       - name: VOX voice decoder (Codec2, sample-exact against the app's build)
         run: test/build_vox_voice_test.sh /tmp/vox_voice
       - name: VOX photo decoder (bit-exact against libaom, sanitizers on)

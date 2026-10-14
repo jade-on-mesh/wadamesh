@@ -15,9 +15,11 @@
 #include "WioTrackerL2Board.h"
 #include "WioTrackerL2Display.h"
 
+#include "../../src/helpers/MediaMeshRadio.h"   // RADIO_DRIVER_CLASS (MediaMesh radio2 scan)
+
 extern WioTrackerL2Board board;
 extern RADIO_CLASS radio;
-extern WRAPPER_CLASS radio_driver;
+extern RADIO_DRIVER_CLASS radio_driver;   // MediaMesh-capable wrapper where supported
 extern ClockFloorRTC rtc_clock;
 extern EnvironmentSensorManager sensors;
 extern WioTrackerL2Display display;

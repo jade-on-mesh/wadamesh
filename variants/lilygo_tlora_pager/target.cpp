@@ -20,7 +20,7 @@ TLoraPagerBoard board;
 // board today -- revisit if a headless pager env is ever added.
 RADIO_CLASS radio = new Module(P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY, TFT_eSPI::getSPIinstance());
 
-WRAPPER_CLASS radio_driver(radio, board);
+RADIO_DRIVER_CLASS radio_driver(radio, board);
 
 SPIClass* tloraPagerSharedSPI() {
   return &TFT_eSPI::getSPIinstance();

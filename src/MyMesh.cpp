@@ -29,6 +29,7 @@
 #include "WiFiConfig.h"
 #if defined(ESP32) && defined(HAS_TOUCH_UI)
 #include "helpers/esp32/TouchPrefsStore.h"
+#include "helpers/MediaMesh.h"   // MediaMesh: photos/voice on the radio2 profile
 #endif
 #ifdef ESP32
 #if defined(WIFI_SSID) || defined(MULTI_TRANSPORT_COMPANION)
@@ -120,6 +121,7 @@ static void persistProtocolClockBeforeReset(mesh::RTCClock* clock) {
 #define CMD_SET_DEFAULT_FLOOD_SCOPE   63
 #define CMD_GET_DEFAULT_FLOOD_SCOPE   64
 #define CMD_SEND_RAW_PACKET           65
+#define CMD_RUN_CLI_COMMAND           66   // v14+: local CLI text; MediaMesh radio2/tx.media commands here
 
 // Stats sub-types for CMD_GET_STATS
 #define STATS_TYPE_CORE               0
@@ -155,6 +157,7 @@ static void persistProtocolClockBeforeReset(mesh::RTCClock* clock) {
 #define RESP_ALLOWED_REPEAT_FREQ      26
 #define RESP_CODE_CHANNEL_DATA_RECV   27
 #define RESP_CODE_DEFAULT_FLOOD_SCOPE 28
+#define RESP_CODE_CLI_REPLY           29   // reply to CMD_RUN_CLI_COMMAND
 
 #define MAX_CHANNEL_DATA_LENGTH       (MAX_FRAME_SIZE - 9)
 #define RESP_CODE_SYNC_SINCE_DONE     61  // sent once after SyncSince delta stream; client sets last-sync to now
@@ -4212,6 +4215,7 @@ void MyMesh::begin(bool has_display) {
   loadSyncHistory();   // app-sync replay ring + client cursors survive a reboot/power cut
 
   applyRadioFromPrefs();   // freq/bw/sf/cr + TX power + RX-boost (shared with the live UI apply)
+  mediamesh::begin();      // radio2 profile, once the main radio settings are known
 #if defined(DISPLAY_CLASS)
   // Boot diag: identity prefix + radio config so we can confirm the touch
   // firmware's pubkey is stable across flashes (replies are addressed to
@@ -4579,7 +4583,7 @@ void MyMesh::handleCmdFrame(size_t len) {
     } else if (payload_len > MAX_CHANNEL_DATA_LENGTH) {
       MESH_DEBUG_PRINTLN("CMD_SEND_CHANNEL_DATA payload too long: %d > %d", payload_len, MAX_CHANNEL_DATA_LENGTH);
       writeErrFrame(ERR_CODE_ILLEGAL_ARG);
-    } else if (sendGroupData(channel.channel, path, path_len, data_type, payload, payload_len)) {
+    } else if (sendGroupDataMedia(channel.channel, path, path_len, data_type, payload, payload_len)) {
       writeOKFrame();
     } else {
       writeErrFrame(ERR_CODE_TABLE_FULL);
@@ -5048,6 +5052,7 @@ void MyMesh::handleCmdFrame(size_t len) {
       }
       auto pkt = createRawData(&cmd_frame[i], len - i);
       if (pkt) {
+        mediamesh::markPacket(pkt);   // app raw data = Open TAK photo/voice transfers
         sendDirect(pkt, path, path_len);
         writeOKFrame();
       } else {
@@ -5579,10 +5584,54 @@ void MyMesh::handleCmdFrame(size_t len) {
     } else {
       writeErrFrame(ERR_CODE_TABLE_FULL);
     }
+  } else if (cmd_frame[0] == CMD_RUN_CLI_COMMAND && len >= 2) {
+    // Local CLI from a directly attached app. Only the MediaMesh settings live
+    // here; other text gets the standard "Unknown command" reply.
+    char text[MAX_FRAME_SIZE];
+    size_t tlen = len - 1;
+    if (tlen >= sizeof(text)) tlen = sizeof(text) - 1;
+    memcpy(text, &cmd_frame[1], tlen);
+    text[tlen] = 0;
+    while (tlen > 0 && (text[tlen - 1] == '\r' || text[tlen - 1] == '\n' || text[tlen - 1] == ' ')) text[--tlen] = 0;
+    // An optional two-character correlation tag ("ab|get radio2") is echoed back.
+    char tag[4] = "";
+    const char* cmd = text;
+    if (tlen > 3 && text[2] == '|') { memcpy(tag, text, 3); tag[3] = 0; cmd = text + 3; }
+    char reply[MAX_FRAME_SIZE];
+    if (!mediamesh::runCli(cmd, reply, sizeof(reply))) snprintf(reply, sizeof(reply), "Unknown command");
+    int j = 0;
+    out_frame[j++] = RESP_CODE_CLI_REPLY;
+    const int taglen = (int)strlen(tag);
+    memcpy(&out_frame[j], tag, taglen); j += taglen;
+    int rlen = (int)strlen(reply);
+    if (j + rlen > MAX_FRAME_SIZE) rlen = MAX_FRAME_SIZE - j;
+    memcpy(&out_frame[j], reply, rlen); j += rlen;
+    _serial->writeFrame(out_frame, j);
   } else {
     writeErrFrame(ERR_CODE_UNSUPPORTED_CMD);
     MESH_DEBUG_PRINTLN("ERROR: unknown command: %02X", cmd_frame[0]);
   }
+}
+
+// sendGroupData, plus the MediaMesh mark for MeshCore Open TAK photo/voice
+// datagrams (GRP_DATA 0x5643) so the radio sends them on radio2.
+bool MyMesh::sendGroupDataMedia(mesh::GroupChannel& channel, uint8_t* path, uint8_t path_len, uint16_t data_type,
+                                const uint8_t* data, int data_len) {
+  if (data_type != VoxWire::kChannelDataType || !mediamesh::mediaActive()) {
+    return sendGroupData(channel, path, path_len, data_type, data, data_len);
+  }
+  if (data_len < 0 || data_len > MAX_GROUP_DATA_LENGTH) return false;
+  uint8_t temp[3 + MAX_GROUP_DATA_LENGTH];
+  temp[0] = (uint8_t)(data_type & 0xFF);
+  temp[1] = (uint8_t)(data_type >> 8);
+  temp[2] = (uint8_t)data_len;
+  if (data_len > 0) memcpy(&temp[3], data, data_len);
+  auto pkt = createGroupDatagram(PAYLOAD_TYPE_GRP_DATA, channel, temp, 3 + data_len);
+  if (!pkt) return false;
+  mediamesh::markPacket(pkt);
+  if (path_len == OUT_PATH_UNKNOWN) sendFloodScoped(channel, pkt);
+  else sendDirect(pkt, path, path_len);
+  return true;
 }
 
 static bool save_filter(const ContactInfo& c) {

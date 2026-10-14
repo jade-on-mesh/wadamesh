@@ -25,8 +25,10 @@
 #include "helpers/sensors/MicroNMEALocationProvider.h"
 #include "PagerGps.h"
 
+#include "../../src/helpers/MediaMeshRadio.h"   // RADIO_DRIVER_CLASS (MediaMesh radio2 scan)
+
 extern TLoraPagerBoard board;
-extern WRAPPER_CLASS radio_driver;
+extern RADIO_DRIVER_CLASS radio_driver;   // MediaMesh-capable wrapper where supported
 extern RADIO_CLASS radio;
 extern HardwareRtcClock hw_rtc;   // the board's PCF85063A; ClockFloorRTC's fallback
 extern ClockFloorRTC rtc_clock;
