@@ -68207,13 +68207,17 @@ static void voxMicButtonCb(lv_event_t* e) {
   }
 }
 
-// The send button shows a microphone while there's nothing typed.
+// The send button shows a microphone while there's nothing typed. Both glyphs
+// come from the Lucide icon font (ui_icons_16), which has the microphone; the
+// text font's symbol set doesn't.
 static void voxMicIconSync(LvChatPanel* p) {
   if (!p || !p->send_btn || !p->composer_ta) return;
   lv_obj_t* l = lv_obj_get_child(p->send_btn, 0);
   if (!l) return;
   const char* text = lv_textarea_get_text(p->composer_ta);
-  const char* want = (text && text[0]) ? UI_ICON_ARROW_UP : LV_SYMBOL_AUDIO;
+  const char* want = (text && text[0]) ? UI_ICON_ARROW_UP : UI_ICON_MIC;
+  if (lv_obj_get_style_text_font(l, LV_PART_MAIN) != &ui_icons_16)
+    lv_obj_set_style_text_font(l, &ui_icons_16, LV_PART_MAIN);
   if (strcmp(lv_label_get_text(l), want) != 0) lv_label_set_text(l, want);
 }
 

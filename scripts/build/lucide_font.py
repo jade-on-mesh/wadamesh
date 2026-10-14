@@ -75,7 +75,7 @@ APP = [
     "chart-no-axes-column", "message-square-text", "reply", "share-2",
     "smile", "send-horizontal", "arrow-left", "battery-full", "battery-medium",
     "battery-low", "battery", "image", "lock-open", "bell-ring", "circle-alert",
-    "arrow-down-wide-narrow", "user-plus", "list-checks", "ban",
+    "arrow-down-wide-narrow", "user-plus", "list-checks", "ban", "mic",
 ]
 
 FA_PERSON = {0xF007: "user", 0xF519: "radio-tower", 0xF0C0: "users"}

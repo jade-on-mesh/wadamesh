@@ -93,3 +93,4 @@
 #define UI_ICON_USER_PLUS                "\xEE\x86\xA2"   /* U+E1A2 user-plus */
 #define UI_ICON_LIST_CHECKS              "\xEE\x87\x90"   /* U+E1D0 list-checks */
 #define UI_ICON_BAN                      "\xEE\x81\x91"   /* U+E051 ban */
+#define UI_ICON_MIC                      "\xEE\x84\x98"   /* U+E118 mic */
