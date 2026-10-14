@@ -50,3 +50,69 @@ class VoxCodec2Stream {
   int bpf_ = 0;
   int spf_ = 0;
 };
+
+// ---- Recording on the radio --------------------------------------------------
+
+// The mode the radio records in: Codec2 1200, MeshCore Open TAK's default, so a
+// 10 s clip is 10 packets and every VE3 app can play it.
+constexpr int kVoxRecordWireMode = 1;
+
+// Longest clip the radio records, as in the app (VoxVoiceService.maxClipLength).
+constexpr int kVoxMaxRecordSeconds = 20;
+
+// Frame-by-frame Codec2 encoding of 8 kHz mono PCM.
+class VoxCodec2Encoder {
+ public:
+  VoxCodec2Encoder() {}
+  ~VoxCodec2Encoder() { end(); }
+  bool begin(int wire_mode);   // false: mode unsupported or no memory
+  int bytesPerFrame() const { return bpf_; }
+  int samplesPerFrame() const { return spf_; }
+  // samplesPerFrame() samples in, bytesPerFrame() bytes out. Codec2 may scale
+  // the input in place, so `pcm` is not const.
+  void encode(int16_t* pcm, uint8_t* out);
+  void end();
+
+ private:
+  void* c2_ = nullptr;
+  int bpf_ = 0;
+  int spf_ = 0;
+};
+
+// Turns the microphone's 16 kHz interleaved stereo into Codec2's 8 kHz mono:
+// both channels mixed, DC removed, low-passed and decimated by 2, then levelled
+// by a slow AGC with a soft limiter so quiet and loud talkers both reach Codec2
+// at a level it models well. Stateful across calls; reset() between clips.
+class VoxMicPrep {
+ public:
+  static constexpr int kInputRate = 16000;
+  static constexpr int kTaps = 31;   // low-pass FIR, cutoff 3.4 kHz at 16 kHz
+
+  VoxMicPrep() { reset(); }
+  void reset();
+
+  // Consumes `frames` stereo frames (L, R, L, R ...) and writes 8 kHz samples
+  // to `out` (capacity `cap`). Returns samples written (frames / 2, give or
+  // take the odd one carried over).
+  size_t process(const int16_t* stereo, size_t frames, int16_t* out, size_t cap);
+
+  // Same, for a mono 16 kHz source.
+  size_t processMono(const int16_t* mono, size_t n, int16_t* out, size_t cap);
+
+  // Peak of the levelled output since the last call (0..32767), for a meter.
+  int takePeak();
+  // The AGC's current gain (1 = none).
+  float gain() const { return gain_; }
+
+ private:
+  void push(float x, int16_t* out, size_t cap, size_t* n);
+  int16_t level(float s);
+
+  float hist_[kTaps];
+  int   pos_ = 0;
+  bool  odd_ = false;
+  float dc_x_ = 0, dc_y_ = 0;
+  float env_ = 0;
+  float gain_ = 1;
+  int   peak_ = 0;
+};

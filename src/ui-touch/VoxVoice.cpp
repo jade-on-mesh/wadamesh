@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "VoxVoice.h"
 
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -98,14 +99,168 @@ void VoxCodec2Stream::end() {
   bpf_ = spf_ = 0;
 }
 
+bool VoxCodec2Encoder::begin(int wire_mode) {
+  end();
+  if (!voxCodec2CanDecode(wire_mode)) return false;   // same set of modes both ways
+  struct CODEC2* c2 = codec2_create(VoxWire::codec2Mode(wire_mode));
+  if (!c2) return false;
+  bpf_ = codec2_bytes_per_frame(c2);
+  spf_ = codec2_samples_per_frame(c2);
+  if (bpf_ != VoxWire::bytesPerFrame(wire_mode) || spf_ != ::samplesPerFrame(wire_mode)) {
+    codec2_destroy(c2);
+    bpf_ = spf_ = 0;
+    return false;
+  }
+  c2_ = c2;
+  return true;
+}
+
+void VoxCodec2Encoder::encode(int16_t* pcm, uint8_t* out) {
+  if (c2_) codec2_encode((struct CODEC2*)c2_, out, pcm);
+}
+
+void VoxCodec2Encoder::end() {
+  if (c2_) codec2_destroy((struct CODEC2*)c2_);
+  c2_ = nullptr;
+  bpf_ = spf_ = 0;
+}
+
 #else  // !VOX_CODEC2_AVAILABLE
 
 bool VoxCodec2Stream::begin(int) { return false; }
 void VoxCodec2Stream::decode(const uint8_t*, int16_t*) {}
 void VoxCodec2Stream::end() {}
 
+bool VoxCodec2Encoder::begin(int) { return false; }
+void VoxCodec2Encoder::encode(int16_t*, uint8_t*) {}
+void VoxCodec2Encoder::end() {}
+
 bool voxCodec2CanDecode(int) { return false; }
 size_t voxCodec2Samples(int, size_t) { return 0; }
 long voxCodec2Decode(int, const uint8_t*, size_t, int16_t*, size_t) { return -1; }
 
 #endif
+
+// ---- VoxMicPrep ----------------------------------------------------------------
+//
+// Codec2 wants 8 kHz speech at a healthy level; the mic gives 16 kHz with a DC
+// offset and a level that depends on how far away the talker is.
+//
+//   mix      (L + R) / 2. If one capsule is silent the AGC makes up the 6 dB.
+//   DC block one-pole high-pass at ~13 Hz.
+//   decimate 31-tap Hamming-windowed sinc low-pass, cutoff 3.4 kHz (well under
+//            the 4 kHz Nyquist of the output), every other output kept.
+//   AGC      peak follower (fast attack, slow release). Gain heads for a peak of
+//            about -8 dBFS; it drops quickly when speech gets loud and rises
+//            slowly, and never rises while the input is down at the noise floor,
+//            so pauses don't get pumped up into hiss.
+//   limiter  soft knee from 24000 towards 32000, so the occasional overshoot
+//            before the AGC catches up rounds off instead of clipping.
+
+namespace {
+
+constexpr float kDcPole      = 0.995f;
+constexpr float kTargetPeak  = 13000.0f;
+constexpr float kNoiseFloor  = 250.0f;    // input peak below this: hold the gain
+constexpr float kMinGain     = 0.5f;
+constexpr float kMaxGain     = 24.0f;
+constexpr float kEnvAttack   = 0.3f;      // per 8 kHz sample
+constexpr float kEnvRelease  = 1.0f / (0.3f * 8000.0f);
+constexpr float kGainDown    = 1.0f / (0.015f * 8000.0f);
+constexpr float kGainUp      = 1.0f / (0.4f * 8000.0f);
+constexpr float kKnee        = 24000.0f;
+constexpr float kCeiling     = 32000.0f;
+
+float g_fir[VoxMicPrep::kTaps];
+bool  g_fir_ready = false;
+
+void makeFir() {
+  if (g_fir_ready) return;
+  const int n = VoxMicPrep::kTaps;
+  const double fc = 3400.0 / VoxMicPrep::kInputRate;   // cycles per input sample
+  const double pi = 3.14159265358979323846;
+  double sum = 0;
+  double h[VoxMicPrep::kTaps];
+  for (int i = 0; i < n; i++) {
+    const double m = i - (n - 1) / 2.0;
+    const double sinc = m == 0 ? 2 * fc : sin(2 * pi * fc * m) / (pi * m);
+    const double win = 0.54 - 0.46 * cos(2 * pi * i / (n - 1));
+    h[i] = sinc * win;
+    sum += h[i];
+  }
+  for (int i = 0; i < n; i++) g_fir[i] = (float)(h[i] / sum);   // unity gain at DC
+  g_fir_ready = true;
+}
+
+}  // namespace
+
+void VoxMicPrep::reset() {
+  makeFir();
+  for (float& v : hist_) v = 0;
+  pos_ = 0;
+  odd_ = false;
+  dc_x_ = dc_y_ = 0;
+  env_ = 0;
+  gain_ = 4.0f;   // a sensible start: speech at arm's length on the T-Deck's mics
+  peak_ = 0;
+}
+
+int16_t VoxMicPrep::level(float s) {
+  const float a = fabsf(s);
+  env_ += (a - env_) * (a > env_ ? kEnvAttack : kEnvRelease);
+  float want = kTargetPeak / (env_ > kNoiseFloor ? env_ : kNoiseFloor);
+  if (want < kMinGain) want = kMinGain;
+  if (want > kMaxGain) want = kMaxGain;
+  if (want < gain_) gain_ += (want - gain_) * kGainDown;
+  else if (env_ > kNoiseFloor) gain_ += (want - gain_) * kGainUp;
+  float v = s * gain_;
+  const float m = fabsf(v);
+  if (m > kKnee) {
+    const float e = m - kKnee;
+    const float r = kKnee + (kCeiling - kKnee) * e / (e + (kCeiling - kKnee));
+    v = v < 0 ? -r : r;
+  }
+  const int out = (int)lrintf(v);
+  const int mag = out < 0 ? -out : out;
+  if (mag > peak_) peak_ = mag;
+  return (int16_t)(out > 32767 ? 32767 : (out < -32768 ? -32768 : out));
+}
+
+void VoxMicPrep::push(float x, int16_t* out, size_t cap, size_t* n) {
+  // DC block, then into the FIR's history.
+  const float y = x - dc_x_ + kDcPole * dc_y_;
+  dc_x_ = x;
+  dc_y_ = y;
+  hist_[pos_] = y;
+  pos_ = (pos_ + 1) % kTaps;
+  odd_ = !odd_;
+  if (odd_) return;   // keep every second filtered sample
+  float acc = 0;
+  int k = pos_;   // oldest sample
+  for (int i = 0; i < kTaps; i++) {
+    acc += g_fir[i] * hist_[k];
+    if (++k == kTaps) k = 0;
+  }
+  if (*n < cap) out[(*n)++] = level(acc);
+}
+
+size_t VoxMicPrep::process(const int16_t* stereo, size_t frames, int16_t* out, size_t cap) {
+  size_t n = 0;
+  if (!stereo || !out) return 0;
+  for (size_t i = 0; i < frames; i++)
+    push(0.5f * ((float)stereo[2 * i] + (float)stereo[2 * i + 1]), out, cap, &n);
+  return n;
+}
+
+size_t VoxMicPrep::processMono(const int16_t* mono, size_t count, int16_t* out, size_t cap) {
+  size_t n = 0;
+  if (!mono || !out) return 0;
+  for (size_t i = 0; i < count; i++) push((float)mono[i], out, cap, &n);
+  return n;
+}
+
+int VoxMicPrep::takePeak() {
+  const int p = peak_;
+  peak_ = 0;
+  return p;
+}

@@ -1,0 +1,50 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+#pragma once
+
+// Records MeshCore Open TAK voice clips on the radio: the board's microphone,
+// through VoxMicPrep, encoded to Codec2 1200 as it's captured, so a clip is
+// ready the moment the user lets go.
+//
+// LilyGo T-Deck / T-Deck Plus: ES7210 mic ADC (I2C 0x40, MIC1+MIC2 on SDOUT1 ->
+// GPIO14), clocked by the S3 as I2S master on I2S_NUM_1 (MCLK 48, BCK 47,
+// WS 21) at 16 kHz. I2S_NUM_0 stays the speaker's, so the two never contend.
+// Other boards: available() is false and the chat keeps a plain send button.
+//
+// start()/stop()/cancel()/take() run on the Arduino loop task (they touch the
+// I2C bus the touch panel and keyboard also use); capture and encoding run on
+// their own task.
+
+#include <stddef.h>
+#include <stdint.h>
+
+namespace VoxMic {
+
+enum State : uint8_t {
+  kIdle = 0,
+  kRecording,   // capturing and encoding
+  kReady,       // stopped; take() the clip
+  kFailed,      // couldn't start or the capture failed; error() says why
+};
+
+// Whether this build has a microphone it can record from.
+bool available();
+
+// Starts recording. False with `err` set when it can't (busy, no memory...).
+bool start(const char** err);
+// Stops; the clip becomes ready (state kReady) within a frame.
+void stop();
+// Stops and throws the recording away.
+void cancel();
+
+State state();
+const char* error();
+// Length of audio captured so far (or of the finished clip).
+uint32_t elapsedMs();
+// Input level for a meter, 0..100 (decays between reads).
+int level();
+
+// Hands over a finished clip: VE3 wire mode, codec frames (free() them), and
+// its length. False (and the recording dropped) if it's shorter than `min_ms`.
+bool take(uint8_t* mode, uint8_t** bits, size_t* len, uint32_t* ms, uint32_t min_ms = 600);
+
+}  // namespace VoxMic

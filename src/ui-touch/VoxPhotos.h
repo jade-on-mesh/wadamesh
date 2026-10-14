@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
-// MeshCore Open TAK photos and voice clips on this radio: wires VoxFetch to the
+// MeshCore Open TAK photos and voice clips on this radio: wires VoxFetch
+// (downloading) and VoxServe (answering downloads of clips recorded here) to the
 // mesh (MyMesh), the internal filesystem (finished photos /vox_<sid>.vi1, voice
-// clips /vox_<sid>.ve3) and the chat UI.
+// clips /vox_<sid>.ve3, received or recorded) and the chat UI.
 // Everything runs on the Arduino loop task, like the mesh and LVGL.
 
 #include <stddef.h>
@@ -19,8 +20,9 @@ namespace VoxPhotos {
 // Where finished photos are kept (the internal filesystem; set once by the UI).
 void setStore(fs::FS* fs);
 
-// Mesh hooks.
-void onDirectText(const char* text, const uint8_t sender_pub[32]);
+// Mesh hooks. onDirectText returns true for a VR3 fetch request (a control
+// message between apps; it never belongs in the chat).
+bool onDirectText(const char* text, const uint8_t sender_pub[32]);
 void onChannelText(const char* text, int channel_idx);   // "Name: VI1:..." as posted
 void onPayload(const uint8_t* data, size_t len, int channel_idx);   // raw (-1) or GRP_DATA 0x5643
 void tick();
@@ -44,5 +46,15 @@ bool loadVoice(uint32_t sid, int* mode, uint8_t** frames, size_t* len);
 bool loadFile(uint32_t sid, bool voice, uint8_t** data, size_t* len);
 // Bumped whenever any photo's status changes; the chat redraws on a change.
 uint32_t version();
+
+// ---- Voice clips recorded on this radio --------------------------------------
+// Stores a clip (taking ownership of `bits`, a malloc'd buffer), makes it
+// available to anyone who asks for it, and writes its VE3 envelope (the text
+// to post in the chat) to `envelope`. False if it couldn't be stored.
+bool addRecording(uint8_t wire_mode, uint8_t* bits, size_t len, uint32_t ms, char* envelope, size_t cap,
+                  uint32_t* sid_out = nullptr);
+// Whether a voice clip with this session id is stored here (recorded or
+// downloaded), so the bubble can play it.
+bool haveVoice(uint32_t sid);
 
 }  // namespace VoxPhotos

@@ -39,8 +39,15 @@ jobs:
           g++ -std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined -I src \
               -o /tmp/test_mediamesh test/test_mediamesh_core.cpp
           /tmp/test_mediamesh
+      - name: VOX serving clips recorded on the radio (Open TAK's request bytes, simulated mesh)
+        run: |
+          g++ -std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined -I src \
+              -o /tmp/test_vox_serve test/test_vox_serve.cpp src/ui-touch/VoxServe.cpp
+          /tmp/test_vox_serve
       - name: VOX voice decoder (Codec2, sample-exact against the app's build)
         run: test/build_vox_voice_test.sh /tmp/vox_voice
+      - name: VOX voice recording (encoder bit-exact against the app's build, mic levelling)
+        run: test/build_vox_record_test.sh /tmp/vox_record
       - name: VOX photo decoder (bit-exact against libaom, sanitizers on)
         run: test/build_vox_av1_test.sh /tmp/vox_av1
       - name: OTP Messenger against OTP_3_RC1.lua (both ways, on the firmware's Lua)

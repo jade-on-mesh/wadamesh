@@ -7,7 +7,9 @@
 // and a TLS handshake overflowed it before), so each job runs on its own 16 KB
 // task like the Reader's fetches, and the worker just waits for it.
 
+#include <esp_heap_caps.h>
 #include <mbedtls/md.h>
+#include <mbedtls/platform.h>
 
 #include "ForkUpdateCore.h"
 
@@ -25,6 +27,36 @@ struct Job {
   int result;               // Latest: N or -1; Slot/Sd: 1 ok, 0 failed
   SemaphoreHandle_t done;
 };
+
+// mbedTLS takes its memory from INTERNAL RAM in these builds
+// (CONFIG_MBEDTLS_INTERNAL_MEM_ALLOC: Arduino's prebuilt esp32s3 SDK, and IDF's
+// default on the P4): two 16 KB record buffers plus the handshake, ~40 KB per
+// connection. With BLE, Wi-Fi and the UI up, that much internal RAM is often not
+// left in one piece, and the handshake fails, which HTTPClient reports as -1
+// ("can't connect"). That was "Update failed: signature: can't connect to
+// github.com (-1)": the update check got through earlier, while there was
+// still room, and the download a while later did not. These boards all have
+// PSRAM, so send mbedTLS there (internal RAM only if PSRAM is exhausted). It
+// covers every TLS client on the device (the Reader too), and is installed
+// once, before the first fork update request.
+static void* tlsCalloc(size_t n, size_t size) {
+  void* p = heap_caps_calloc(n, size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  return p ? p : heap_caps_calloc(n, size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+}
+static void tlsFree(void* p) { heap_caps_free(p); }   // whichever heap it came from
+
+static void tlsUsePsram() {
+  static bool done = false;
+  if (done) return;
+  done = true;
+  if (heap_caps_get_total_size(MALLOC_CAP_SPIRAM) > 0) mbedtls_platform_set_calloc_free(tlsCalloc, tlsFree);
+}
+
+// Internal RAM free and its largest block, in KB, for an error message.
+static void ramNote(char* out, size_t cap) {
+  snprintf(out, cap, "RAM %uK/%uK", (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
+           (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) / 1024));
+}
 
 static void say(Job& j, const char* m) {
   if (j.msg && j.msg_cap) snprintf(j.msg, j.msg_cap, "%s", m);
@@ -60,10 +92,8 @@ static void assetUrl(char* out, size_t cap, const char* tag, const char* file) {
 
 // One HTTPS GET that may be redirected (a release file on github.com is a 302
 // to release-assets.githubusercontent.com, with a long signed URL). Each hop
-// gets a fresh TLS client of its own: following the redirect on the same
-// client, as HTTPClient does by itself, failed on the device with HTTP -1
-// (connection refused) when the second host was reached. Up to 5 hops, and
-// one retry of a hop that couldn't connect.
+// gets a fresh TLS client of its own (and the old one's memory back first).
+// Up to 5 hops, and two retries of a hop that couldn't connect.
 struct Get {
   WiFiClientSecure* c = nullptr;
   HTTPClient* h = nullptr;
@@ -87,7 +117,7 @@ static void hostOf(const String& url, char* out, size_t cap) {
 static bool getFollowing(Job& j, const char* first, Get& g, const char* what) {
   String url = first;
   for (int hop = 0; hop < 5; hop++) {
-    for (int attempt = 0; attempt < 2; attempt++) {
+    for (int attempt = 0; attempt < 3; attempt++) {
       g.close();
       g.c = new (std::nothrow) WiFiClientSecure();
       g.h = new (std::nothrow) HTTPClient();
@@ -99,7 +129,7 @@ static bool getFollowing(Job& j, const char* first, Get& g, const char* what) {
       if (!g.h->begin(*g.c, url)) { g.code = -1; break; }
       g.code = g.h->GET();
       if (g.code > 0) break;
-      vTaskDelay(pdMS_TO_TICKS(1000));   // could not connect: once more
+      vTaskDelay(pdMS_TO_TICKS(1500));   // could not connect: try again
     }
     if (g.code == 200) return true;
     if (g.code == 301 || g.code == 302 || g.code == 303 || g.code == 307 || g.code == 308) {
@@ -111,7 +141,11 @@ static bool getFollowing(Job& j, const char* first, Get& g, const char* what) {
     char host[64], m[112];
     hostOf(url, host, sizeof host);
     if (g.code == 404) snprintf(m, sizeof m, "%s not in the release", what);
-    else if (g.code < 0) snprintf(m, sizeof m, "%s: can't connect to %s (%d)", what, host, g.code);
+    else if (g.code < 0) {
+      char ram[32];
+      ramNote(ram, sizeof ram);
+      snprintf(m, sizeof m, "%s: can't connect to %s (%d, %s)", what, host, g.code, ram);
+    }
     else snprintf(m, sizeof m, "%s: HTTP %d from %s", what, g.code, host);
     say(j, m);
     return false;
@@ -269,6 +303,7 @@ static void taskFn(void* arg) {
 
 // Runs `j` on its own 16 KB task (core 0, beside Wi-Fi) and waits for it.
 static int run(Job& j) {
+  tlsUsePsram();
   j.done = xSemaphoreCreateBinary();
   if (!j.done) { say(j, "out of memory"); return j.kind == Kind::Latest ? -1 : 0; }
   if (xTaskCreatePinnedToCore(taskFn, "fork_upd", 16384, &j, 1, nullptr, 0) != pdPASS) {
