@@ -15000,7 +15000,7 @@ static void mediaMeshInfoRefresh() {
   const mediamesh::Status st = mediamesh::status();
   char v[48];
   if (s_mm_scan_val && lv_obj_is_valid(s_mm_scan_val)) {
-    if (c.mode == mediamesh::MODE_OFF) snprintf(v, sizeof v, "%s", TR("Off"));
+    if (!st.scanning) snprintf(v, sizeof v, "%s", TR("Off"));
     else if (!st.timing.valid) snprintf(v, sizeof v, "%s", TR("Starting"));
     else snprintf(v, sizeof v, "%.1f / %.1f ms", st.timing.dwell_us[0] / 1000.0, st.timing.dwell_us[1] / 1000.0);
     lv_label_set_text(s_mm_scan_val, v);
@@ -15015,9 +15015,11 @@ static void mediaMeshInfoRefresh() {
     if (st.temp2 && st.temp1) {
       snprintf(v, sizeof v, "radio + radio2, %lu min left",
                (unsigned long)((LV_MAX(st.temp1_left_ms, st.temp2_left_ms) + 59999) / 60000));
-    } else if (st.temp2 || st.temp1) {
-      snprintf(v, sizeof v, "%s, %lu min left", st.temp2 ? "radio2" : "main radio",
-               (unsigned long)(((st.temp2 ? st.temp2_left_ms : st.temp1_left_ms) + 59999) / 60000));
+    } else if (st.temp2) {
+      snprintf(v, sizeof v, "%.3f MHz, %lu min left", st.temp2_prof.p.freq,
+               (unsigned long)((st.temp2_left_ms + 59999) / 60000));
+    } else if (st.temp1) {
+      snprintf(v, sizeof v, "main radio, %lu min left", (unsigned long)((st.temp1_left_ms + 59999) / 60000));
     } else {
       snprintf(v, sizeof v, "%s", TR("None"));
     }
@@ -15028,21 +15030,140 @@ static void mediaMeshInfoRefresh() {
     snprintf(v, sizeof v, "~%lu ms / 200 B", (unsigned long)(mediamesh::timeOnAirUs(c.p, pre, 200) / 1000));
     lv_label_set_text(s_mm_toa_val, v);
   }
+  const bool on = st.scanning && st.timing.valid;
+  if (s_mm_sw_val && lv_obj_is_valid(s_mm_sw_val)) {
+    if (!on) snprintf(v, sizeof v, "-");
+    else if (st.switch_samples < 4) snprintf(v, sizeof v, "%s (%u/4)", TR("measuring"), (unsigned)st.switch_samples);
+    else snprintf(v, sizeof v, "%lu us%s", (unsigned long)st.switch_us, st.switch_errors ? " (!)" : "");
+    lv_label_set_text(s_mm_sw_val, v);
+  }
+  if (s_mm_pkt_val && lv_obj_is_valid(s_mm_pkt_val)) {
+    snprintf(v, sizeof v, "RX %lu/%lu  TX %lu/%lu", (unsigned long)st.rx[0], (unsigned long)st.rx[1],
+             (unsigned long)st.tx[0], (unsigned long)st.tx[1]);
+    lv_label_set_text(s_mm_pkt_val, v);
+  }
+  if (s_mm_warn_val && lv_obj_is_valid(s_mm_warn_val)) {
+    const bool shortp = on && c.p.preamble && c.p.preamble < st.timing.need[1];
+    if (!on) snprintf(v, sizeof v, "-");
+    else if (!st.timing.main_ok) snprintf(v, sizeof v, "%s", TR("Main preamble too short"));
+    else if (st.timing.media_capped) snprintf(v, sizeof v, "%s", TR("radio2 preamble capped"));
+    else if (shortp) snprintf(v, sizeof v, "%s %u", TR("Preamble below"), st.timing.need[1]);
+    else snprintf(v, sizeof v, "%s", TR("None"));
+    lv_obj_set_style_text_color(s_mm_warn_val, lv_color_hex(on && (!st.timing.main_ok || st.timing.media_capped || shortp)
+                                                                 ? COLOR_STATUS_DANGER_TEXT : COLOR_SUB), LV_PART_MAIN);
+    lv_label_set_text(s_mm_warn_val, v);
+  }
 }
 
-static void mediaMeshToggleCb(lv_event_t* e) {
-  if (lv_event_get_code(e) != LV_EVENT_VALUE_CHANGED) return;
-  const bool on = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED);
+// ---- radio2 card: the second profile (MEDIAMESH.md) ----------------------------
+static lv_obj_t* s_mm_mode_row = nullptr;   // Off / Listen / Listen + send
+static lv_obj_t* s_mm_use_row = nullptr;    // Photos & voice / Everything / Custom
+static lv_obj_t* s_mm_sw_val = nullptr;
+static lv_obj_t* s_mm_pkt_val = nullptr;
+static lv_obj_t* s_mm_warn_val = nullptr;
+static lv_obj_t* s_mm_t_freq_ta = nullptr;
+static lv_obj_t* s_mm_t_bw_ta = nullptr;
+static lv_obj_t* s_mm_t_sf_ta = nullptr;
+static lv_obj_t* s_mm_t_cr_ta = nullptr;
+static lv_timer_t* s_mm_timer = nullptr;
+
+static int mmModeIndex(const mediamesh::Config& c) {
+  return c.mode == mediamesh::MODE_RXTX ? 2 : c.mode == mediamesh::MODE_RX ? 1 : 0;
+}
+// "Photos & voice": media on radio2, nothing else crosses (the MediaMesh setup).
+// "Everything": all traffic on both. Anything else set from the terminal: Custom.
+static int mmUseIndex(const mediamesh::Config& c) {
+  if (c.media == mediamesh::TX_RADIO2 && c.cross == mediamesh::CROSS_OFF) return 0;
+  if (c.media == mediamesh::TX_AUTO && c.cross == mediamesh::CROSS_ON) return 1;
+  return 2;
+}
+
+static void mediaMeshRefreshChoices() {
+  const mediamesh::Config& c = mediamesh::config();
+  if (s_mm_mode_row && lv_obj_is_valid(s_mm_mode_row)) setChoicePick(s_mm_mode_row, mmModeIndex(c));
+  if (s_mm_use_row && lv_obj_is_valid(s_mm_use_row)) setChoicePick(s_mm_use_row, mmUseIndex(c), c.mode != mediamesh::MODE_OFF);
+}
+
+static void mmModeCb(lv_event_t* e) {
+  if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+  const int i = setChoiceIndex(e);
+  if (i < 0 || i > 2) return;
   mediamesh::Config c = mediamesh::config();
-  c.mode = on ? mediamesh::MODE_RXTX : mediamesh::MODE_OFF;
-  if (on) {
-    // Photos and voice on radio2, everything else on the main mesh only.
-    c.media = mediamesh::TX_RADIO2;
+  const bool was_off = c.mode == mediamesh::MODE_OFF;
+  c.mode = i == 2 ? mediamesh::MODE_RXTX : i == 1 ? mediamesh::MODE_RX : mediamesh::MODE_OFF;
+  if (was_off && c.mode != mediamesh::MODE_OFF && c.media == mediamesh::TX_AUTO && c.cross == mediamesh::CROSS_AUTO) {
+    c.media = mediamesh::TX_RADIO2;   // never set up: start as MediaMesh (photos and voice)
     c.cross = mediamesh::CROSS_OFF;
   }
   mediamesh::set(c);
+  mediaMeshRefreshChoices();
   mediaMeshInfoRefresh();
-  if (g_lv.task) g_lv.task->showAlert(on ? TR("Photos and voice on MediaMesh") : TR("MediaMesh off"), 1400);
+  if (g_lv.task) {
+    g_lv.task->showAlert(i == 0 ? TR("radio2 off") : i == 1 ? TR("radio2 listening") : TR("radio2 listening and sending"), 1300);
+  }
+}
+
+static void mmUseCb(lv_event_t* e) {
+  if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+  const int i = setChoiceIndex(e);
+  mediamesh::Config c = mediamesh::config();
+  if (i == 0) { c.media = mediamesh::TX_RADIO2; c.cross = mediamesh::CROSS_OFF; }
+  else if (i == 1) { c.media = mediamesh::TX_AUTO; c.cross = mediamesh::CROSS_ON; }
+  else {
+    if (g_lv.task) g_lv.task->showAlert(TR("Custom: use tx.media and radio2.cross in the Terminal"), 2200);
+    mediaMeshRefreshChoices();
+    return;
+  }
+  mediamesh::set(c);
+  mediaMeshRefreshChoices();
+  if (g_lv.task) {
+    g_lv.task->showAlert(i == 0 ? TR("Photos and voice on radio2") : TR("Everything on both frequencies"), 1400);
+  }
+}
+
+// Runs one radio command (as an app would) and shows a refusal.
+static bool mmRunCli(const char* cmd) {
+  char reply[160];
+  if (!mediamesh::runCli(cmd, reply, sizeof reply)) return false;
+  if (strncmp(reply, "OK", 2) != 0 && g_lv.task) { g_lv.task->showAlert(reply, 2600); return false; }
+  return true;
+}
+
+static void mmTempCb(lv_event_t* e) {
+  if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+  const int i = setChoiceIndex(e);
+  kbMirrorSyncToReal();
+  if (i == 3) {
+    if (mmRunCli("set tempradio2 off") && g_lv.task) g_lv.task->showAlert(TR("Temporary radio2 stopped"), 1300);
+    mediaMeshInfoRefresh();
+    return;
+  }
+  static const uint16_t kMinutes[3] = { 15, 60, 120 };
+  if (i < 0 || i > 2) return;
+  float freq = 0.0f, bw = 0.0f;
+  int sf = 0, cr = 0;
+  if (!parseFloatField(s_mm_t_freq_ta, freq) || !parseFloatField(s_mm_t_bw_ta, bw) ||
+      !parseIntField(s_mm_t_sf_ta, sf) || !parseIntField(s_mm_t_cr_ta, cr)) {
+    if (g_lv.task) g_lv.task->showAlert(TR("Fill in the temporary radio2 settings"), 1600);
+    return;
+  }
+  char cmd[96];
+  snprintf(cmd, sizeof cmd, "set tempradio2 %.3f,%g,%d,%d,rxtx,%u", freq, bw, sf, cr, (unsigned)kMinutes[i]);
+  if (mmRunCli(cmd) && g_lv.task) {
+    char msg[48];
+    snprintf(msg, sizeof msg, "%s %u min", TR("Temporary radio2 for"), (unsigned)kMinutes[i]);
+    g_lv.task->showAlert(msg, 1500);
+  }
+  mediaMeshInfoRefresh();
+}
+
+static void mmTimerCb(lv_timer_t* t) {
+  if (!s_mm_scan_val || !lv_obj_is_valid(s_mm_scan_val)) {
+    lv_timer_del(t);
+    s_mm_timer = nullptr;
+    return;
+  }
+  mediaMeshInfoRefresh();
 }
 
 static void mediaMeshSaveCb(lv_event_t* e) {
@@ -15075,17 +15196,30 @@ static void mediaMeshSaveCb(lv_event_t* e) {
 }
 
 static void buildMediaMeshCard() {
-  lv_obj_t* c = setCard("MediaMesh Settings");
+  lv_obj_t* c = setCard("radio2 (MediaMesh)");
   if (!mediamesh::supported()) {
     s_mm_freq_ta = s_mm_bw_ta = s_mm_sf_ta = s_mm_cr_ta = nullptr;
     s_mm_scan_val = s_mm_pre_val = s_mm_toa_val = s_mm_temp_val = nullptr;
-    setNote(c, "This radio can't run MediaMesh. It needs an SX1262 board such as the T-Deck or Heltec V4.");
+    s_mm_mode_row = s_mm_use_row = s_mm_sw_val = s_mm_pkt_val = s_mm_warn_val = nullptr;
+    s_mm_t_freq_ta = s_mm_t_bw_ta = s_mm_t_sf_ta = s_mm_t_cr_ta = nullptr;
+    setNote(c, "This radio can't run a second frequency. It needs an SX1262 board such as the T-Deck or Heltec V4. "
+               "The Terminal still takes tempradio.");
     return;
   }
   const mediamesh::Config& cfg = mediamesh::config();
-  setSwitchRow(c, "Photos & voice on MediaMesh",
-               "Sends and receives Open TAK photos and voice clips on a second, faster frequency. Text stays on the main mesh.",
-               mediamesh::mediaOnRadio2(cfg), mediaMeshToggleCb);
+  {
+    const char* opts[3] = { TR("Off"), TR("Listen"), TR("Listen + send") };
+    s_mm_mode_row = setChoiceRow(c, "radio2", "A second frequency the radio switches to and from. Listen only never sends there.",
+                                 opts, 3, mmModeIndex(cfg), mmModeCb);
+  }
+  {
+    const char* opts[3] = { TR("Photos & voice"), TR("Everything"), TR("Custom") };
+    s_mm_use_row = setChoiceRow(c, "Sent on radio2",
+                                "Photos & voice: Open TAK photos and voice clips, text stays on the main mesh. Everything: "
+                                "every message goes out on both. Per contact or channel: their Radio setting.",
+                                opts, 3, mmUseIndex(cfg), mmUseCb);
+    setChoicePick(s_mm_use_row, mmUseIndex(cfg), cfg.mode != mediamesh::MODE_OFF);
+  }
   lv_obj_t* r1 = setFieldRow(c);
   s_mm_freq_ta = setField(r1, "Frequency (MHz)", "MHz", 15, setFieldW(2));
   s_mm_bw_ta   = setField(r1, "Bandwidth (kHz)", "kHz", 10, setFieldW(2));
@@ -15094,18 +15228,43 @@ static void buildMediaMeshCard() {
   s_mm_cr_ta = setField(r2, "CR", "CR", 2, setFieldW(2));
   char buf[24];
   snprintf(buf, sizeof buf, "%.3f", cfg.p.freq); lv_textarea_set_text(s_mm_freq_ta, buf);
-  snprintf(buf, sizeof buf, "%.1f", cfg.p.bw); lv_textarea_set_text(s_mm_bw_ta, buf);
+  snprintf(buf, sizeof buf, "%g", cfg.p.bw); lv_textarea_set_text(s_mm_bw_ta, buf);
   snprintf(buf, sizeof buf, "%u", (unsigned)cfg.p.sf); lv_textarea_set_text(s_mm_sf_ta, buf);
   snprintf(buf, sizeof buf, "%u", (unsigned)cfg.p.cr); lv_textarea_set_text(s_mm_cr_ta, buf);
   lv_obj_t* const fields[] = { s_mm_freq_ta, s_mm_bw_ta, s_mm_sf_ta, s_mm_cr_ta };
   for (lv_obj_t* ta : fields) lv_obj_add_event_cb(ta, mediaMeshSaveCb, LV_EVENT_DEFOCUSED, nullptr);
-  setNote(c, "Everyone sharing photos must use the same MediaMesh settings. The radio switches between both "
-             "frequencies, so heavy media traffic costs some main-mesh reception.");
-  s_mm_scan_val = setInfoRow(c, "Listen main / media", "");
-  s_mm_pre_val  = setInfoRow(c, "MediaMesh preamble", "");
+  setNote(c, "Everyone sharing radio2 must use the same settings. The radio switches between both "
+             "frequencies, so heavy radio2 traffic costs some main-mesh reception.");
+  s_mm_scan_val = setInfoRow(c, "Listen main / radio2", "");
+  s_mm_pre_val  = setInfoRow(c, "radio2 preamble", "");
   s_mm_toa_val  = setInfoRow(c, "Time on air", "");
-  s_mm_temp_val = setInfoRow(c, "Temporary profile", "");
+  s_mm_sw_val   = setInfoRow(c, "Switch time", "");
+  s_mm_pkt_val  = setInfoRow(c, "Packets main / radio2", "");
+  s_mm_warn_val = setInfoRow(c, "Warnings", "");
+
+  // A different radio2 for a while (tempradio2): back to the above when it ends.
+  lv_obj_t* t = setCard("Temporary radio2");
+  setNote(t, "Use other radio2 settings for a while, for example to meet another group. They end on their own "
+             "or on a restart; the settings above come back.");
+  lv_obj_t* t1 = setFieldRow(t);
+  s_mm_t_freq_ta = setField(t1, "Frequency (MHz)", "MHz", 15, setFieldW(2));
+  s_mm_t_bw_ta   = setField(t1, "Bandwidth (kHz)", "kHz", 10, setFieldW(2));
+  lv_obj_t* t2 = setFieldRow(t);
+  s_mm_t_sf_ta = setField(t2, "SF", "SF", 2, setFieldW(2));
+  s_mm_t_cr_ta = setField(t2, "CR", "CR", 2, setFieldW(2));
+  const mediamesh::Status st = mediamesh::status();
+  const mediamesh::Params tp = st.temp2 ? st.temp2_prof.p : cfg.p;
+  snprintf(buf, sizeof buf, "%.3f", tp.freq); lv_textarea_set_text(s_mm_t_freq_ta, buf);
+  snprintf(buf, sizeof buf, "%g", tp.bw); lv_textarea_set_text(s_mm_t_bw_ta, buf);
+  snprintf(buf, sizeof buf, "%u", (unsigned)tp.sf); lv_textarea_set_text(s_mm_t_sf_ta, buf);
+  snprintf(buf, sizeof buf, "%u", (unsigned)tp.cr); lv_textarea_set_text(s_mm_t_cr_ta, buf);
+  {
+    const char* opts[4] = { TR("15 min"), TR("1 hour"), TR("2 hours"), TR("Stop") };
+    setChoiceRow(t, "Use these for", nullptr, opts, 4, -1, mmTempCb);
+  }
+  s_mm_temp_val = setInfoRow(t, "Running now", "");
   mediaMeshInfoRefresh();
+  if (!s_mm_timer) s_mm_timer = lv_timer_create(mmTimerCb, 1000, nullptr);
 }
 
 static void buildRadioSettings() {
@@ -20374,6 +20533,36 @@ static void actionSheetDeleteCb(lv_event_t* e) {
 
 // "Reset path" — wipes the cached return path so the next send will re-flood
 // instead of routing through a stale hop list. Mirrors MCterm's RSTPath.
+// tx.user from the contact sheet: each tap moves to the next choice of which
+// frequency everything to this contact goes out on (MEDIAMESH.md).
+static const char* txPolicyShort(uint8_t p) {
+  switch (p) {
+    case mediamesh::TX_RADIO: return "main";
+    case mediamesh::TX_RADIO2: return "radio2";
+    case mediamesh::TX_BOTH: return "both";
+    case mediamesh::TX_OFF: return "off";
+    default: return "auto";
+  }
+}
+static void actionSheetRadioCb(lv_event_t* e) {
+  if (lv_event_get_code(e) != LV_EVENT_CLICKED || !g_lv.task) return;
+  ContactInfo c;
+  if (!the_mesh.getContactByIdx(s_action_sheet_mesh_idx, c)) { g_lv.task->showAlert(TR("Contact gone"), 1200); return; }
+  const uint8_t next = (uint8_t)((mediamesh::userPolicy(c.id.pub_key) + 1) % (mediamesh::TX_OFF + 1));
+  if (!mediamesh::setUserPolicy(c.id.pub_key, next)) { g_lv.task->showAlert(TR("Couldn't save (too many choices)"), 1600); return; }
+  lv_obj_t* l = lv_obj_get_child(lv_event_get_target(e), 0);
+  char label[40];
+  snprintf(label, sizeof label, LV_SYMBOL_SHUFFLE "  %s: %s", TR("Radio"), TR(txPolicyShort(next)));
+  if (l) lv_label_set_text(l, label);
+  const uint8_t m = mediamesh::policyMaskNow(next);
+  g_lv.task->showAlert(next == mediamesh::TX_OFF ? TR("Nothing will be sent to this contact")
+                       : next == mediamesh::TX_AUTO ? TR("Sends follow the radio2 settings")
+                       : (next == mediamesh::TX_RADIO2 || next == mediamesh::TX_BOTH) && !(m & 2)
+                           ? TR("radio2 can't send right now")
+                           : next == mediamesh::TX_RADIO ? TR("Sent on the main frequency")
+                           : next == mediamesh::TX_RADIO2 ? TR("Sent on radio2 only") : TR("Sent on both"), 1600);
+}
+
 static void actionSheetResetPathCb(lv_event_t* e) {
   if (lv_event_get_code(e) != LV_EVENT_CLICKED || !g_lv.task) return;
   ContactInfo c;
@@ -22227,6 +22416,15 @@ static void openContactActionSheet(uint32_t mesh_idx, bool is_repeater, const ch
   }
 #endif
   mk_btn(TR(LV_SYMBOL_LOOP  "  Reset path"), actionSheetResetPathCb, 0);
+  // Which frequency this contact's messages go on (radio2); tap to change.
+  if (!from_map && mediamesh::supported()) {
+    ContactInfo _rc;
+    uint8_t _pol = mediamesh::TX_AUTO;
+    if (the_mesh.getContactByIdx(s_action_sheet_mesh_idx, _rc)) _pol = mediamesh::userPolicy(_rc.id.pub_key);
+    static char _radio_lbl[40];
+    snprintf(_radio_lbl, sizeof _radio_lbl, LV_SYMBOL_SHUFFLE "  %s: %s", TR("Radio"), TR(txPolicyShort(_pol)));
+    mk_btn(_radio_lbl, actionSheetRadioCb, 0);
+  }
   // Share this contact with nodes in direct range (#321). Contacts-screen
   // action; the map-marker sheet stays compact.
   if (!from_map)
@@ -24540,7 +24738,7 @@ static bool termIsCliKeyword(const char* word, size_t len) {
   static const char* kw[] = {
     "help", "ver", "version", "clock", "time", "status", "get", "set",
     "advert", "advert.zerohop", "reboot", "wifi", "mqtt", "tcp", "ble", "ota",
-    "ok", "cancel",
+    "ok", "cancel", "del", "tempradio", "normalradio",
   };
   for (const char* k : kw) {
     if (strlen(k) == len && strncasecmp(word, k, len) == 0) return true;
@@ -64708,6 +64906,25 @@ static void chanScopeCloseCb(lv_event_t* e) {
 // "Mute notification sound" toggle in the Channel settings sheet — flips the per-channel
 // message-mute bit (name-keyed; the RX-sound path at the bottom of loop() already honours
 // it). Lets you silence e.g. a busy test channel while the public one still chimes.
+// tx.channel from the channel's settings: which frequency its messages go out on.
+static const char* const kTxPolicyLabels = "Auto\nMain only\nradio2 only\nBoth\nDon't send";
+static void chanScopeRadioCb(lv_event_t* e) {
+  if (lv_event_get_code(e) != LV_EVENT_VALUE_CHANGED || s_chanscope_slot < 0) return;
+  const uint16_t sel = lv_dropdown_get_selected(lv_event_get_target(e));
+  ChannelDetails cd;
+  if (sel > mediamesh::TX_OFF || !the_mesh.getChannelRaw(s_chanscope_slot, cd)) return;
+  uint8_t id[mediamesh::Routes::kIdSize];
+  mediamesh::channelRouteId(cd.channel.secret, id);
+  const bool ok = mediamesh::setChannelPolicyById(id, (uint8_t)sel);
+  if (!g_lv.task) return;
+  if (!ok) { g_lv.task->showAlert(TR("Couldn't save (too many choices)"), 1600); return; }
+  const uint8_t m = mediamesh::policyMaskNow((uint8_t)sel);
+  g_lv.task->showAlert(sel == mediamesh::TX_OFF ? TR("Nothing sent on this channel")
+                       : (sel == mediamesh::TX_RADIO2 || sel == mediamesh::TX_BOTH) && !(m & 2)
+                           ? TR("Saved - radio2 can't send right now")
+                           : TR("Saved"), 1500);
+}
+
 static void chanScopeMuteCb(lv_event_t* e) {
   if (lv_event_get_code(e) != LV_EVENT_VALUE_CHANGED) return;
   if (!s_chanscope_name[0]) return;
@@ -65390,11 +65607,40 @@ static void openChannelScopeModal(int slot, const char* name) {
     lv_obj_add_state(mute_sw, LV_STATE_CHECKED);
   lv_obj_add_event_cb(mute_sw, chanScopeMuteCb, LV_EVENT_VALUE_CHANGED, nullptr);
 
+  // Which frequency this channel's messages go out on (radio2, MEDIAMESH.md).
+  lv_coord_t btn_y = SC(152);
+  if (mediamesh::supported()) {
+    lv_obj_t* rl = lv_label_create(s_chanscope_modal);
+    lv_label_set_text(rl, TR("Send on"));
+    lv_obj_set_style_text_color(rl, lv_color_hex(COLOR_TEXT), LV_PART_MAIN);
+    lv_obj_set_style_text_font(rl, &g_font_14, LV_PART_MAIN);
+    lv_obj_set_pos(rl, SC(8), SC(160));
+    lv_obj_t* dd = lv_dropdown_create(s_chanscope_modal);
+    const lv_coord_t dw = SC(140);
+    lv_obj_set_size(dd, dw, SC(32));
+    lv_obj_set_pos(dd, sw - SC(8) - dw, SC(152));
+    styleDropdown(dd);
+    if (the_mesh.channelBoundToRadio2(slot)) {
+      // #r2- channels are bound to radio2; renaming is the way out.
+      lv_dropdown_set_options(dd, TR("radio2 (#r2- name)"));
+      lv_obj_add_state(dd, LV_STATE_DISABLED);
+    } else {
+      lv_dropdown_set_options(dd, TR(kTxPolicyLabels));
+      lv_dropdown_set_selected(dd, the_mesh.channelTxPolicy(slot));
+      lv_obj_add_event_cb(dd, chanScopeRadioCb, LV_EVENT_VALUE_CHANGED, nullptr);
+    }
+    btn_y = SC(194);
+    // One more row than the small screens fit: let the sheet scroll.
+    lv_obj_add_flag(s_chanscope_modal, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(s_chanscope_modal, LV_DIR_VER);
+    lv_obj_set_style_pad_bottom(s_chanscope_modal, SC(8), LV_PART_MAIN);
+  }
+
   // Save + Blocked users side by side (one row).
   const lv_coord_t half_w = (lv_coord_t)((sw - 24) / 2);
   lv_obj_t* save = lv_btn_create(s_chanscope_modal);
   lv_obj_set_size(save, half_w, SC(34));
-  lv_obj_set_pos(save, 8, SC(152));
+  lv_obj_set_pos(save, 8, btn_y);
   styleButton(save);
   lv_obj_add_event_cb(save, chanScopeSaveCb, LV_EVENT_CLICKED, nullptr);
   lv_obj_t* sl = lv_label_create(save); lv_label_set_text(sl, TR("Save")); lv_obj_center(sl);
@@ -65402,7 +65648,7 @@ static void openChannelScopeModal(int slot, const char* name) {
 
   lv_obj_t* blk = lv_btn_create(s_chanscope_modal);
   lv_obj_set_size(blk, half_w, SC(34));
-  lv_obj_set_pos(blk, 8 + half_w + 8, SC(152));
+  lv_obj_set_pos(blk, 8 + half_w + 8, btn_y);
   styleButton(blk);
   lv_obj_add_event_cb(blk, chanScopeBlockedCb, LV_EVENT_CLICKED, nullptr);
   lv_obj_t* bl = lv_label_create(blk); lv_label_set_text(bl, TR("Blocked users")); lv_obj_center(bl);

@@ -128,6 +128,10 @@ struct Status {
   uint32_t temp2_left_ms = 0;
   bool temp1 = false;             // tempradio running
   uint32_t temp1_left_ms = 0;
+  uint8_t switch_samples = 0;     // retunes measured since the last profile change
+  uint32_t switch_budget_us = 0;  // guarded per-retune allowance in use
+  uint32_t switch_errors = 0;
+  Profile2 temp2_prof;            // the temporary radio2, when temp2
   Timing timing;
 };
 Status status();
