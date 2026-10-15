@@ -53,9 +53,14 @@ class VoxCodec2Stream {
 
 // ---- Recording on the radio --------------------------------------------------
 
-// The mode the radio records in: Codec2 1200, MeshCore Open TAK's default, so a
-// 10 s clip is 10 packets and every VE3 app can play it.
-constexpr int kVoxRecordWireMode = 1;
+// The modes the radio can record in (VE3 wire ids), chosen in Settings > Sound,
+// the same three the app offers:
+//   1200 (1) MeshCore Open TAK's default: a 10 s clip is 10 packets.
+//   1600 (5) clearer, a third more airtime (8 B per 40 ms frame).
+//   3200 (6) clearest, 2.7x the airtime of 1200 (8 B per 20 ms frame).
+// Every VE3 app can play all three.
+constexpr int kVoxRecordWireMode = 1;   // the default
+inline bool voxRecordModeOk(int wire_mode) { return wire_mode == 1 || wire_mode == 5 || wire_mode == 6; }
 
 // Longest clip the radio records, as in the app (VoxVoiceService.maxClipLength).
 constexpr int kVoxMaxRecordSeconds = 20;

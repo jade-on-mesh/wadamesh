@@ -17538,6 +17538,25 @@ static void buildSoundPage() {
     lv_label_set_text_fmt(s_vol_val_lbl, "%d%%", (int)touchPrefsGetSoundVolume());
 #endif
   }
+#if defined(HAS_TDECK_GT911) && CAP_LUA_AUDIO && VOX_CODEC2_AVAILABLE
+  {
+    // The Codec2 mode the mic records in (VoxMic), as in MeshCore Open TAK.
+    lv_obj_t* c = setCard("Voice messages");
+    static const uint8_t kModes[3] = { 1, 5, 6 };
+    const char* opts[3] = { TR("1200 (default)"), TR("1600"), TR("3200") };
+    const uint8_t cur = touchPrefsGetVoiceRecordMode();
+    setChoiceRow(c, "Recording quality",
+                 "Codec2 bit rate. Higher is clearer but takes longer to send: 1600 uses a third "
+                 "more airtime than 1200, 3200 nearly three times as much. Every VE3 app plays all three.",
+                 opts, 3, cur == 6 ? 2 : cur == 5 ? 1 : 0, [](lv_event_t* e) {
+      if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+      const int i = setChoiceIndex(e);
+      if (i < 0 || i > 2) return;
+      touchPrefsSetVoiceRecordMode(kModes[i]);
+      setChoicePick(lv_obj_get_parent(lv_event_get_current_target(e)), i);
+    });
+  }
+#endif
   {
     lv_obj_t* c = setCard("Play a sound for");
     setSwitchRow(c, "Messages", nullptr, touchPrefsGetSoundMessages(), toggleMessageSoundCb);
@@ -41799,7 +41818,7 @@ static void voxBubbleText(const VoxWire::Envelope& env, bool outgoing, char* out
     return;
   }
   if (!voice) { VoxPhotos::statusText(env.sid, out, cap); return; }
-  if (env.kind == VoxWire::kMimi) { snprintf(out, cap, "%s", TR("Voice (Mimi) - can't play on a radio")); return; }
+  if (env.kind == VoxWire::kMimi) { snprintf(out, cap, "%s", TR("Voice (Mimi) - can't play on a standalone")); return; }
   if (!VoxPhotos::canPlay(env)) {
     snprintf(out, cap, "%s", TR(VOX_CODEC2_AVAILABLE && CAP_LUA_AUDIO ? "Voice (Codec2 700C) - not supported here"
                                                                       : "Voice message - no speaker on this radio"));
@@ -69322,6 +69341,7 @@ static void voxVoiceTask(void* arg) {
     Serial.printf("[VOX] voice playback couldn't start: %s\n", err ? err : "codec");
   }
   codec.end();
+  Serial.printf("[VOX] voice task stack: %u bytes unused\n", (unsigned)uxTaskGetStackHighWaterMark(nullptr));
   free(pb->frames);
   free(pb);
   __atomic_store_n(&s_lua_audio_active, false, __ATOMIC_RELEASE);
@@ -69346,8 +69366,9 @@ static bool voxVoicePlay(uint32_t sid, const char** err) {
   __atomic_store_n(&s_lua_audio_active, true, __ATOMIC_RELEASE);
   s_vox_voice_stop = false;
   s_vox_voice_sid = sid;
-  // ~22 KB of Codec2 decode stack (host-measured), from internal RAM while it plays.
-  if (xTaskCreate(voxVoiceTask, "vox_voice", 32 * 1024, pb, 3, nullptr) != pdPASS) {
+  // ~8 KB of Codec2 decode stack (test/test_codec2_stack.c; lib/codec2 keeps its
+  // scratch in the instance, in PSRAM), from internal RAM while it plays.
+  if (xTaskCreate(voxVoiceTask, "vox_voice", 16 * 1024, pb, 3, nullptr) != pdPASS) {
     s_vox_voice_sid = 0;
     __atomic_store_n(&s_lua_audio_active, false, __ATOMIC_RELEASE);
     free(pb->frames);
@@ -69635,7 +69656,7 @@ static void voxMicButtonCb(lv_event_t* e) {
     __atomic_store_n(&s_lua_audio_active, true, __ATOMIC_RELEASE);
     s_mic_owns_audio = true;
     const char* err = nullptr;
-    if (!VoxMic::start(&err)) {
+    if (!VoxMic::start(touchPrefsGetVoiceRecordMode(), &err)) {
       voxMicUiClose();
       g_lv.task->showAlert(TR(err ? err : "Recording failed"), 2200);
       return;

@@ -548,6 +548,10 @@ bool    touchPrefsGetSoundDirect();            // direct/DM chime on/off, defaul
 void    touchPrefsSetSoundDirect(bool on);
 uint8_t touchPrefsGetSoundVolume();            // 0..100, default 70
 void    touchPrefsSetSoundVolume(uint8_t vol);
+/** Codec2 mode voice messages are recorded in, as its VE3 wire id: 1 = 1200
+ *  (default), 5 = 1600, 6 = 3200. Anything else stored reads back as 1. */
+uint8_t touchPrefsGetVoiceRecordMode();
+void    touchPrefsSetVoiceRecordMode(uint8_t wire_mode);
 
 /** Do Not Disturb: silences the incoming-message chime during a daily time
  *  window. Start/end are half-hour slots (0..47, slot = hour*2 + (min>=30)),

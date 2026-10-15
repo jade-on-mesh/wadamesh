@@ -2559,6 +2559,16 @@ uint8_t touchPrefsGetSoundVolume() {
   return v > 100 ? 100 : v;
 }
 void touchPrefsSetSoundVolume(uint8_t vol) { if (vol > 100) vol = 100; if (!s_begun) touchPrefsBegin(); prefsPutUChar("snd_vol", vol); }
+uint8_t touchPrefsGetVoiceRecordMode() {
+  if (!s_begun) touchPrefsBegin();
+  const uint8_t m = s_prefs.getUChar("vox_rec", 1);
+  return (m == 1 || m == 5 || m == 6) ? m : 1;
+}
+void touchPrefsSetVoiceRecordMode(uint8_t m) {
+  if (m != 1 && m != 5 && m != 6) m = 1;
+  if (!s_begun) touchPrefsBegin();
+  prefsPutUChar("vox_rec", m);
+}
 bool touchPrefsGetDndEnabled() { if (!s_begun) touchPrefsBegin(); return s_prefs.getUChar("dnd_en", 0) != 0; }
 void touchPrefsSetDndEnabled(bool on) { if (!s_begun) touchPrefsBegin(); prefsPutUChar("dnd_en", on ? 1 : 0); }
 uint8_t touchPrefsGetDndStartSlot() {

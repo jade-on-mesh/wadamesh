@@ -132,10 +132,11 @@ void codec2_fft_inplace(codec2_fft_cfg cfg, codec2_fft_cpx* inout) {
   // or to allow kiss_fft to allocate RAM
   // second part is just to play safe since first method
   // is much faster and uses less RAM
-  if (cfg->nfft <= 512) {
-    kiss_fft_cpx in[512];
+  kiss_fft_cpx* in = (kiss_fft_cpx*)MALLOC(cfg->nfft * sizeof(kiss_fft_cpx));  /* wadamesh: on the heap, not the stack */
+  if (in) {
     memcpy(in, inout, cfg->nfft * sizeof(kiss_fft_cpx));
     kiss_fft(cfg, in, (kiss_fft_cpx*)inout);
+    FREE(in);
   } else {
     kiss_fft(cfg, (kiss_fft_cpx*)inout, (kiss_fft_cpx*)inout);
   }

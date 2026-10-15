@@ -44,7 +44,8 @@ void estimate_amplitudes(MODEL *model, COMP Sw[], float W[], int est_phase);
 float est_voicing_mbe(C2CONST *c2const, MODEL *model, COMP Sw[], float W[]);
 void make_synthesis_window(C2CONST *c2const, float Pn[]);
 void synthesise(int n_samp, codec2_fftr_cfg fftr_inv_cfg, float Sn_[],
-                MODEL *model, float Pn[], int shift);
+                MODEL *model, float Pn[], int shift,
+                COMP Sw_[], float sw_[]);
 
 #define CODEC2_RAND_MAX 32767
 int codec2_rand(void);

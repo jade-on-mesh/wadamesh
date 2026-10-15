@@ -39,6 +39,7 @@
 
 #include "defines.h"
 #include "kiss_fft.h"
+#include "debug_alloc.h"
 
 #define HPF_BETA 0.125
 
@@ -102,7 +103,6 @@ C2CONST c2const_create(int Fs, float framelength_s) {
 void make_analysis_window(C2CONST *c2const, codec2_fft_cfg fft_fwd_cfg,
                           float w[], float W[]) {
   float m;
-  COMP wshift[FFT_ENC];
   int i, j;
   int m_pitch = c2const->m_pitch;
   int nw = c2const->nw;
@@ -155,7 +155,12 @@ void make_analysis_window(C2CONST *c2const, codec2_fft_cfg fft_fwd_cfg,
        nw/2              nw/2
   */
 
-  COMP temp[FFT_ENC];
+  COMP *wshift = (COMP *)MALLOC(2 * FFT_ENC * sizeof(COMP)); /* wadamesh: on the heap, not the stack */
+  if (wshift == NULL) {
+    for (i = 0; i < FFT_ENC; i++) W[i] = 0.0;
+    return;
+  }
+  COMP *temp = wshift + FFT_ENC;
 
   for (i = 0; i < FFT_ENC; i++) {
     wshift[i].real = 0.0;
@@ -194,6 +199,7 @@ void make_analysis_window(C2CONST *c2const, codec2_fft_cfg fft_fwd_cfg,
     W[i] = temp[i + FFT_ENC / 2].real;
     W[i + FFT_ENC / 2] = temp[i].real;
   }
+  FREE(wshift);
 }
 
 /*---------------------------------------------------------------------------*\
@@ -594,11 +600,11 @@ void synthesise(int n_samp, codec2_fftr_cfg fftr_inv_cfg,
                 float Sn_[],  /* time domain synthesised signal              */
                 MODEL *model, /* ptr to model parameters for this frame      */
                 float Pn[],   /* time domain Parzen window                   */
-                int shift     /* flag used to handle transition frames       */
+                int shift,    /* flag used to handle transition frames       */
+                COMP Sw_[],   /* [FFT_DEC/2+1] scratch: DFT of synthesised signal */
+                float sw_[]   /* [FFT_DEC] scratch: synthesised signal       */
 ) {
   int i, l, j, b;            /* loop variables */
-  COMP Sw_[FFT_DEC / 2 + 1]; /* DFT of synthesised signal */
-  float sw_[FFT_DEC];        /* synthesised signal */
 
   if (shift) {
     /* Update memories */
