@@ -43,6 +43,9 @@
 
 // The profiles a packet about to be sent goes out on (bit 0 primary, bit 1 radio2).
 using MediaMeshClassifier = uint8_t (*)(const uint8_t* raw, int len);
+// The same for the packet the dispatcher is about to send, before it is handed
+// over (its airtime estimate); 0 when not known.
+using MediaMeshPeek = uint8_t (*)();
 // A packet was received on `origin` (0 primary, 1 radio2).
 using MediaMeshOriginSink = void (*)(const uint8_t* raw, int len, uint8_t origin);
 
@@ -71,6 +74,7 @@ class MediaMeshRadio : public Base {
   uint32_t _rx_count[2] = {};
   TaskHandle_t _task = nullptr;
   MediaMeshClassifier _classify = nullptr;
+  MediaMeshPeek _peek = nullptr;
   MediaMeshOriginSink _origin_sink = nullptr;
 
   // The second copy of a packet sent on both profiles.
@@ -87,7 +91,6 @@ class MediaMeshRadio : public Base {
   uint8_t _org[kOriginSlots];
   uint8_t _org_w = 0, _org_r = 0;
   uint32_t _org_seen = 0;
-  uint32_t _done_base = 0;          // events - handled at the last retune
 
   CustomSX1262* chip() { return static_cast<CustomSX1262*>(this->_radio); }
 
@@ -130,14 +133,9 @@ class MediaMeshRadio : public Base {
     const uint32_t n = this->getPacketsRecv();
     while (_org_seen != n) { pushOrigin(_cur); ++_org_seen; }
   }
-  // A packet completed in the radio but not yet lifted out by the drain task.
-  bool rxWaiting() const {
-    const uint32_t done = this->getPacketsRecv() + this->getPacketsRecvErrors() + this->getRxQueueDrops();
-    return (int32_t)(this->getRxEvents() - done - _done_base) > 0;
-  }
-  void markRetune() {
-    _done_base = this->getRxEvents() - (this->getPacketsRecv() + this->getPacketsRecvErrors() + this->getRxQueueDrops());
-  }
+  // A packet completed in the radio but not yet lifted out by the drain task:
+  // the chip's own RX-done flag, which the re-arm after the drain clears.
+  bool rxWaiting() { return (chip()->getIrqFlags() & RADIOLIB_SX126X_IRQ_RX_DONE) != 0; }
 
   // ---- retuning (caller holds the radio mutex) -------------------------------
 
@@ -179,7 +177,6 @@ class MediaMeshRadio : public Base {
                                         : mainPreamble());
     }
     _cur = profile;
-    markRetune();
   }
 
   void sampleSwitch(uint32_t us) {
@@ -222,14 +219,14 @@ class MediaMeshRadio : public Base {
       vTaskDelay(visitTicks(_cur));
       this->radioAcquire();
       if (_scan && !_paused && !_tx && this->isInRecvMode()) {
-        // Stay while a packet is arriving, and briefly (the drain task needs
-        // ~1 ms) while a finished one waits to be lifted out, so it is
-        // credited to this profile.
+        // Stay while a packet is arriving, and while a finished one waits for
+        // the drain task (~1 ms), so every packet is read out on the profile it
+        // came in on and credited to it.
         const bool receiving = this->isReceivingPacket();
         if (receiving || rxWaiting()) {
           const uint32_t now = millis();
           if (!_hold_start) _hold_start = now;
-          if (now - _hold_start < (receiving ? maxHoldMs(_cur) : 5)) {
+          if (now - _hold_start < (receiving ? maxHoldMs(_cur) : 50)) {
             this->radioRelease();
             vTaskDelay(1);
             continue;
@@ -269,7 +266,7 @@ class MediaMeshRadio : public Base {
 
   // ---- configuration ------------------------------------------------------
 
-  void setMediaClassifier(MediaMeshClassifier fn) { _classify = fn; }
+  void setMediaClassifier(MediaMeshClassifier fn, MediaMeshPeek peek = nullptr) { _classify = fn; _peek = peek; }
   void setOriginSink(MediaMeshOriginSink fn) { _origin_sink = fn; }
 
   // The second profile in use (saved or temporary); off stops the scan.
@@ -320,8 +317,7 @@ class MediaMeshRadio : public Base {
       chip()->setPreambleMillis(pm.preambleMillis);
       chip()->setMaxPayloadMillis(pm.payloadMillis);
       _cur = 0;
-      markRetune();
-      this->idle();
+        this->idle();
       this->startRecv();
     }
     this->radioRelease();
@@ -358,8 +354,7 @@ class MediaMeshRadio : public Base {
       _main = _main_saved;
       Base::setParams(freq, bw, sf, cr);
       _cur = 0;
-      markRetune();
-    }
+      }
     if (!first) resetSwitchTest();
     recalc();
     if (first && mediamesh::scanning(_cfg)) { _scan = true; setWarmStandby(true); }
@@ -437,8 +432,13 @@ class MediaMeshRadio : public Base {
     if (!_scan || !_timing.valid) return Base::getEstAirtimeFor(len_bytes);
     const uint32_t a = mediamesh::timeOnAirUs(_main, mainPreamble(), len_bytes);
     const uint32_t b = mediamesh::timeOnAirUs(_cfg.p, _timing.preamble[1], len_bytes);
-    // A packet may go out on both profiles back to back.
-    return (_cfg.mode == mediamesh::MODE_RXTX ? a + b : (a > b ? a : b)) / 1000;
+    // The packet about to go out is known: its own profile(s). Otherwise (the
+    // dispatcher's budget check) the slower of the two.
+    const uint8_t m = _peek ? _peek() : 0;
+    if (m == 1) return a / 1000;
+    if (m == 2) return b / 1000;
+    if (m == 3) return (a + b) / 1000;   // both back to back (no packet free to copy)
+    return (a > b ? a : b) / 1000;
   }
 
   void powerOff() override {

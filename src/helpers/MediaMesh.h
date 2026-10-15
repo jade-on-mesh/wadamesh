@@ -61,17 +61,32 @@ static constexpr uint8_t kNoContext = 0xFF;
  *  (bit 0 primary, bit 1 radio2): for getters' `active=`. */
 uint8_t policyMaskNow(uint8_t policy);
 
-/** The packet manager MyMesh uses: marks each packet as it is queued. */
+/** The policy (Policy, or kNoContext when unknown) of the contact a packet is
+ *  addressed to, for direct sends no wrapper names (the core's keep-alives,
+ *  replies). MyMesh supplies it. */
+using ContactPolicyResolver = uint8_t (*)(const mesh::Packet* pkt);
+void setContactPolicyResolver(ContactPolicyResolver fn);
+
+/** The packet manager MyMesh uses: settles each packet's profiles as it is
+ *  queued (a packet for both becomes two, one per profile), and at send time
+ *  drops profiles that changed since. */
 class MarkingPacketManager : public StaticPoolPacketManager {
  public:
   explicit MarkingPacketManager(int pool_size) : StaticPoolPacketManager(pool_size) {}
   void queueOutbound(mesh::Packet* packet, uint8_t priority, uint32_t scheduled_for) override;
+  mesh::Packet* getNextOutbound(uint32_t now) override;
+  void free(mesh::Packet* packet) override;
 };
 
 // ---- receive ----------------------------------------------------------------
 
-/** The profile a received packet arrived on: 0 primary, 1 radio2. */
-uint8_t originOf(const mesh::Packet* pkt);
+/** Around processing a received packet: takes the profile it arrived on (0
+ *  primary, 1 radio2) and makes it the origin of anything queued meanwhile
+ *  (forwards, ACKs, replies). Returns the previous state for endRx(). */
+uint8_t beginRx(const mesh::Packet* pkt);
+void endRx(uint8_t prev);
+/** The profile the packet being processed arrived on (0 outside one). */
+uint8_t rxOrigin();
 
 /** Whether a second profile is configured now (rx or rxtx): `#r2-` channels
  *  are bound to it. */
