@@ -21,7 +21,7 @@ including its command names, so an app can drive either firmware the same way.
 - **Listen main / media**: how long each scan visit lasts.
 - **MediaMesh preamble**: the preamble this node sends media with (see below).
 
-Default settings: 916.000 MHz, 250 kHz, SF7, CR 4/5. That is about 4× faster than
+Default settings: 911.500 MHz, 250 kHz, SF7, CR 4/5. That is about 4× faster than
 SF7/62.5 for roughly 6 dB less range. Everyone exchanging media has to use the
 same MediaMesh settings.
 
@@ -31,10 +31,10 @@ The radio answers the local CLI frame `CMD_RUN_CLI_COMMAND` (`0x42`) with
 `RESP_CODE_CLI_REPLY` (`0x1D`), with the same command text as mikecarper/MeshCore:
 
 ```text
-get radio2                       > 916.000,250.00,7,5,rxtx    (or "> off")
-set radio2 916.0,250,7,5,rxtx    OK - radio2 916.000,250.00,7,5,rxtx
-set radio2 916.0,250,7,5,rx      listen only
-set radio2 916.0,250,7,5,rxtx,72 with an explicit preamble (symbols)
+get radio2                       > 911.500,250.00,7,5,rxtx    (or "> off")
+set radio2 911.5,250,7,5,rxtx    OK - radio2 911.500,250.00,7,5,rxtx
+set radio2 911.5,250,7,5,rx      listen only
+set radio2 911.5,250,7,5,rxtx,72 with an explicit preamble (symbols)
 set radio2 off
 get tx.media                     > radio2
 set tx.media radio|radio2        where photos and voice are sent

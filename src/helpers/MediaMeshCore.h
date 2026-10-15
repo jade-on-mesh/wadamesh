@@ -47,7 +47,7 @@ struct Config {
 
 // Defaults for a new MediaMesh: same band as the US main mesh, 250 kHz SF7
 // (about 4x faster than SF7/62.5 for ~6 dB less range).
-static constexpr float kDefaultFreq = 916.000f;
+static constexpr float kDefaultFreq = 911.500f;
 static constexpr float kDefaultBw = 250.0f;
 static constexpr uint8_t kDefaultSf = 7;
 static constexpr uint8_t kDefaultCr = 5;
