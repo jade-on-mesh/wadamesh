@@ -14991,6 +14991,9 @@ static lv_obj_t* s_mm_bw_ta = nullptr;
 static lv_obj_t* s_mm_sf_ta = nullptr;
 static lv_obj_t* s_mm_cr_ta = nullptr;
 static lv_obj_t* s_mm_scan_val = nullptr;
+static lv_obj_t* s_mm_sw_val = nullptr;
+static lv_obj_t* s_mm_pkt_val = nullptr;
+static lv_obj_t* s_mm_warn_val = nullptr;
 static lv_obj_t* s_mm_pre_val = nullptr;
 static lv_obj_t* s_mm_toa_val = nullptr;
 static lv_obj_t* s_mm_temp_val = nullptr;
@@ -15058,9 +15061,6 @@ static void mediaMeshInfoRefresh() {
 // ---- radio2 card: the second profile (MEDIAMESH.md) ----------------------------
 static lv_obj_t* s_mm_mode_row = nullptr;   // Off / Listen / Listen + send
 static lv_obj_t* s_mm_use_row = nullptr;    // Photos & voice / Everything / Custom
-static lv_obj_t* s_mm_sw_val = nullptr;
-static lv_obj_t* s_mm_pkt_val = nullptr;
-static lv_obj_t* s_mm_warn_val = nullptr;
 static lv_obj_t* s_mm_t_freq_ta = nullptr;
 static lv_obj_t* s_mm_t_bw_ta = nullptr;
 static lv_obj_t* s_mm_t_sf_ta = nullptr;
