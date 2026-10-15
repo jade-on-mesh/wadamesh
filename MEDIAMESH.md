@@ -133,7 +133,9 @@ packets received on radio2 reach it, and its packets are forwarded on radio2.
 `set tx.channel` can't change that; rename the channel instead. With radio2 off
 the prefix does nothing. If you have both `#name` and `#r2-name`, a packet heard
 on radio2 goes to `#r2-name` and one heard on the main profile to `#name`.
-`#r2-` alone, or nested prefixes, are refused.
+A packet heard on the main profile that only an `#r2-` channel could open is
+dropped before it is marked as seen, so the same packet arriving on radio2 is
+still taken. `#r2-` alone, or nested prefixes, are refused.
 
 ### Diagnostics
 
@@ -199,9 +201,6 @@ radio2 commands with an error. `tempradio` works on every board.
   profiles, as with mikecarper's dual-profile bench results (197/200 packets).
 - Listen-before-talk checks the profile the radio is on when the packet's turn
   comes, which may not be the one it is about to send on.
-- A `#r2-` channel's packet heard on the main profile is still marked as seen
-  (the MeshCore core does that before decrypting), so the same packet arriving
-  later on radio2 is ignored. mikecarper/MeshCore avoids this in its core.
 - Settings are stored separately from the node preferences (NVS keys
   `mediamesh`, `mmroutes`) and are not in the settings backup yet.
 

@@ -334,6 +334,8 @@ protected:
  protected:
   /** Configured slot for a channel key, preferring by the received profile. */
   int findChannelSlotForRx(const mesh::GroupChannel& ch);
+  /** False for a main-profile channel packet only a `#r2-` channel could take. */
+  bool groupPacketAllowedHere(mesh::Packet* pkt);
 
   void sendFloodScoped(const TransportKey& scope, mesh::Packet* pkt, uint32_t delay_millis);
   // Meshcomod: synthetic local command contact (no RF)

@@ -5761,10 +5761,37 @@ mesh::DispatcherAction MyMesh::onRecvPacket(mesh::Packet* pkt) {
   const uint8_t prev = mediamesh::beginRx(pkt);
   const uint8_t prev_origin = _rx_origin;
   _rx_origin = mediamesh::rxOrigin();
+  if (!groupPacketAllowedHere(pkt)) {
+    // Dropped before the core marks it as seen (it does that before looking at
+    // channels), so the same packet arriving on radio2 is still taken.
+    _rx_origin = prev_origin;
+    mediamesh::endRx(prev);
+    return ACTION_RELEASE;
+  }
   const mesh::DispatcherAction a = BaseChatMesh::onRecvPacket(pkt);
   _rx_origin = prev_origin;
   mediamesh::endRx(prev);
   return a;
+}
+
+// A channel packet heard on the main profile that only an `#r2-` channel could
+// take: an `#r2-` slot's key opens it, and no slot the main profile reaches has
+// that key. Only an authenticated match counts, never the one-byte channel hash
+// alone, so unrelated channels and relaying are untouched. As
+// mikecarper/MeshCore's allowGroupPacketOnRadio().
+bool MyMesh::groupPacketAllowedHere(mesh::Packet* pkt) {
+  if (_rx_origin != 0 || !pkt || pkt->payload_len < 3 || pkt->payload_len > MAX_PACKET_PAYLOAD) return true;
+  const uint8_t t = pkt->getPayloadType();
+  if ((t != PAYLOAD_TYPE_GRP_TXT && t != PAYLOAD_TYPE_GRP_DATA) || !mediamesh::radio2Defined()) return true;
+  for (int i = 0; i < MAX_GROUP_CHANNELS; i++) {
+    ChannelDetails cd;
+    if (!getChannel(i, cd) || !channelSlotConfigured(cd) || cd.channel.hash[0] != pkt->payload[0]) continue;
+    if (mediamesh::parseAlias(cd.name).kind != mediamesh::ALIAS_R2) continue;
+    uint8_t data[MAX_PACKET_PAYLOAD];
+    if (mesh::Utils::MACThenDecrypt(cd.channel.secret, data, pkt->payload + 1, pkt->payload_len - 1) <= 0) continue;
+    return findConfiguredChannelIdx(cd.channel) >= 0;   // an ordinary slot with this key takes it
+  }
+  return true;
 }
 
 void MyMesh::handleReturnPathRetry(const ContactInfo& contact, const uint8_t* path, uint8_t path_len) {
