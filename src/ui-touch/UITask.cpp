@@ -42021,8 +42021,20 @@ static void chatVirtEnsureMsgIdx() {
 }
 
 static volatile uint32_t s_vox_voice_sid = 0;   // voice clip playing, 0 when quiet (player below)
-// What a photo or voice bubble says, from the clip's download / playback state.
+static void voxBubbleTextState(const VoxWire::Envelope& env, bool outgoing, char* out, size_t cap);
+
+// What a photo or voice bubble says, from the clip's download / playback state,
+// with how a downloaded clip got here ("Received via MediaMesh") when known.
 static void voxBubbleText(const VoxWire::Envelope& env, bool outgoing, char* out, size_t cap) {
+  voxBubbleTextState(env, outgoing, out, cap);
+  if (outgoing || !out || cap == 0) return;
+  const char* via = VoxPhotos::viaText(env.sid);
+  if (!via) return;
+  const size_t used = strlen(out);
+  if (used + 2 < cap) snprintf(out + used, cap - used, "\n%s", TR(via));
+}
+
+static void voxBubbleTextState(const VoxWire::Envelope& env, bool outgoing, char* out, size_t cap) {
   const bool voice = env.kind != VoxWire::kImage;
   if (outgoing) {
     // A clip recorded here plays back from the bubble, like a received one.
@@ -42072,10 +42084,10 @@ static void chatParseMessageDisplay(const UITask::UIMessage& m, bool channel_mod
   }
   // A MeshCore Open TAK photo announcement reads as a photo and its download
   // state, not as the "VI1:..." envelope it is on the wire.
-  char vox_line[96];
+  char vox_line[120];
   VoxWire::Envelope vox_env;
   if (VoxPhotos::parse(d.show_text, &vox_env)) {
-    char st[72];
+    char st[104];
     voxBubbleText(vox_env, m.outgoing, st, sizeof st);
     snprintf(vox_line, sizeof vox_line, "%s  %s",
              vox_env.kind == VoxWire::kImage ? LV_SYMBOL_IMAGE : LV_SYMBOL_AUDIO, st);

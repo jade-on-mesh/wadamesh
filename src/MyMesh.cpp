@@ -3587,7 +3587,7 @@ void MyMesh::onChannelDataRecv(const mesh::GroupChannel &channel, mesh::Packet *
   if (resolved_idx < 0 || resolved_idx >= MAX_GROUP_CHANNELS) return;   // not one of our channels
 
 #ifdef DISPLAY_CLASS
-  if (data_type == VoxWire::kChannelDataType) VoxPhotos::onPayload(data, data_len, resolved_idx);
+  if (data_type == VoxWire::kChannelDataType) VoxPhotos::onPayload(data, data_len, resolved_idx, rxVia());
   if (data_type == TeamWire::kDataType) teamOnChannelData(resolved_idx, data, data_len);   // Open TAK team
   if (_ui) _ui->onChannelData((uint8_t)resolved_idx, data_type, data, data_len, pkt->isRouteFlood());
 #endif
@@ -3602,7 +3602,7 @@ void MyMesh::onChannelDataRecv(const mesh::GroupChannel &channel, mesh::Packet *
   int i = 0;
   out_frame[i++] = RESP_CODE_CHANNEL_DATA_RECV;
   out_frame[i++] = (int8_t)(pkt->getSNR() * 4);
-  out_frame[i++] = 0; // reserved1
+  out_frame[i++] = rxViaFrameTag(0); // reserved1: the profile it arrived on, when known (MEDIAMESH.md)
   out_frame[i++] = 0; // reserved2
   out_frame[i++] = (uint8_t)resolved_idx;
   out_frame[i++] = pkt->isRouteFlood() ? pkt->path_len : 0xFF;
@@ -3974,7 +3974,7 @@ void MyMesh::discoverUpsert(const uint8_t* pk, uint8_t pklen, uint8_t node_type,
 
 void MyMesh::onRawDataRecv(mesh::Packet *packet) {
 #ifdef DISPLAY_CLASS
-  VoxPhotos::onPayload(packet->payload, packet->payload_len, -1);   // photo packets for this radio
+  VoxPhotos::onPayload(packet->payload, packet->payload_len, -1, rxVia());   // photo packets for this radio
 #endif
   if (packet->payload_len + 4 > sizeof(out_frame)) {
     MESH_DEBUG_PRINTLN("onRawDataRecv(), payload_len too long: %d", packet->payload_len);
@@ -3984,7 +3984,7 @@ void MyMesh::onRawDataRecv(mesh::Packet *packet) {
   out_frame[i++] = PUSH_CODE_RAW_DATA;
   out_frame[i++] = (int8_t)(_radio->getLastSNR() * 4);
   out_frame[i++] = (int8_t)(_radio->getLastRSSI());
-  out_frame[i++] = 0xFF; // reserved (possibly path_len in future)
+  out_frame[i++] = rxViaFrameTag(0xFF); // reserved: the profile it arrived on, when known (MEDIAMESH.md)
   memcpy(&out_frame[i], packet->payload, packet->payload_len);
   i += packet->payload_len;
 
@@ -5775,6 +5775,20 @@ uint8_t MyMesh::contactPolicyBySecret(const uint8_t* secret) {
     if (memcmp(c.getSharedSecret(self_id), secret, PUB_KEY_SIZE) == 0) return contactTxPolicy(c);
   }
   return mediamesh::kNoContext;
+}
+
+// The profile the packet being handled arrived on, while radio2 is configured:
+// 0 main mesh, 1 radio2; 0xFF when radio2 is off (everything is the main mesh,
+// so nothing worth showing).
+uint8_t MyMesh::rxVia() const {
+  return mediamesh::radio2Defined() ? (_rx_origin ? 1 : 0) : 0xFF;
+}
+
+// rxVia() for the app, in a frame's reserved byte: 0xA0 main mesh, 0xA1 radio2,
+// or `none` (what stock firmware puts there) when not known.
+uint8_t MyMesh::rxViaFrameTag(uint8_t none) const {
+  const uint8_t via = rxVia();
+  return via == 0xFF ? none : (uint8_t)(0xA0 | via);
 }
 
 mesh::DispatcherAction MyMesh::onRecvPacket(mesh::Packet* pkt) {

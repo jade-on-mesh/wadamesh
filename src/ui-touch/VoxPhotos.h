@@ -24,7 +24,9 @@ void setStore(fs::FS* fs);
 // message between apps; it never belongs in the chat).
 bool onDirectText(const char* text, const uint8_t sender_pub[32]);
 void onChannelText(const char* text, int channel_idx);   // "Name: VI1:..." as posted
-void onPayload(const uint8_t* data, size_t len, int channel_idx);   // raw (-1) or GRP_DATA 0x5643
+// raw (-1) or GRP_DATA 0x5643; `via` is the radio profile it arrived on
+// (VoxFetch::kViaMain / kViaRadio2, or kViaUnknown).
+void onPayload(const uint8_t* data, size_t len, int channel_idx, uint8_t via = VoxFetch::kViaUnknown);
 void tick();
 
 // UI side. `text` is a message body as shown (sender already split off).
@@ -35,6 +37,8 @@ void request(const VoxWire::Envelope& env, const uint8_t* dm_pub, const char* se
              int channel_idx);
 VoxFetch::Status status(uint32_t sid, int* received = nullptr, int* total = nullptr);
 const char* statusText(uint32_t sid, char* buf, size_t cap);
+// "Received via MediaMesh" etc. for a finished download, or nullptr when not known.
+const char* viaText(uint32_t sid);
 // Whether this radio fetches the clip (photos; Codec2 voice where there's a
 // speaker and the mode is built in) and whether it can play it.
 bool canFetch(const VoxWire::Envelope& env);

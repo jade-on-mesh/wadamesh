@@ -72,8 +72,13 @@ class VoxFetch {
   // Start, or retry after a failure (a tap on the bubble). False if unknown.
   bool request(uint32_t sid);
 
+  // Which radio profile a payload arrived on (MediaMesh), when known.
+  static constexpr uint8_t kViaMain = 0;
+  static constexpr uint8_t kViaRadio2 = 1;
+  static constexpr uint8_t kViaUnknown = 0xFF;
+
   // A raw-data payload (channel < 0) or a GRP_DATA 0x5643 payload.
-  void onPayload(const uint8_t* data, size_t len, int channel);
+  void onPayload(const uint8_t* data, size_t len, int channel, uint8_t via = kViaUnknown);
 
   // Timeouts; call every loop iteration.
   void tick();
@@ -84,6 +89,13 @@ class VoxFetch {
 
   // Short human status for a bubble, e.g. "Downloading 12/36" or "Voice 7s - tap to play".
   const char* statusText(uint32_t sid, char* buf, size_t cap) const;
+
+  // How a downloaded clip's packets arrived: bit 0 main mesh, bit 1 radio2
+  // (MediaMesh); 0 when not known (radio2 off, or downloaded before a reboot).
+  uint8_t via(uint32_t sid) const;
+  // "Received via MediaMesh", "Received via main mesh", "Received via
+  // MediaMesh and main mesh", or nullptr for a via() of 0.
+  static const char* viaText(uint8_t via);
 
  private:
   struct Session {
@@ -113,6 +125,7 @@ class VoxFetch {
     uint32_t deadline = 0;
     uint32_t last_touch = 0;
     const char* note = nullptr;   // why it's unavailable
+    uint16_t via_count[2] = {0, 0};   // packets taken from the main mesh / radio2
   };
 
   Session* find(uint32_t sid);
@@ -123,7 +136,7 @@ class VoxFetch {
   Method choose(Session& s);
   void attempt(Session& s);
   void onTimeout(Session& s);
-  void accept(Session& s, const VoxWire::Packet& p);
+  void accept(Session& s, const VoxWire::Packet& p, uint8_t via = kViaUnknown);
   void complete(Session& s);
   void fail(Session& s, const char* why);
   int hops(const Session& s);
