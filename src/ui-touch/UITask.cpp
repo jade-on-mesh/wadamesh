@@ -4786,8 +4786,7 @@ static void drawRemotePlaceholder(bool exit_armed = false) {
   // underneath a 98 px logo. The outlined control is actionable with the
   // encoder knob; SPACE twice remains the keyboard fallback.
   if (W >= H) {
-    display.writePixelsRGB565(18, (H - WADAMESH_MARK_H) / 2,
-                              WADAMESH_MARK_W, WADAMESH_MARK_H, WADAMESH_MARK_RGB565);
+    wadameshDrawMark(display, 18, (H - WADAMESH_MARK_H) / 2);
     const int panel_x = 190;
     const int panel_w = W - panel_x - 14;
     display.setColor((ColorVal)0xFFFF);
@@ -4817,8 +4816,7 @@ static void drawRemotePlaceholder(bool exit_armed = false) {
     display.setColor((ColorVal)0xFFE0);
     display.drawTextCentered(panel_x + panel_w / 2, 180, "or press SPACE twice within 3s");
   } else {
-    display.writePixelsRGB565((W - WADAMESH_MARK_W) / 2, 18,
-                              WADAMESH_MARK_W, WADAMESH_MARK_H, WADAMESH_MARK_RGB565);
+    wadameshDrawMark(display, (W - WADAMESH_MARK_W) / 2, 18);
     display.setColor((ColorVal)0xFFFF);
     display.setTextSize(2);
     display.drawTextCentered(W / 2, 130, "REMOTE UI");
@@ -4850,8 +4848,7 @@ static void drawRemotePlaceholder(bool exit_armed = false) {
   // the UI's 2x scale (size 1 = 28 px, size 2 = 56 px), so the spacing is laid out for that,
   // not for the ~8 px text the generic layout below assumes. writePixelsRGB565 upscales 2x on
   // these panels, so the mark is placed in half-resolution coordinates and lands centred at 2x.
-  display.writePixelsRGB565((W / 2 - WADAMESH_MARK_W) / 2, 80,
-                            WADAMESH_MARK_W, WADAMESH_MARK_H, WADAMESH_MARK_RGB565);
+  wadameshDrawMark(display, (W / 2 - WADAMESH_MARK_W) / 2, 80);
   display.setColor((ColorVal)0xFFFF);
   display.setTextSize(2);
   display.drawTextCentered(W / 2, 400, "REMOTE MODE");
@@ -4876,8 +4873,7 @@ static void drawRemotePlaceholder(bool exit_armed = false) {
   // wadamesh mesh mark up top (same white-on-black artwork as the boot splash). The
   // touch DisplayDriver runs at scale 1.0, so writePixelsRGB565 shares text coords.
   const int ly = (H >= 288) ? 46 : 14;   // portrait panels have room to breathe; landscape sits high
-  display.writePixelsRGB565((W - WADAMESH_MARK_W) / 2, ly,
-                            WADAMESH_MARK_W, WADAMESH_MARK_H, WADAMESH_MARK_RGB565);
+  wadameshDrawMark(display, (W - WADAMESH_MARK_W) / 2, ly);
   int y = ly + WADAMESH_MARK_H + 18;
   // Prominent title (the logo already carries the brand — no redundant "wadamesh" line).
   display.setColor((ColorVal)0xFFFF);
@@ -14997,6 +14993,7 @@ static lv_obj_t* s_mm_cr_ta = nullptr;
 static lv_obj_t* s_mm_scan_val = nullptr;
 static lv_obj_t* s_mm_pre_val = nullptr;
 static lv_obj_t* s_mm_toa_val = nullptr;
+static lv_obj_t* s_mm_temp_val = nullptr;
 
 static void mediaMeshInfoRefresh() {
   const mediamesh::Config& c = mediamesh::config();
@@ -15013,6 +15010,19 @@ static void mediaMeshInfoRefresh() {
     else snprintf(v, sizeof v, "-");
     lv_label_set_text(s_mm_pre_val, v);
   }
+  if (s_mm_temp_val && lv_obj_is_valid(s_mm_temp_val)) {
+    // tempradio / tempradio2 from the CLI (MEDIAMESH.md): RAM-only, with a timer.
+    if (st.temp2 && st.temp1) {
+      snprintf(v, sizeof v, "radio + radio2, %lu min left",
+               (unsigned long)((LV_MAX(st.temp1_left_ms, st.temp2_left_ms) + 59999) / 60000));
+    } else if (st.temp2 || st.temp1) {
+      snprintf(v, sizeof v, "%s, %lu min left", st.temp2 ? "radio2" : "main radio",
+               (unsigned long)(((st.temp2 ? st.temp2_left_ms : st.temp1_left_ms) + 59999) / 60000));
+    } else {
+      snprintf(v, sizeof v, "%s", TR("None"));
+    }
+    lv_label_set_text(s_mm_temp_val, v);
+  }
   if (s_mm_toa_val && lv_obj_is_valid(s_mm_toa_val)) {
     const uint16_t pre = st.timing.valid ? st.timing.preamble[1] : 32;
     snprintf(v, sizeof v, "~%lu ms / 200 B", (unsigned long)(mediamesh::timeOnAirUs(c.p, pre, 200) / 1000));
@@ -15025,7 +15035,11 @@ static void mediaMeshToggleCb(lv_event_t* e) {
   const bool on = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED);
   mediamesh::Config c = mediamesh::config();
   c.mode = on ? mediamesh::MODE_RXTX : mediamesh::MODE_OFF;
-  c.route = on ? mediamesh::ROUTE_RADIO2 : mediamesh::ROUTE_RADIO;
+  if (on) {
+    // Photos and voice on radio2, everything else on the main mesh only.
+    c.media = mediamesh::TX_RADIO2;
+    c.cross = mediamesh::CROSS_OFF;
+  }
   mediamesh::set(c);
   mediaMeshInfoRefresh();
   if (g_lv.task) g_lv.task->showAlert(on ? TR("Photos and voice on MediaMesh") : TR("MediaMesh off"), 1400);
@@ -15064,7 +15078,7 @@ static void buildMediaMeshCard() {
   lv_obj_t* c = setCard("MediaMesh Settings");
   if (!mediamesh::supported()) {
     s_mm_freq_ta = s_mm_bw_ta = s_mm_sf_ta = s_mm_cr_ta = nullptr;
-    s_mm_scan_val = s_mm_pre_val = s_mm_toa_val = nullptr;
+    s_mm_scan_val = s_mm_pre_val = s_mm_toa_val = s_mm_temp_val = nullptr;
     setNote(c, "This radio can't run MediaMesh. It needs an SX1262 board such as the T-Deck or Heltec V4.");
     return;
   }
@@ -15090,6 +15104,7 @@ static void buildMediaMeshCard() {
   s_mm_scan_val = setInfoRow(c, "Listen main / media", "");
   s_mm_pre_val  = setInfoRow(c, "MediaMesh preamble", "");
   s_mm_toa_val  = setInfoRow(c, "Time on air", "");
+  s_mm_temp_val = setInfoRow(c, "Temporary profile", "");
   mediaMeshInfoRefresh();
 }
 
@@ -24184,7 +24199,11 @@ static bool sendGroupMessageScoped(int slot, ChannelDetails& cd, uint32_t ts, co
   char chan_rgn[TOUCH_REGION_SCOPE_MAXLEN] = {0};
   if (slot >= 0) touchPrefsGetChannelScope(slot, chan_rgn, sizeof(chan_rgn));
   const bool pushed = the_mesh.pushChannelScope(chan_rgn);
-  const bool ok = the_mesh.sendGroupMessage(ts, cd.channel, sender, (char*)text, (int)strlen(text));
+  bool ok;
+  {
+    MyMesh::TxChannelSlot tx_slot(the_mesh, slot);   // the slot's radio2 routing
+    ok = the_mesh.sendGroupMessage(ts, cd.channel, sender, (char*)text, (int)strlen(text));
+  }
   if (pushed) the_mesh.popChannelScope();
   return ok;
 }
@@ -71737,8 +71756,12 @@ bool UITask::sendComposerToActiveThread(const char* override_text) {
     char chan_rgn[TOUCH_REGION_SCOPE_MAXLEN] = {0};
     touchPrefsGetChannelScope(slot, chan_rgn, sizeof(chan_rgn));
     const bool scope_pushed = the_mesh.pushChannelScope(chan_rgn);
-    const bool grp_sent = the_mesh.sendGroupMessage(ts, cd.channel, sender,
-                              truncated, static_cast<int>(strlen(truncated)));
+    bool grp_sent;
+    {
+      MyMesh::TxChannelSlot tx_slot(the_mesh, slot);   // the slot's radio2 routing
+      grp_sent = the_mesh.sendGroupMessage(ts, cd.channel, sender,
+                                           truncated, static_cast<int>(strlen(truncated)));
+    }
     if (scope_pushed) the_mesh.popChannelScope();
     if (!grp_sent) {
       showAlert(TR("Send failed"), 1200);

@@ -1928,6 +1928,7 @@ int MyMesh::sendMessage(const ContactInfo& recipient, uint32_t timestamp, uint8_
     return MSG_SEND_FAILED;
   }
 
+  TxContext tx_ctx(contactTxPolicy(recipient));
   mesh::Packet* held[COMPANION_TEXT_QUEUE_CAPACITY] = {};
   uint8_t held_priorities[COMPANION_TEXT_QUEUE_CAPACITY] = {};
   uint32_t held_schedules[COMPANION_TEXT_QUEUE_CAPACITY] = {};
@@ -1985,6 +1986,7 @@ int MyMesh::sendCommandData(const ContactInfo& recipient, uint32_t timestamp,
     return MSG_SEND_FAILED;
   }
 
+  TxContext tx_ctx(contactTxPolicy(recipient));
   mesh::Packet* held[COMPANION_TEXT_QUEUE_CAPACITY] = {};
   uint8_t held_priorities[COMPANION_TEXT_QUEUE_CAPACITY] = {};
   uint32_t held_schedules[COMPANION_TEXT_QUEUE_CAPACITY] = {};
@@ -2655,7 +2657,7 @@ void MyMesh::uiExportBackup(Print& out, double node_lat, double node_lon) {
 #ifdef MAX_GROUP_CHANNELS
   for (int i = 0; i < MAX_GROUP_CHANNELS; ++i) {
     ChannelDetails cd{};
-    if (!getChannel(i, cd) || cd.name[0] == '\0') continue;
+    if (!getChannelRaw(i, cd) || cd.name[0] == '\0') continue;   // the app's key, as stored
     out.print(first ? "\n    {\"name\": \"" : ",\n    {\"name\": \"");
     first = false;
     esc(cd.name);
@@ -3382,6 +3384,18 @@ void MyMesh::sendFloodScoped(const ContactInfo& recipient, mesh::Packet* pkt, ui
 }
 void MyMesh::sendFloodScoped(const mesh::GroupChannel& channel, mesh::Packet* pkt, uint32_t delay_millis) {
   uiTrackSentFp(txtFloodFp(pkt));
+  if (!mediamesh::isMarked(pkt)) {
+    // The slot the caller named, else the first one with this key.
+    int slot = _tx_channel_slot;
+    if (slot < 0) {
+      for (int i = 0; i < MAX_GROUP_CHANNELS && slot < 0; i++) {
+        ChannelDetails cd;
+        if (getChannel(i, cd) && channelSlotConfigured(cd) &&
+            memcmp(cd.channel.secret, channel.secret, sizeof(channel.secret)) == 0) slot = i;
+      }
+    }
+    if (slot >= 0) mediamesh::markPacket(pkt, channelTxPolicy(slot));
+  }
   // TODO: have per-channel send_scope
   if (send_unscoped) {
     sendFlood(pkt, delay_millis, floodPathHashSize());  // app has explicitly requested un-scoped
@@ -3421,22 +3435,35 @@ void MyMesh::onSignedMessageRecv(const ContactInfo &from, mesh::Packet *pkt, uin
 }
 
 int MyMesh::findConfiguredChannelIdx(const mesh::GroupChannel& ch) const {
-  for (int i = 0; i < MAX_GROUP_CHANNELS; i++) {
-    ChannelDetails cd;
-    if (!const_cast<MyMesh*>(this)->getChannel(i, cd)) continue;
-    if (!channelSlotConfigured(cd)) continue;            // never match an empty slot
-    if (memcmp(ch.secret, cd.channel.secret, sizeof(ch.secret)) == 0) return i;
+  // Two slots may share a key (`#x` and `#r2-x`): the profile the packet came
+  // in on picks the slot (mediamesh::aliasReceivePriority).
+  const bool r2 = mediamesh::radio2Defined();
+  for (int priority = 0; priority < 2; priority++) {
+    for (int i = 0; i < MAX_GROUP_CHANNELS; i++) {
+      ChannelDetails cd;
+      if (!const_cast<MyMesh*>(this)->getChannel(i, cd)) continue;
+      if (!channelSlotConfigured(cd)) continue;            // never match an empty slot
+      if (mediamesh::aliasReceivePriority(cd.name, _rx_origin, r2) != priority) continue;
+      if (memcmp(ch.secret, cd.channel.secret, sizeof(ch.secret)) == 0) return i;
+    }
   }
   return -1;
 }
 
 int MyMesh::searchChannelsByHash(const uint8_t* hash, mesh::GroupChannel dest[], int max_matches) {
   int n = 0;
-  for (int i = 0; i < MAX_GROUP_CHANNELS && n < max_matches; i++) {
-    ChannelDetails cd;
-    if (!getChannel(i, cd)) continue;
-    if (!channelSlotConfigured(cd)) continue;   // an all-zero slot is not a channel
-    if (cd.channel.hash[0] == hash[0]) dest[n++] = cd.channel;
+  const bool r2 = mediamesh::radio2Defined();
+  for (int priority = 0; priority < 2; priority++) {
+    for (int i = 0; i < MAX_GROUP_CHANNELS && n < max_matches; i++) {
+      ChannelDetails cd;
+      if (!getChannel(i, cd)) continue;
+      if (!channelSlotConfigured(cd)) continue;   // an all-zero slot is not a channel
+      if (cd.channel.hash[0] != hash[0]) continue;
+      if (mediamesh::aliasReceivePriority(cd.name, _rx_origin, r2) != priority) continue;
+      bool dup = false;   // `#x` and `#r2-x` share a key: try it once
+      for (int j = 0; j < n && !dup; j++) dup = memcmp(dest[j].secret, cd.channel.secret, sizeof(cd.channel.secret)) == 0;
+      if (!dup) dest[n++] = cd.channel;
+    }
   }
   return n;
 }
@@ -4015,8 +4042,19 @@ uint32_t MyMesh::calcDirectTimeoutMillisFor(uint32_t pkt_airtime_millis, uint8_t
 
 void MyMesh::onSendTimeout() {}
 
+// ---- radio2: what tempradio returns to (MediaMesh.h) ----
+static MyMesh* s_mm_self = nullptr;
+
+// The node's saved radio settings: what tempradio returns to.
+static mediamesh::Params savedPrimaryParams() {
+  mediamesh::Params p;
+  NodePrefs* prefs = s_mm_self ? s_mm_self->getNodePrefs() : nullptr;
+  if (prefs) { p.freq = prefs->freq; p.bw = prefs->bw; p.sf = prefs->sf; p.cr = prefs->cr; }
+  return p;
+}
+
 MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMeshTables &tables, DataStore& store, AbstractUITask* ui)
-    : BaseChatMesh(radio, *new ArduinoMillis(), rng, rtc, *new StaticPoolPacketManager(16), tables),
+    : BaseChatMesh(radio, *new ArduinoMillis(), rng, rtc, *new mediamesh::MarkingPacketManager(16), tables),
       _serial(NULL), telemetry(MAX_PACKET_PAYLOAD - 4), _store(&store), _ui(ui) {
   _iter_started = false;
   _contact_send_index = 0;
@@ -4215,7 +4253,8 @@ void MyMesh::begin(bool has_display) {
   loadSyncHistory();   // app-sync replay ring + client cursors survive a reboot/power cut
 
   applyRadioFromPrefs();   // freq/bw/sf/cr + TX power + RX-boost (shared with the live UI apply)
-  mediamesh::begin();      // radio2 profile, once the main radio settings are known
+  s_mm_self = this;
+  mediamesh::begin(savedPrimaryParams);   // radio2 profiles, once the main radio settings are known
 #if defined(DISPLAY_CLASS)
   // Boot diag: identity prefix + radio config so we can confirm the touch
   // firmware's pubkey is stable across flashes (replies are addressed to
@@ -4541,7 +4580,10 @@ void MyMesh::handleCmdFrame(size_t len) {
         touchPrefsGetChannelScope(channel_idx, chan_rgn, sizeof(chan_rgn));
         const bool pushed = pushChannelScope(chan_rgn);
 #endif
-        success = sendGroupMessage(msg_timestamp, channel.channel, _prefs.node_name, text, len - i);
+        {
+          TxChannelSlot tx_slot(*this, channel_idx);
+          success = sendGroupMessage(msg_timestamp, channel.channel, _prefs.node_name, text, len - i);
+        }
 #if defined(ESP32) && defined(HAS_TOUCH_UI)
         if (pushed) popChannelScope();
 #endif
@@ -4597,7 +4639,7 @@ void MyMesh::handleCmdFrame(size_t len) {
     } else if (payload_len > MAX_CHANNEL_DATA_LENGTH) {
       MESH_DEBUG_PRINTLN("CMD_SEND_CHANNEL_DATA payload too long: %d > %d", payload_len, MAX_CHANNEL_DATA_LENGTH);
       writeErrFrame(ERR_CODE_ILLEGAL_ARG);
-    } else if (sendGroupDataMedia(channel.channel, path, path_len, data_type, payload, payload_len)) {
+    } else if (sendGroupDataMedia(channel.channel, path, path_len, data_type, payload, payload_len, channel_idx)) {
       writeOKFrame();
     } else {
       writeErrFrame(ERR_CODE_TABLE_FULL);
@@ -5066,7 +5108,7 @@ void MyMesh::handleCmdFrame(size_t len) {
       }
       auto pkt = createRawData(&cmd_frame[i], len - i);
       if (pkt) {
-        mediamesh::markPacket(pkt);   // app raw data = Open TAK photo/voice transfers
+        mediamesh::markMedia(pkt);   // app raw data = Open TAK photo/voice transfers (tx.media)
         sendDirect(pkt, path, path_len);
         writeOKFrame();
       } else {
@@ -5247,7 +5289,7 @@ void MyMesh::handleCmdFrame(size_t len) {
   } else if (cmd_frame[0] == CMD_GET_CHANNEL && len >= 2) {
     uint8_t channel_idx = cmd_frame[1];
     ChannelDetails channel;
-    if (getChannel(channel_idx, channel)) {
+    if (getChannelRaw(channel_idx, channel)) {   // the app's own key, not a #r2- wire key
       int i = 0;
       out_frame[i++] = RESP_CODE_CHANNEL_INFO;
       out_frame[i++] = channel_idx;
@@ -5612,7 +5654,9 @@ void MyMesh::handleCmdFrame(size_t len) {
     const char* cmd = text;
     if (tlen > 3 && text[2] == '|') { memcpy(tag, text, 3); tag[3] = 0; cmd = text + 3; }
     char reply[MAX_FRAME_SIZE];
-    if (!mediamesh::runCli(cmd, reply, sizeof(reply))) snprintf(reply, sizeof(reply), "Unknown command");
+    if (!mediamesh::runCli(cmd, reply, sizeof(reply)) && !handleTxRouteCli(cmd, reply, sizeof(reply))) {
+      snprintf(reply, sizeof(reply), "Unknown command");
+    }
     int j = 0;
     out_frame[j++] = RESP_CODE_CLI_REPLY;
     const int taglen = (int)strlen(tag);
@@ -5627,13 +5671,12 @@ void MyMesh::handleCmdFrame(size_t len) {
   }
 }
 
-// sendGroupData, plus the MediaMesh mark for MeshCore Open TAK photo/voice
-// datagrams (GRP_DATA 0x5643) so the radio sends them on radio2.
+// sendGroupData with each packet's radio profile choice: MeshCore Open TAK
+// photo/voice datagrams (GRP_DATA 0x5643) follow tx.media, everything else the
+// channel's own choice (tx.channel, or radio2 for a #r2- channel).
 bool MyMesh::sendGroupDataMedia(mesh::GroupChannel& channel, uint8_t* path, uint8_t path_len, uint16_t data_type,
-                                const uint8_t* data, int data_len) {
-  if (data_type != VoxWire::kChannelDataType || !mediamesh::mediaActive()) {
-    return sendGroupData(channel, path, path_len, data_type, data, data_len);
-  }
+                                const uint8_t* data, int data_len, int slot) {
+  if (slot < 0) slot = _tx_channel_slot;
   if (data_len < 0 || data_len > MAX_GROUP_DATA_LENGTH) return false;
   uint8_t temp[3 + MAX_GROUP_DATA_LENGTH];
   temp[0] = (uint8_t)(data_type & 0xFF);
@@ -5642,9 +5685,190 @@ bool MyMesh::sendGroupDataMedia(mesh::GroupChannel& channel, uint8_t* path, uint
   if (data_len > 0) memcpy(&temp[3], data, data_len);
   auto pkt = createGroupDatagram(PAYLOAD_TYPE_GRP_DATA, channel, temp, 3 + data_len);
   if (!pkt) return false;
-  mediamesh::markPacket(pkt);
+  const uint8_t chan_policy = slot >= 0 ? channelTxPolicy(slot) : (uint8_t)mediamesh::TX_AUTO;
+  // An explicit tx.media wins over the channel's choice, except on a #r2-
+  // channel, whose receivers only listen on radio2.
+  if (data_type == VoxWire::kChannelDataType && !(slot >= 0 && channelBoundToRadio2(slot))) {
+    mediamesh::markMedia(pkt, chan_policy);
+  } else {
+    mediamesh::markPacket(pkt, chan_policy);
+  }
+  TxChannelSlot tx_slot(*this, slot);
   if (path_len == OUT_PATH_UNKNOWN) sendFloodScoped(channel, pkt);
   else sendDirect(pkt, path, path_len);
+  return true;
+}
+
+// ---- radio2 routing: per-contact / per-channel choices, #r2- channels ---------
+// (MEDIAMESH.md; the rules are mikecarper/MeshCore's radio_profiles.md)
+
+static void mmSha256(uint8_t* out, size_t n, const uint8_t* text, int len) { mesh::Utils::sha256(out, n, text, len); }
+
+bool MyMesh::getChannel(int idx, ChannelDetails& dest) {
+  if (!BaseChatMesh::getChannel(idx, dest)) return false;
+  // `#r2-x` with the app's automatic key uses `#x`'s key on the air.
+  if (dest.name[0] == '#' && !strncmp(dest.name + 1, "r2-", 3)) {
+    uint8_t before[16];
+    memcpy(before, dest.channel.secret, sizeof before);
+    if (mediamesh::resolveAliasKey(dest.name, dest.channel.secret, mmSha256) &&
+        memcmp(before, dest.channel.secret, sizeof before) != 0) {
+      mesh::Utils::sha256(dest.channel.hash, sizeof(dest.channel.hash), dest.channel.secret, 16);
+    }
+  }
+  return true;
+}
+
+bool MyMesh::setChannel(int idx, const ChannelDetails& src) {
+  if (mediamesh::parseAlias(src.name).kind == mediamesh::ALIAS_INVALID) return false;   // "#r2-" alone, nested
+  return BaseChatMesh::setChannel(idx, src);
+}
+
+bool MyMesh::channelBoundToRadio2(int slot) {
+  ChannelDetails cd;
+  if (slot < 0 || !getChannelRaw(slot, cd) || !channelSlotConfigured(cd)) return false;
+  return mediamesh::parseAlias(cd.name).kind == mediamesh::ALIAS_R2 && mediamesh::radio2Defined();
+}
+
+uint8_t MyMesh::channelTxPolicy(int slot) {
+  ChannelDetails cd;
+  if (slot < 0 || !getChannelRaw(slot, cd) || !channelSlotConfigured(cd)) return mediamesh::TX_AUTO;
+  if (mediamesh::parseAlias(cd.name).kind == mediamesh::ALIAS_R2 && mediamesh::radio2Defined()) {
+    return mediamesh::TX_RADIO2;
+  }
+  uint8_t id[mediamesh::Routes::kIdSize];
+  mediamesh::channelRouteId(cd.channel.secret, id);
+  return mediamesh::channelPolicyById(id);
+}
+
+int MyMesh::findChannelSlotForRx(const mesh::GroupChannel& ch) { return findConfiguredChannelIdx(ch); }
+
+uint8_t MyMesh::contactPolicyBySecret(const uint8_t* secret) {
+  if (!secret || mediamesh::routeCount(mediamesh::Routes::USER) == 0) return mediamesh::kNoContext;
+  ContactsIterator it = startContactsIterator();
+  ContactInfo c;
+  while (it.hasNext(this, c)) {
+    if (!c.shared_secret_valid) continue;   // the sender's was just computed to decrypt this
+    if (memcmp(c.getSharedSecret(self_id), secret, PUB_KEY_SIZE) == 0) return contactTxPolicy(c);
+  }
+  return mediamesh::kNoContext;
+}
+
+mesh::DispatcherAction MyMesh::onRecvPacket(mesh::Packet* pkt) {
+  const uint8_t prev = _rx_origin;
+  _rx_origin = mediamesh::originOf(pkt);
+  const mesh::DispatcherAction a = BaseChatMesh::onRecvPacket(pkt);
+  _rx_origin = prev;
+  return a;
+}
+
+void MyMesh::onPeerDataRecv(mesh::Packet* packet, uint8_t type, int sender_idx, const uint8_t* secret, uint8_t* data,
+                            size_t len) {
+  // ACKs and replies to a contact follow its tx.user choice.
+  TxContext ctx(contactPolicyBySecret(secret));
+  BaseChatMesh::onPeerDataRecv(packet, type, sender_idx, secret, data, len);
+}
+
+bool MyMesh::onPeerPathRecv(mesh::Packet* packet, int sender_idx, const uint8_t* secret, uint8_t* path,
+                            uint8_t path_len, uint8_t extra_type, uint8_t* extra, uint8_t extra_len) {
+  TxContext ctx(contactPolicyBySecret(secret));
+  return BaseChatMesh::onPeerPathRecv(packet, sender_idx, secret, path, path_len, extra_type, extra, extra_len);
+}
+
+void MyMesh::onGroupDataRecv(mesh::Packet* packet, uint8_t type, const mesh::GroupChannel& channel, uint8_t* data,
+                             size_t len) {
+  // A #r2- channel's packets are forwarded on radio2 only, like they arrived.
+  const int slot = findConfiguredChannelIdx(channel);
+  if (slot >= 0 && channelBoundToRadio2(slot)) mediamesh::markPacket(packet, mediamesh::TX_RADIO2);
+  BaseChatMesh::onGroupDataRecv(packet, type, channel, data, len);
+}
+
+// get/set tx.user <name|key:hex> [policy], get/set tx.channel <index|name> [policy]
+// (mikecarper/MeshCore's Companion TX routing, same replies).
+bool MyMesh::handleTxRouteCli(const char* cmd, char* reply, size_t cap) {
+  const mediamesh::RouteCommand rc = mediamesh::parseRouteCommand(cmd);
+  if (!rc.matched) return false;
+  const char* kind = rc.channel ? "channel" : "user";
+  if (!rc.valid) {
+    snprintf(reply, cap, "Error: use get/set tx.%s <name|%s> [auto|radio|radio2|both|off]", kind,
+             rc.channel ? "index" : "key:hex");
+    return true;
+  }
+  if (rc.set && !mediamesh::supported() && (rc.policy == mediamesh::TX_RADIO2 || rc.policy == mediamesh::TX_BOTH)) {
+    snprintf(reply, cap, "Error: radio2 is not supported on this radio");
+    return true;
+  }
+  const int overrides = mediamesh::routeCount(rc.channel ? mediamesh::Routes::CHANNEL : mediamesh::Routes::USER);
+  if (!rc.target[0]) {
+    snprintf(reply, cap, "> tx.%s: %d overrides; use get tx.%s <name|%s>", kind, overrides, kind,
+             rc.channel ? "index" : "key:hex");
+    return true;
+  }
+
+  int matches = 0;
+  int slot = -1;
+  ChannelDetails chan;
+  ContactInfo contact;
+  if (rc.channel) {
+    char* end = nullptr;
+    const long index = rc.quoted ? -1 : strtol(rc.target, &end, 10);
+    const bool by_index = !rc.quoted && end && !*end && rc.target[0] >= '0' && rc.target[0] <= '9';
+    for (int i = 0; i < MAX_GROUP_CHANNELS; i++) {
+      ChannelDetails cd;
+      if (!getChannelRaw(i, cd) || !channelSlotConfigured(cd) || !cd.name[0]) continue;
+      if (by_index ? index == i : !strcmp(cd.name, rc.target)) { chan = cd; slot = i; ++matches; }
+    }
+  } else {
+    uint8_t key[32];
+    size_t key_bytes = 0;
+    const bool by_key = !rc.quoted && !strncmp(rc.target, "key:", 4);
+    if (by_key && !mediamesh::parseRouteKey(rc.target + 4, key, key_bytes)) {
+      snprintf(reply, cap, "Error: key: needs 12-64 hexadecimal digits (whole bytes)");
+      return true;
+    }
+    ContactsIterator it = startContactsIterator();
+    ContactInfo c;
+    while (it.hasNext(this, c)) {
+      if (c.type == ADV_TYPE_NONE) continue;
+      if (by_key ? !memcmp(c.id.pub_key, key, key_bytes) : !strcmp(c.name, rc.target)) { contact = c; ++matches; }
+    }
+  }
+  if (matches != 1) {
+    snprintf(reply, cap, "Error: %s %s%s", kind, matches ? "is ambiguous" : "not found",
+             matches ? (rc.channel ? "; use an index" : "; use a longer key: prefix") : "");
+    return true;
+  }
+
+  uint8_t id[mediamesh::Routes::kIdSize];
+  if (rc.channel) mediamesh::channelRouteId(chan.channel.secret, id);
+  const bool bound = rc.channel && channelBoundToRadio2(slot);
+  uint8_t policy = rc.channel ? mediamesh::channelPolicyById(id) : mediamesh::userPolicy(contact.id.pub_key);
+  if (rc.set && policy != rc.policy) {
+    if (bound) {
+      snprintf(reply, cap, "Error: channel prefix controls routing; rename it to change routing");
+      return true;
+    }
+    const bool ok = rc.channel ? mediamesh::setChannelPolicyById(id, rc.policy)
+                               : mediamesh::setUserPolicy(contact.id.pub_key, rc.policy);
+    if (!ok) {
+      snprintf(reply, cap, "Error: TX routing was not saved");
+      return true;
+    }
+    policy = rc.policy;
+  }
+  const uint8_t mask = mediamesh::policyMaskNow(bound ? (uint8_t)mediamesh::TX_RADIO2 : policy);
+  char label[80];
+  if (rc.channel) {
+    snprintf(label, sizeof label, "%d \"%s\"", slot, chan.name);
+  } else {
+    char key_prefix[13];
+    mesh::Utils::toHex(key_prefix, contact.id.pub_key, 6);
+    snprintf(label, sizeof label, "\"%s\" key:%s", contact.name, key_prefix);
+  }
+  snprintf(reply, cap, "%s tx.%s %s %s; active=%s%s%s", rc.set ? "OK -" : ">", kind, label,
+           bound ? "radio2" : mediamesh::policyName(policy), mediamesh::maskName(mask),
+           (policy == mediamesh::TX_RADIO2 || policy == mediamesh::TX_BOTH || bound) && !(mask & 2)
+               ? " (radio2 unavailable for TX)" : "",
+           bound ? " (#r2- channel)" : "");
   return true;
 }
 
@@ -6194,6 +6418,7 @@ void MyMesh::checkSerialInterface() {
 
 void MyMesh::loop() {
   BaseChatMesh::loop();
+  mediamesh::loop();           // temporary radio profiles ending, schedules starting
   companionRetryService();
   drainPendingBlobDeletes();   // evicted contacts' blobs, off the packet path (#222)
 
