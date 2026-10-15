@@ -1,19 +1,30 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// MediaMesh: a second LoRa profile (`radio2`) on the same transceiver, used as a
-// media-only side channel. Photos and voice clips from MeshCore Open TAK go out
-// on the MediaMesh frequency; everything else stays on the main mesh. One radio
-// time-shares the two profiles, so this is a scan, not a second receiver.
+// MediaMesh: a second LoRa profile (`radio2`) on the same transceiver. By
+// default MeshCore Open TAK photos and voice clips go out on it as a media-only
+// side channel, but it is the full two-profile model of mikecarper/MeshCore's
+// radio_profiles.md (docs/radio_profiles.md there), less Meshtastic chat:
 //
-// This header is the portable part: settings, validation, the CLI shared with
-// mikecarper/MeshCore's `radio2` commands, scan timing and the media-packet
-// marker. No Arduino or radio code, so the host test builds it directly
-// (test/test_mediamesh_core.cpp). The radio side is MediaMeshRadio.h.
+//   radio2 / tempradio2 / radioat2 / tempradioat2   the second profile, saved,
+//                                                   temporary and scheduled
+//   tempradio / normalradio                         a temporary primary profile
+//   radio2.cross                                    copying traffic between them
+//   tx.media / tx.user / tx.channel                 per-traffic TX choices
+//   radio2.status / radio2.scan / radio2.timing     diagnostics
+//   #r2- channel names                              channels bound to radio2
+//
+// One radio time-shares the two profiles, so this is a scan, not a second
+// receiver.
+//
+// This header is the portable part: settings, validation, the CLI, routing
+// rules, schedules, scan timing and the packet markers. No Arduino or radio
+// code, so the host test builds it directly (test/test_mediamesh_core.cpp).
+// The radio side is MediaMeshRadio.h; the glue is MediaMesh.cpp.
 //
 // Scan timing follows mikecarper/MeshCore's RadioProfiles: listen 4.6 symbols on
 // the slower profile, then fill the rest of half the slow preamble on the faster
 // one, so a packet on either profile is still in its preamble when the radio
-// comes back. The main mesh's preamble is fixed by stock nodes; MediaMesh senders
+// comes back. The main mesh's preamble is fixed by stock nodes; radio2 senders
 // lengthen their own preamble to cover the receiver's time on the main profile.
 
 #pragma once
@@ -29,7 +40,13 @@
 namespace mediamesh {
 
 enum Mode : uint8_t { MODE_OFF = 0, MODE_RX = 1, MODE_RXTX = 2 };
-enum Route : uint8_t { ROUTE_RADIO = 0, ROUTE_RADIO2 = 1 };
+
+// A transmit choice, as mikecarper/MeshCore's RadioTxPolicy. AUTO follows the
+// radio2.cross rules; the others pick profiles regardless of crossing.
+enum Policy : uint8_t { TX_AUTO = 0, TX_RADIO = 1, TX_RADIO2 = 2, TX_BOTH = 3, TX_OFF = 4 };
+
+// Whether traffic is copied between the two profiles (radio2.cross).
+enum Cross : uint8_t { CROSS_AUTO = 0, CROSS_ON = 1, CROSS_OFF = 2 };
 
 struct Params {
   float freq = 0;          // MHz
@@ -39,14 +56,22 @@ struct Params {
   uint16_t preamble = 0;   // symbols; 0 = automatic
 };
 
-struct Config {
-  uint8_t mode = MODE_OFF;       // radio2: off, rx (listen only) or rxtx
-  uint8_t route = ROUTE_RADIO;   // tx.media: where photos and voice are sent
+// A second profile: its mode and radio settings.
+struct Profile2 {
+  uint8_t mode = MODE_OFF;
   Params p;
 };
 
-// Defaults for a new MediaMesh: same band as the US main mesh, 250 kHz SF7
-// (about 4x faster than SF7/62.5 for ~6 dB less range).
+// What is saved.
+struct Config {
+  uint8_t mode = MODE_OFF;       // radio2: off, rx (listen only) or rxtx
+  uint8_t media = TX_AUTO;       // tx.media: where photos and voice are sent
+  uint8_t cross = CROSS_AUTO;    // radio2.cross
+  Params p;
+};
+
+// Defaults for a new radio2: the US band, 250 kHz SF7 (about 4x faster than
+// SF7/62.5 for ~6 dB less range).
 static constexpr float kDefaultFreq = 911.500f;
 static constexpr float kDefaultBw = 250.0f;
 static constexpr uint8_t kDefaultSf = 7;
@@ -58,11 +83,15 @@ static constexpr uint16_t kMinPreamble = 32;
 static constexpr uint16_t kMaxAutoPreamble = 128;
 static constexpr uint16_t kMaxPreamble = 1024;
 static constexpr uint32_t kDefaultSwitchUs = 1500;  // until the first hops are measured
+static constexpr uint8_t kSwitchSamples = 4;        // retunes measured before the timing is trusted
 static constexpr uint32_t kMarkTtlMs = 10UL * 60UL * 1000UL;
+static constexpr uint32_t kMaxTempMinutes = 10080;  // a week, as tempradio2
+static constexpr uint32_t kMaxScheduleSeconds = 24UL * 24UL * 3600UL;   // 24 days ahead
 
 inline void defaults(Config& c) {
   c.mode = MODE_OFF;
-  c.route = ROUTE_RADIO;
+  c.media = TX_AUTO;
+  c.cross = CROSS_AUTO;
   c.p.freq = kDefaultFreq;
   c.p.bw = kDefaultBw;
   c.p.sf = kDefaultSf;
@@ -90,21 +119,58 @@ inline bool sameChannel(const Params& a, const Params& b) {
   return fabsf(a.freq - b.freq) < 0.0005f && fabsf(a.bw - b.bw) < 0.01f && a.sf == b.sf;
 }
 
-// The radio scans both profiles whenever radio2 is on.
-inline bool scanning(const Config& c) { return c.mode != MODE_OFF && validParams(c.p); }
-// Photos and voice go out on radio2.
+inline Profile2 savedProfile(const Config& c) {
+  Profile2 s;
+  s.mode = c.mode;
+  s.p = c.p;
+  return s;
+}
+
+// The radio scans both profiles whenever a second profile is on.
+inline bool scanning(const Profile2& s) { return s.mode != MODE_OFF && validParams(s.p); }
+inline bool scanning(const Config& c) { return scanning(savedProfile(c)); }
+
+// The settings page's "Photos & voice on MediaMesh": radio2 can send, and
+// photos and voice are sent there.
 inline bool mediaOnRadio2(const Config& c) {
-  return c.mode == MODE_RXTX && c.route == ROUTE_RADIO2 && validParams(c.p);
+  return c.mode == MODE_RXTX && (c.media == TX_RADIO2 || c.media == TX_BOTH) && validParams(c.p);
+}
+
+// ---- policy names -----------------------------------------------------------
+
+inline const char* modeName(uint8_t m) { return m == MODE_RXTX ? "rxtx" : m == MODE_RX ? "rx" : "off"; }
+inline const char* policyName(uint8_t p) {
+  switch (p) {
+    case TX_RADIO: return "radio";
+    case TX_RADIO2: return "radio2";
+    case TX_BOTH: return "both";
+    case TX_OFF: return "off";
+    default: return "auto";
+  }
+}
+inline bool parsePolicy(const char* s, uint8_t& out) {
+  for (uint8_t v = TX_AUTO; v <= TX_OFF; ++v) {
+    if (!strcmp(s, policyName(v))) { out = v; return true; }
+  }
+  return false;
+}
+inline const char* crossName(uint8_t c) { return c == CROSS_ON ? "on" : c == CROSS_OFF ? "off" : "auto"; }
+// The profiles a mask names: "radio", "radio2", "both" or "off".
+inline const char* maskName(uint8_t mask) {
+  return mask == 3 ? "both" : mask == 2 ? "radio2" : mask == 1 ? "radio" : "off";
 }
 
 // ---- persisted form -------------------------------------------------------
+// v1 (the first MediaMesh): byte 4 was the media route, 0 radio / 1 radio2, and
+// nothing ever crossed. v2: byte 4 is a Policy and byte 7 the cross mode. A v1
+// blob keeps its behaviour: media where it was, crossing off.
 
-static constexpr uint8_t kBlobVersion = 1;
+static constexpr uint8_t kBlobVersion = 2;
 static constexpr size_t kBlobSize = 18;
 
 inline size_t encode(const Config& c, uint8_t out[kBlobSize]) {
   out[0] = 'M'; out[1] = 'M'; out[2] = kBlobVersion;
-  out[3] = c.mode; out[4] = c.route; out[5] = c.p.sf; out[6] = c.p.cr; out[7] = 0;
+  out[3] = c.mode; out[4] = c.media; out[5] = c.p.sf; out[6] = c.p.cr; out[7] = c.cross;
   memcpy(&out[8], &c.p.freq, 4);
   memcpy(&out[12], &c.p.bw, 4);
   out[16] = (uint8_t)(c.p.preamble & 0xFF);
@@ -113,10 +179,16 @@ inline size_t encode(const Config& c, uint8_t out[kBlobSize]) {
 }
 
 inline bool decode(const uint8_t* in, size_t len, Config& c) {
-  if (!in || len < kBlobSize || in[0] != 'M' || in[1] != 'M' || in[2] != kBlobVersion) return false;
+  if (!in || len < kBlobSize || in[0] != 'M' || in[1] != 'M' || (in[2] != 1 && in[2] != 2)) return false;
   Config d;
   d.mode = in[3] <= MODE_RXTX ? in[3] : (uint8_t)MODE_OFF;
-  d.route = in[4] <= ROUTE_RADIO2 ? in[4] : (uint8_t)ROUTE_RADIO;
+  if (in[2] == 1) {
+    d.media = in[4] == 1 ? TX_RADIO2 : TX_RADIO;
+    d.cross = CROSS_OFF;
+  } else {
+    d.media = in[4] <= TX_OFF ? in[4] : (uint8_t)TX_AUTO;
+    d.cross = in[7] <= CROSS_OFF ? in[7] : (uint8_t)CROSS_AUTO;
+  }
   d.p.sf = in[5]; d.p.cr = in[6];
   memcpy(&d.p.freq, &in[8], 4);
   memcpy(&d.p.bw, &in[12], 4);
@@ -157,6 +229,7 @@ struct Timing {
   uint32_t dwell_us[2] = {};       // scheduled visit on each profile
   uint16_t preamble[2] = {};       // preamble each profile transmits with
   uint16_t need[2] = {};           // preamble a scanning receiver needs (rounded)
+  double need_raw[2] = {};         // the same before the 128 cap, for warnings
   uint32_t switch_us = 0;          // guarded per-retune allowance
   bool main_ok = true;             // stock main-mesh preamble is long enough
   bool media_capped = false;       // automatic radio2 preamble hit its cap
@@ -188,6 +261,8 @@ inline Timing calcTiming(const Params& main, uint16_t main_preamble, const Param
   t.dwell_us[fast] = fast_dwell;
 
   const double cycle = (double)slow_dwell + fast_dwell + overhead;
+  t.need_raw[slow] = ceil(fmax(kMinPreamble, 2.0 * cycle / T[slow]) / 8.0) * 8.0;
+  t.need_raw[fast] = ceil(fmax(kMinPreamble, (slow_dwell + overhead) / T[fast] + kAcquireSymbols) / 8.0) * 8.0;
   t.need[slow] = roundPreamble(2.0 * cycle / T[slow]);
   t.need[fast] = roundPreamble((slow_dwell + overhead) / T[fast] + kAcquireSymbols);
 
@@ -202,56 +277,357 @@ inline Timing calcTiming(const Params& main, uint16_t main_preamble, const Param
   return t;
 }
 
-// ---- media-packet marker ----------------------------------------------------
-// The firmware marks each photo/voice packet it creates by its MeshCore packet
-// hash; the radio looks the hash up when the packet reaches the transmitter.
-// Retries keep the same hash, so they follow the original.
+// What a getter or an OK reply appends after the preambles: the warnings of
+// radio_profiles.md's "Chirp calculator and warnings".
+inline void appendWarnings(const Timing& t, const Params& media, char* out, size_t cap) {
+  if (!t.valid) return;
+  size_t used = strlen(out);
+  if (used < cap && (t.need_raw[0] > 128 || t.need_raw[1] > 128)) {
+    snprintf(out + used, cap - used, "; WARN need >128: %s",
+             t.need_raw[0] > 128 && t.need_raw[1] > 128 ? "radio,radio2" : t.need_raw[0] > 128 ? "radio" : "radio2");
+  }
+  const bool a = t.need[0] > t.preamble[0];
+  const bool b = t.need[1] > t.preamble[1];
+  used = strlen(out);
+  if (used < cap && a && b) {
+    snprintf(out + used, cap - used, "; WARN recommended preamble: radio=%u,radio2=%u", t.need[0], t.need[1]);
+  } else if (used < cap && (a || b)) {
+    snprintf(out + used, cap - used, "; WARN recommended preamble: %s=%u", a ? "radio" : "radio2", a ? t.need[0] : t.need[1]);
+  }
+  used = strlen(out);
+  if (used < cap && media.preamble && media.preamble < t.need[1]) {
+    snprintf(out + used, cap - used, "; short override: radio2");
+  }
+}
+
+// ---- the running state ----------------------------------------------------
+// What is saved (Config) plus the RAM-only parts: a temporary second profile,
+// a temporary primary profile and the schedules. Deadlines are monotonic
+// milliseconds, so setting the clock cannot stretch a temporary session.
+
+struct Schedule {
+  Profile2 prof;
+  uint32_t start = 0, end = 0;          // UTC seconds, as entered (end: tempradioat2)
+  uint32_t start_ms = 0, end_ms = 0;    // the same on the millisecond clock
+  bool active = false, temporary = false, started = false;
+};
+
+struct Runtime {
+  Config saved;
+  bool temp2 = false;            // tempradio2 running
+  Profile2 temp2_prof;
+  uint32_t temp2_end_ms = 0;
+  uint8_t temp2_slot = 0xFF;     // the tempradioat2 slot that started it, if any
+  bool temp1 = false;            // tempradio running
+  Params temp1_p;
+  uint32_t temp1_end_ms = 0;
+  Schedule sched[8];             // 0-3 radioat2, 4-7 tempradioat2
+
+  Profile2 active2() const { return temp2 ? temp2_prof : savedProfile(saved); }
+  bool enabled() const { return scanning(active2()); }
+  bool hasTempSchedule() const {
+    for (int i = 4; i < 8; ++i) if (sched[i].active) return true;
+    return false;
+  }
+};
+
+inline bool deadlinePassed(uint32_t now_ms, uint32_t deadline_ms) { return (int32_t)(now_ms - deadline_ms) >= 0; }
+inline uint32_t msLeft(uint32_t now_ms, uint32_t deadline_ms) {
+  return deadlinePassed(now_ms, deadline_ms) ? 0 : deadline_ms - now_ms;
+}
+
+// ---- routing --------------------------------------------------------------
+// Masks: bit 0 = the primary profile, bit 1 = radio2.
+
+inline bool canTransmit(const Runtime& r, uint8_t profile) {
+  return profile == 0 || (profile == 1 && r.enabled() && r.active2().mode == MODE_RXTX);
+}
+
+// radio2.cross: `auto` crosses between two permanent or two temporary profiles
+// and isolates a permanent one from a temporary one.
+inline bool canCross(const Runtime& r) {
+  return r.saved.cross == CROSS_ON || (r.saved.cross == CROSS_AUTO && r.temp1 == r.temp2);
+}
+
+// Where traffic that arrived on (or, origin 0, was made on) a profile goes
+// under the global rules.
+inline uint8_t transmitMask(const Runtime& r, uint8_t origin) {
+  if (origin > 1) origin = 0;
+  uint8_t m = canTransmit(r, origin) ? (uint8_t)(1U << origin) : 0;
+  if (r.enabled() && canCross(r) && canTransmit(r, origin ^ 1)) m |= (uint8_t)(1U << (origin ^ 1));
+  return m;
+}
+
+// Where a packet with an explicit choice goes. `radio2` never falls back to
+// the primary; `both` sends on radio2 only when it can.
+inline uint8_t policyMask(const Runtime& r, uint8_t policy, uint8_t origin = 0) {
+  if (policy == TX_AUTO) return transmitMask(r, origin);
+  if (policy == TX_OFF || policy > TX_OFF) return 0;
+  return (uint8_t)(policy & (canTransmit(r, 1) ? 3 : 1));
+}
+
+// ---- packet markers ---------------------------------------------------------
+// The firmware marks a packet with its chosen mask by MeshCore packet hash when
+// it creates it; the radio looks the hash up when the packet reaches the
+// transmitter. Retries keep the same hash, so they keep the choice.
 
 static constexpr int kHashSize = 8;   // MAX_HASH_SIZE
+static constexpr uint8_t kNoMark = 0xFF;
 
 struct MarkRing {
   static constexpr int kSlots = 128;   // more than a full outbound queue of photo packets
   uint8_t hash[kSlots][kHashSize] = {};
   uint32_t at[kSlots] = {};
+  uint8_t mask[kSlots] = {};
   bool used[kSlots] = {};
   uint8_t next = 0;
 
-  void add(const uint8_t* h, uint32_t now_ms) {
+  void add(const uint8_t* h, uint32_t now_ms, uint8_t m) {
     for (int i = 0; i < kSlots; ++i) {
-      if (used[i] && memcmp(hash[i], h, kHashSize) == 0) { at[i] = now_ms; return; }
+      if (used[i] && memcmp(hash[i], h, kHashSize) == 0) { at[i] = now_ms; mask[i] = m; return; }
     }
     memcpy(hash[next], h, kHashSize);
     at[next] = now_ms;
+    mask[next] = m;
     used[next] = true;
     next = (uint8_t)((next + 1) % kSlots);
   }
-  bool has(const uint8_t* h, uint32_t now_ms) const {
+  // The mask a packet was marked with, or kNoMark.
+  uint8_t find(const uint8_t* h, uint32_t now_ms) const {
     for (int i = 0; i < kSlots; ++i) {
-      if (used[i] && now_ms - at[i] <= kMarkTtlMs && memcmp(hash[i], h, kHashSize) == 0) return true;
+      if (used[i] && now_ms - at[i] <= kMarkTtlMs && memcmp(hash[i], h, kHashSize) == 0) return mask[i];
     }
-    return false;
+    return kNoMark;
   }
+  bool has(const uint8_t* h, uint32_t now_ms) const { return find(h, now_ms) != kNoMark; }
   void clear() { memset(used, 0, sizeof(used)); next = 0; }
 };
 
-// ---- CLI ------------------------------------------------------------------
-// Same command names as mikecarper/MeshCore so a client can drive either:
-//   get radio2 | set radio2 off | set radio2 <MHz>,<kHz>,<sf>,<cr>,rx|rxtx[,preamble]
-//   get tx.media | set tx.media radio|radio2
-//   get radio2.cross | set radio2.cross auto|on|off   (accepted; nothing is forwarded)
-//   get radio2.timing | get mediamesh
+// Which profile recent packets arrived on, by hash: a forwarded packet keeps
+// the hash it arrived with, and channel lookups need the profile.
+struct OriginRing {
+  static constexpr int kSlots = 32;
+  uint8_t hash[kSlots][kHashSize] = {};
+  uint32_t at[kSlots] = {};
+  uint8_t origin[kSlots] = {};
+  bool used[kSlots] = {};
+  uint8_t next = 0;
+  static constexpr uint32_t kTtlMs = 120000;
 
-inline const char* modeName(uint8_t m) { return m == MODE_RXTX ? "rxtx" : m == MODE_RX ? "rx" : "off"; }
-inline const char* routeName(uint8_t r) { return r == ROUTE_RADIO2 ? "radio2" : "radio"; }
-
-inline void formatParams(const Config& c, char* out, size_t cap) {
-  if (c.mode == MODE_OFF) { snprintf(out, cap, "off"); return; }
-  if (c.p.preamble) {
-    snprintf(out, cap, "%.3f,%.2f,%u,%u,%s,%u", c.p.freq, c.p.bw, c.p.sf, c.p.cr, modeName(c.mode), c.p.preamble);
-  } else {
-    snprintf(out, cap, "%.3f,%.2f,%u,%u,%s", c.p.freq, c.p.bw, c.p.sf, c.p.cr, modeName(c.mode));
+  void add(const uint8_t* h, uint32_t now_ms, uint8_t o) {
+    memcpy(hash[next], h, kHashSize);
+    at[next] = now_ms;
+    origin[next] = o;
+    used[next] = true;
+    next = (uint8_t)((next + 1) % kSlots);
   }
+  // 0 or 1, or kNoMark when not seen recently. The newest entry wins.
+  uint8_t find(const uint8_t* h, uint32_t now_ms) const {
+    for (int k = 1; k <= kSlots; ++k) {
+      const int i = (next - k + kSlots) % kSlots;
+      if (used[i] && now_ms - at[i] <= kTtlMs && memcmp(hash[i], h, kHashSize) == 0) return origin[i];
+    }
+    return kNoMark;
+  }
+};
+
+// ---- per-contact and per-channel TX choices (tx.user / tx.channel) ----------
+// Saved by key, not by slot or name: a contact by its public-key prefix, a
+// channel by a hash of its secret, so a renamed or moved entry keeps its choice
+// and a replaced key loses it.
+
+struct Routes {
+  static constexpr int kMax = 48;
+  static constexpr int kIdSize = 8;
+  enum Kind : uint8_t { NONE = 0, USER = 1, CHANNEL = 2 };
+  uint8_t kind[kMax] = {};
+  uint8_t id[kMax][kIdSize] = {};
+  uint8_t policy[kMax] = {};
+
+  int find(uint8_t k, const uint8_t* ident) const {
+    for (int i = 0; i < kMax; ++i) if (kind[i] == k && memcmp(id[i], ident, kIdSize) == 0) return i;
+    return -1;
+  }
+  uint8_t get(uint8_t k, const uint8_t* ident) const {
+    const int i = find(k, ident);
+    return i >= 0 ? policy[i] : (uint8_t)TX_AUTO;
+  }
+  // False when the table is full.
+  bool set(uint8_t k, const uint8_t* ident, uint8_t p) {
+    int i = find(k, ident);
+    if (p == TX_AUTO) { if (i >= 0) kind[i] = NONE; return true; }
+    if (i < 0) for (int j = 0; j < kMax && i < 0; ++j) if (kind[j] == NONE) i = j;
+    if (i < 0) return false;
+    kind[i] = k;
+    memcpy(id[i], ident, kIdSize);
+    policy[i] = p;
+    return true;
+  }
+  int count(uint8_t k) const {
+    int n = 0;
+    for (int i = 0; i < kMax; ++i) if (kind[i] == k) ++n;
+    return n;
+  }
+  // Blob: "MR" 1, then (kind, id, policy) per entry in use.
+  static constexpr size_t kBlobMax = 3 + kMax * (2 + kIdSize);
+  size_t encode(uint8_t* out) const {
+    size_t n = 0;
+    out[n++] = 'M'; out[n++] = 'R'; out[n++] = 1;
+    for (int i = 0; i < kMax; ++i) {
+      if (kind[i] == NONE) continue;
+      out[n++] = kind[i];
+      memcpy(out + n, id[i], kIdSize); n += kIdSize;
+      out[n++] = policy[i];
+    }
+    return n;
+  }
+  bool decode(const uint8_t* in, size_t len) {
+    if (!in || len < 3 || in[0] != 'M' || in[1] != 'R' || in[2] != 1) return false;
+    Routes r;
+    int slot = 0;
+    for (size_t n = 3; n + 2 + kIdSize <= len && slot < kMax; n += 2 + kIdSize) {
+      const uint8_t k = in[n], p = in[n + 1 + kIdSize];
+      if ((k != USER && k != CHANNEL) || p == TX_AUTO || p > TX_OFF) continue;
+      r.kind[slot] = k;
+      memcpy(r.id[slot], in + n + 1, kIdSize);
+      r.policy[slot] = p;
+      ++slot;
+    }
+    *this = r;
+    return true;
+  }
+};
+
+// `get/set tx.user|tx.channel <target> [policy]`, parsed as mikecarper/MeshCore's
+// CompanionTxRoutingCLI: a quoted target is always a literal name.
+struct RouteCommand {
+  bool matched = false, valid = false, set = false, channel = false, quoted = false;
+  char target[48] = {};
+  uint8_t policy = TX_AUTO;
+};
+
+inline bool routeSpace(char c) { return c == ' ' || c == '\t'; }
+
+inline RouteCommand parseRouteCommand(const char* text) {
+  RouteCommand r;
+  if (!text) return r;
+  if (!strncmp(text, "get ", 4)) r.set = false;
+  else if (!strncmp(text, "set ", 4)) r.set = true;
+  else return r;
+  text += 4;
+  const char* family = nullptr;
+  if (!strncmp(text, "tx.user", 7)) family = "tx.user";
+  else if (!strncmp(text, "tx.channel", 10)) { family = "tx.channel"; r.channel = true; }
+  else return r;
+  text += strlen(family);
+  if (*text && !routeSpace(*text)) return r;
+  r.matched = true;
+  while (routeSpace(*text)) ++text;
+  const char* end = text + strlen(text);
+  while (end > text && routeSpace(end[-1])) --end;
+  if (r.set) {
+    const char* mode = end;
+    while (mode > text && !routeSpace(mode[-1])) --mode;
+    char value[8];
+    const size_t length = (size_t)(end - mode);
+    if (mode == text || length >= sizeof(value)) return r;
+    memcpy(value, mode, length); value[length] = 0;
+    if (!parsePolicy(value, r.policy)) return r;
+    end = mode;
+    while (end > text && routeSpace(end[-1])) --end;
+  }
+  if (end > text && *text == '"') {
+    if (end - text < 2 || end[-1] != '"') return r;
+    r.quoted = true;
+    ++text; --end;
+  }
+  const size_t length = (size_t)(end - text);
+  if (length >= sizeof(r.target) || ((r.set || r.quoted) && !length)) return r;
+  if (memchr(text, '"', length) || memchr(text, '\r', length) || memchr(text, '\n', length)) return r;
+  memcpy(r.target, text, length);
+  r.target[length] = 0;
+  r.valid = true;
+  return r;
 }
+
+// `key:` + 12-64 hex digits (whole bytes).
+inline bool parseRouteKey(const char* text, uint8_t key[32], size_t& bytes) {
+  const size_t length = strlen(text);
+  if (length < 12 || length > 64 || (length & 1)) return false;
+  bytes = length / 2;
+  for (size_t i = 0; i < bytes; ++i) {
+    uint8_t value = 0;
+    for (unsigned n = 0; n < 2; ++n) {
+      char c = text[2 * i + n];
+      if (c >= 'A' && c <= 'F') c = (char)(c + ('a' - 'A'));
+      if (c >= '0' && c <= '9') value = (uint8_t)((value << 4) | (c - '0'));
+      else if (c >= 'a' && c <= 'f') value = (uint8_t)((value << 4) | (c - 'a' + 10));
+      else return false;
+    }
+    key[i] = value;
+  }
+  return true;
+}
+
+// ---- channel-name aliases (#r2-) --------------------------------------------
+// As mikecarper/MeshCore's CompanionChannelAlias, less `mt-` (Meshtastic):
+// `#r2-name` uses the hashtag key of `#name`, and while radio2 is configured it
+// is bound to radio2 for sending and receiving.
+
+enum AliasKind : uint8_t { ALIAS_NONE = 0, ALIAS_R2 = 1, ALIAS_INVALID = 2 };
+
+struct Alias {
+  uint8_t kind;
+  bool hashtag;
+  const char* tail;
+};
+
+inline Alias parseAlias(const char* name) {
+  if (!name) return {ALIAS_INVALID, false, ""};
+  const bool hashtag = name[0] == '#';
+  const char* tail = name + (hashtag ? 1 : 0);
+  uint8_t kind = ALIAS_NONE;
+  if (!strncmp(tail, "r2-", 3)) {
+    kind = ALIAS_R2;
+    tail += 3;
+    if (!tail[0] || tail[0] == '#' || !strncmp(tail, "r2-", 3) || !strncmp(tail, "mt-", 3)) kind = ALIAS_INVALID;
+  }
+  return {kind, hashtag, tail};
+}
+
+// `hash(out, out_len, text, text_len)` is SHA-256 truncated to out_len. Replaces
+// the 128-bit app-derived key of `#r2-x` with `#x`'s; any other key is kept.
+template <typename Hash>
+bool resolveAliasKey(const char* name, uint8_t secret[32], Hash hash) {
+  const Alias a = parseAlias(name);
+  if (a.kind == ALIAS_INVALID) return false;
+  if (a.kind == ALIAS_NONE || !a.hashtag) return true;
+  for (size_t i = 16; i < 32; ++i) if (secret[i] != 0) return true;   // a 256-bit PSK
+  uint8_t app_key[16];
+  hash(app_key, sizeof app_key, (const uint8_t*)name, (int)strlen(name));
+  if (memcmp(secret, app_key, sizeof app_key) != 0) return true;      // a custom PSK
+  char canonical[40];
+  const size_t len = strlen(a.tail);
+  if (len + 2 > sizeof canonical) return false;
+  canonical[0] = '#';
+  memcpy(canonical + 1, a.tail, len + 1);
+  hash(secret, 16, (const uint8_t*)canonical, (int)strlen(canonical));
+  return true;
+}
+
+// The order channels are tried for a packet received on `origin` (lower first),
+// or -1 when this channel must not take it.
+inline int aliasReceivePriority(const char* name, uint8_t origin, bool radio2_defined) {
+  const Alias a = parseAlias(name);
+  if (a.kind == ALIAS_INVALID) return -1;
+  if (radio2_defined && a.kind == ALIAS_R2) return origin == 1 ? 0 : -1;
+  return origin == 1 ? 1 : 0;
+}
+
+// ---- CLI ------------------------------------------------------------------
+// The radio2 family of mikecarper/MeshCore's RadioProfileCLI, plus tempradio
+// and tx.media from its Companion. tx.user / tx.channel need the contact and
+// channel tables, so MediaMesh.cpp handles them with the helpers above.
 
 inline bool parseMode(const char* s, uint8_t& mode) {
   if (!strcmp(s, "rx")) { mode = MODE_RX; return true; }
@@ -260,136 +636,544 @@ inline bool parseMode(const char* s, uint8_t& mode) {
   return false;
 }
 
-// Parses "<MHz>,<kHz>,<sf>,<cr>,<mode>[,<preamble>|auto]" into `c`.
-inline bool parseRadio2(const char* text, Config& c, const char** why) {
-  char buf[96];
-  size_t n = strlen(text);
-  if (n >= sizeof(buf)) { *why = "too long"; return false; }
-  memcpy(buf, text, n + 1);
-  char* fields[7] = {};
+inline int splitFields(char* buf, char* fields[], int max) {
   int count = 0;
-  for (char* tok = strtok(buf, ","); tok && count < 7; tok = strtok(nullptr, ",")) {
+  for (char* tok = strtok(buf, ","); tok && count < max; tok = strtok(nullptr, ",")) {
     while (*tok == ' ') ++tok;
     char* end = tok + strlen(tok);
     while (end > tok && end[-1] == ' ') *--end = 0;
     fields[count++] = tok;
   }
-  if (count < 5 || count > 6) { *why = "use <MHz>,<kHz>,<sf>,<cr>,rx|rxtx[,preamble]"; return false; }
-  Config d = c;
+  return count;
+}
+
+inline bool parseUint(const char* s, uint32_t& out) {
+  if (!s || !*s) return false;
   char* e;
-  d.p.freq = strtof(fields[0], &e); if (*e) { *why = "bad frequency"; return false; }
-  d.p.bw = strtof(fields[1], &e);   if (*e) { *why = "bad bandwidth"; return false; }
-  long sf = strtol(fields[2], &e, 10); if (*e) { *why = "bad SF"; return false; }
-  long cr = strtol(fields[3], &e, 10); if (*e) { *why = "bad CR"; return false; }
-  d.p.sf = (uint8_t)(sf < 0 || sf > 255 ? 0 : sf);
-  d.p.cr = (uint8_t)(cr < 0 || cr > 255 ? 0 : cr);
-  if (!parseMode(fields[4], d.mode) || d.mode == MODE_OFF) { *why = "mode must be rx or rxtx"; return false; }
-  d.p.preamble = 0;
-  if (count == 6 && strcmp(fields[5], "auto") != 0) {
-    long pre = strtol(fields[5], &e, 10);
-    if (*e || pre < 0 || pre > kMaxPreamble) { *why = "bad preamble"; return false; }
-    d.p.preamble = (uint16_t)pre;
-  }
-  if (!validParams(d.p)) { *why = "invalid radio settings"; return false; }
-  c = d;
+  const unsigned long v = strtoul(s, &e, 10);
+  if (*e || s[0] == '-' || s[0] == '+') return false;
+  out = (uint32_t)v;
   return true;
 }
 
-struct CliResult {
-  bool handled = false;
-  bool changed = false;
+inline bool parsePreambleField(const char* s, uint16_t& out) {
+  if (!strcmp(s, "auto")) { out = 0; return true; }
+  uint32_t v;
+  if (!parseUint(s, v) || (v != 0 && (v < 8 || v > kMaxPreamble))) return false;
+  out = (uint16_t)v;
+  return true;
+}
+
+// UTC seconds, or +N for N whole minutes from `now` (radio_profiles.md).
+inline bool parseScheduleTime(const char* s, uint32_t now, uint32_t& out) {
+  if (!s) return false;
+  const bool rel = s[0] == '+';
+  uint32_t v;
+  if (!parseUint(rel ? s + 1 : s, v)) return false;
+  if (rel) {
+    if (!v || v > (UINT32_MAX - now) / 60U) return false;
+    v = now + v * 60U;
+  }
+  out = v;
+  return true;
+}
+
+// Parses "<MHz>,<kHz>,<sf>,<cr>,<mode>[,extra...][,preamble]": `extra` fields
+// (minutes, start, end) are returned for the caller. `allow_off` accepts no
+// tuple at all, only "off".
+inline bool parseTuple(const char* text, Profile2& out, const char* extra[], int n_extra, char* buf,
+                       size_t cap, const char** why) {
+  const size_t n = strlen(text);
+  if (n >= cap) { *why = "too long"; return false; }
+  memcpy(buf, text, n + 1);
+  char* f[9] = {};
+  const int count = splitFields(buf, f, 9);
+  if (count != 5 + n_extra && count != 6 + n_extra) { *why = "fields"; return false; }
+  Profile2 d;
+  char* e;
+  d.p.freq = strtof(f[0], &e); if (*e || !*f[0]) { *why = "bad frequency"; return false; }
+  d.p.bw = strtof(f[1], &e);   if (*e || !*f[1]) { *why = "bad bandwidth"; return false; }
+  uint32_t sf, cr;
+  if (!parseUint(f[2], sf) || sf > 255) { *why = "bad SF"; return false; }
+  if (!parseUint(f[3], cr) || cr > 255) { *why = "bad CR"; return false; }
+  d.p.sf = (uint8_t)sf;
+  d.p.cr = (uint8_t)cr;
+  if (!parseMode(f[4], d.mode) || d.mode == MODE_OFF) { *why = "mode must be rx or rxtx"; return false; }
+  for (int i = 0; i < n_extra; ++i) extra[i] = f[5 + i];
+  d.p.preamble = 0;
+  if (count == 6 + n_extra && !parsePreambleField(f[5 + n_extra], d.p.preamble)) { *why = "bad preamble"; return false; }
+  if (!validParams(d.p)) { *why = "invalid radio settings"; return false; }
+  out = d;
+  return true;
+}
+
+// Backwards-compatible single-purpose parser, as before (set radio2).
+inline bool parseRadio2(const char* text, Config& c, const char** why) {
+  Profile2 p;
+  char buf[96];
+  if (!parseTuple(text, p, nullptr, 0, buf, sizeof buf, why)) {
+    if (!strcmp(*why, "fields")) *why = "use <MHz>,<kHz>,<sf>,<cr>,rx|rxtx[,preamble]";
+    return false;
+  }
+  c.mode = p.mode;
+  c.p = p.p;
+  return true;
+}
+
+// Live figures a getter reports; the glue fills them from the radio.
+struct Stats {
+  uint32_t rx[2] = {};
+  uint32_t tx[2] = {};
+  uint32_t switches = 0;
+  uint32_t errors = 0;
+  uint32_t max_us = 0;            // longest retune seen (lifetime diagnostic)
+  uint8_t samples = 0;            // retunes measured since the last profile change
 };
 
-// `main` is the primary radio; `timing` the current scan timing (may be invalid
-// when radio2 is off). `supported` is false on builds without MediaMesh radio.
-inline CliResult handleCli(const char* cmd, Config& c, const Params& main, const Timing& timing,
-                           bool supported, char* reply, size_t cap) {
-  CliResult r;
+struct Env {
+  Params main;                    // the primary profile running now (tempradio or saved)
+  Params main_saved;              // the saved primary (normal radio)
+  uint16_t main_preamble = 32;    // what the primary transmits with
+  uint32_t switch_us = kDefaultSwitchUs;   // guarded retune allowance in use
+  bool supported = true;          // this radio can run a second profile
+  uint32_t now_ms = 0;
+  uint32_t epoch = 0;             // UTC seconds, 0 when the clock is unset
+  Stats stats;
+};
+
+struct CliResult {
+  bool handled = false;
+  bool save = false;              // persist Runtime::saved
+  bool apply = false;             // the second profile changed: retune / restart the scan
+  bool apply_primary = false;     // the primary profile changed (tempradio)
+};
+
+// The timing a getter shows for a second profile, with the primary in env.
+inline Timing previewTiming(const Env& env, const Params& p) {
+  return calcTiming(env.main, env.main_preamble, p, env.switch_us);
+}
+
+inline void formatTuple(const Profile2& s, uint16_t preamble, char* out, size_t cap) {
+  snprintf(out, cap, "%.3f,%.3f,%u,%u,%s,%u%s", s.p.freq, s.p.bw, s.p.sf, s.p.cr, modeName(s.mode), preamble,
+           s.p.preamble ? "" : " (auto)");
+}
+
+inline void appendLeft(uint32_t ms, char* out, size_t cap) {
+  const uint32_t minutes = (ms + 59999UL) / 60000UL;
+  const size_t used = strlen(out);
+  if (used < cap) {
+    snprintf(out + used, cap - used, "; %lud%luh%lum (%lu min) left", (unsigned long)(minutes / 1440),
+             (unsigned long)(minutes / 60 % 24), (unsigned long)(minutes % 60), (unsigned long)minutes);
+  }
+}
+
+inline void formatProfileGet(const Env& env, const Profile2& s, char* out, size_t cap) {
+  if (s.mode == MODE_OFF) { snprintf(out, cap, "> off"); return; }
+  const Timing t = previewTiming(env, s.p);
+  char tuple[64];
+  formatTuple(s, t.valid ? t.preamble[1] : (s.p.preamble ? s.p.preamble : kMinPreamble), tuple, sizeof tuple);
+  snprintf(out, cap, "> %s", tuple);
+}
+
+// Ends a temporary second profile and every tempradioat2 schedule.
+inline void endTemp2(Runtime& r) {
+  r.temp2 = false;
+  r.temp2_slot = 0xFF;
+  for (int i = 4; i < 8; ++i) r.sched[i] = Schedule();
+}
+
+inline CliResult handleCli(const char* cmd, Runtime& r, const Env& env, char* reply, size_t cap) {
+  CliResult res;
   while (*cmd == ' ') ++cmd;
-  const bool is_get = !strncmp(cmd, "get ", 4);
-  const bool is_set = !strncmp(cmd, "set ", 4);
-  if (!is_get && !is_set) return r;
-  const char* key = cmd + 4;
-  while (*key == ' ') ++key;
-  char name[24];
+  enum { GET, SET, DEL, BARE } verb = BARE;
+  const char* text = cmd;
+  if (!strncmp(text, "get ", 4)) { verb = GET; text += 4; }
+  else if (!strncmp(text, "set ", 4)) { verb = SET; text += 4; }
+  else if (!strncmp(text, "del ", 4)) { verb = DEL; text += 4; }
+  while (*text == ' ') ++text;
+  char key[24];
   size_t k = 0;
-  while (key[k] && key[k] != ' ' && k + 1 < sizeof(name)) { name[k] = key[k]; ++k; }
-  name[k] = 0;
-  const char* arg = key + k;
+  while (text[k] && text[k] != ' ' && k + 1 < sizeof(key)) { key[k] = text[k]; ++k; }
+  key[k] = 0;
+  if (text[k] && text[k] != ' ') return res;   // key too long: not ours
+  const char* arg = text + k;
   while (*arg == ' ') ++arg;
 
-  const bool radio2 = !strcmp(name, "radio2");
-  const bool media = !strcmp(name, "tx.media");
-  const bool cross = !strcmp(name, "radio2.cross");
-  const bool timing_key = !strcmp(name, "radio2.timing");
-  const bool summary = !strcmp(name, "mediamesh");
-  if (!radio2 && !media && !cross && !timing_key && !summary) return r;
-  r.handled = true;
+  const bool base = !strcmp(key, "radio2");
+  const bool temp = !strcmp(key, "tempradio2");
+  const bool sched = !strcmp(key, "radioat2") || !strcmp(key, "tempradioat2");
+  const bool sched_temp = !strcmp(key, "tempradioat2");
+  const bool media = !strcmp(key, "tx.media");
+  const bool cross = !strcmp(key, "radio2.cross");
+  const bool timing_key = !strcmp(key, "radio2.timing") || !strcmp(key, "radio.timing");
+  const bool scan_key = !strcmp(key, "radio2.scan");
+  const bool status_key = !strcmp(key, "radio2.status");
+  const bool summary = !strcmp(key, "mediamesh");
+  const bool temp1 = !strcmp(key, "tempradio");
+  const bool normal = !strcmp(key, "normalradio");
+  if (verb == BARE && !temp1 && !normal) return res;
+  if (verb != BARE && (normal || (temp1 && verb == DEL))) return res;
+  if (!base && !temp && !sched && !media && !cross && !timing_key && !scan_key && !status_key && !summary
+      && !temp1 && !normal) {
+    return res;
+  }
+  if (verb == DEL && !sched) return res;
+  res.handled = true;
+  const Profile2 active = r.active2();
 
-  if (is_get) {
-    char p[64];
-    if (radio2) {
-      formatParams(c, p, sizeof p);
-      snprintf(reply, cap, "> %s", p);
-    } else if (media) {
-      snprintf(reply, cap, "> %s", routeName(c.route));
-    } else if (cross) {
-      snprintf(reply, cap, "> off");
-    } else if (timing_key) {
-      if (!scanning(c) || !timing.valid) snprintf(reply, cap, "> radio2 off");
-      else snprintf(reply, cap, "> dwell=%.1f,%.1fms; preamble=%u,%u; need=%u,%u; switch=%luus%s%s",
-                    timing.dwell_us[0] / 1000.0, timing.dwell_us[1] / 1000.0,
-                    timing.preamble[0], timing.preamble[1], timing.need[0], timing.need[1],
-                    (unsigned long)timing.switch_us,
-                    timing.main_ok ? "" : "; WARN main preamble too short for scanning",
-                    timing.media_capped ? "; WARN radio2 preamble capped" : "");
-    } else {
-      formatParams(c, p, sizeof p);
-      snprintf(reply, cap, "> radio2=%s; tx.media=%s; %s", p, routeName(c.route),
-               !supported ? "unsupported on this radio" : mediaOnRadio2(c) ? "media on radio2" : "media on radio");
+  // ---- read-only diagnostics ----
+  if (timing_key || scan_key || status_key || summary) {
+    if (verb != GET || *arg) { snprintf(reply, cap, "Error: %s is read-only", key); return res; }
+    const Timing t = active.mode != MODE_OFF ? previewTiming(env, active.p) : Timing();
+    if (summary) {
+      char p[64];
+      if (r.saved.mode == MODE_OFF) snprintf(p, sizeof p, "off");
+      else formatTuple(savedProfile(r.saved), t.valid ? t.preamble[1] : 0, p, sizeof p);
+      snprintf(reply, cap, "> radio2=%s; tx.media=%s; cross=%s%s; %s", p, policyName(r.saved.media),
+               crossName(r.saved.cross), r.temp2 ? "; tempradio2 on" : "",
+               !env.supported ? "unsupported on this radio"
+               : (policyMask(r, r.saved.media) & 2) ? "media on radio2" : "media on radio");
+      return res;
     }
-    return r;
+    if (status_key) {
+      snprintf(reply, cap, "> %s; RX=%lu,%lu TX=%lu,%lu switches=%lu errors=%lu max=%luus preamble=%u,%u",
+               modeName(active.mode), (unsigned long)env.stats.rx[0], (unsigned long)env.stats.rx[1],
+               (unsigned long)env.stats.tx[0], (unsigned long)env.stats.tx[1], (unsigned long)env.stats.switches,
+               (unsigned long)env.stats.errors, (unsigned long)env.stats.max_us, env.main_preamble,
+               t.valid ? t.preamble[1] : 0);
+      if (t.valid) {
+        const size_t used = strlen(reply);
+        const uint8_t s = env.stats.samples > kSwitchSamples ? kSwitchSamples : env.stats.samples;
+        if (used < cap) {
+          snprintf(reply + used, cap - used, "; test=%u/%u%s budget=%luus", s, kSwitchSamples,
+                   s >= kSwitchSamples ? " ready" : " pending", (unsigned long)env.switch_us);
+        }
+        appendWarnings(t, active.p, reply, cap);
+      }
+      if (r.temp2) appendLeft(msLeft(env.now_ms, r.temp2_end_ms), reply, cap);
+      return res;
+    }
+    if (!t.valid) { snprintf(reply, cap, "> off"); return res; }
+    if (scan_key) {
+      snprintf(reply, cap, "> slow=%s; listen_us=%lu,%lu; preamble=%u,%u", t.slow ? "radio2" : "radio",
+               (unsigned long)t.dwell_us[0], (unsigned long)t.dwell_us[1], t.preamble[0], t.preamble[1]);
+      appendWarnings(t, active.p, reply, cap);
+      return res;
+    }
+    const double T0 = symbolUs(env.main.bw, env.main.sf), T1 = symbolUs(active.p.bw, active.p.sf);
+    const uint8_t s = env.stats.samples > kSwitchSamples ? kSwitchSamples : env.stats.samples;
+    snprintf(reply, cap, "> chirps=%.2f,%.2f; need=%u,%u; switch=%luus; loop=0us; test=%u/%u%s; preamble=%u,%u",
+             T0 > 0 ? t.dwell_us[0] / T0 : 0.0, T1 > 0 ? t.dwell_us[1] / T1 : 0.0, t.need[0], t.need[1],
+             (unsigned long)t.switch_us, s, kSwitchSamples, s >= kSwitchSamples ? " ready" : " pending",
+             t.preamble[0], t.preamble[1]);
+    if (!t.main_ok) {
+      const size_t used = strlen(reply);
+      if (used < cap) snprintf(reply + used, cap - used, "; WARN main preamble too short for scanning");
+    }
+    appendWarnings(t, active.p, reply, cap);
+    return res;
   }
 
-  if (summary || timing_key) { snprintf(reply, cap, "Error: %s is read-only", name); return r; }
-  if (cross) {
-    if (strcmp(arg, "auto") && strcmp(arg, "on") && strcmp(arg, "off")) {
-      snprintf(reply, cap, "Error: use set radio2.cross auto|on|off");
-    } else {
-      snprintf(reply, cap, "OK - companion does not forward between profiles");
-    }
-    return r;
-  }
+  // ---- tx.media ----
   if (media) {
-    if (!strcmp(arg, "radio") || !strcmp(arg, "radio2")) {
-      const uint8_t route = !strcmp(arg, "radio2") ? ROUTE_RADIO2 : ROUTE_RADIO;
-      r.changed = route != c.route;
-      c.route = route;
-      snprintf(reply, cap, "OK - tx.media %s%s", routeName(route),
-               route == ROUTE_RADIO2 && c.mode != MODE_RXTX ? "; radio2 must be rxtx to send" : "");
-    } else {
-      snprintf(reply, cap, "Error: use set tx.media radio|radio2");
+    if (verb == GET && !*arg) {
+      const uint8_t m = policyMask(r, r.saved.media);
+      snprintf(reply, cap, "> %s; active=%s", policyName(r.saved.media), maskName(m));
+      return res;
     }
-    return r;
+    uint8_t p;
+    if (verb != SET || !parsePolicy(arg, p)) {
+      snprintf(reply, cap, "Error: use set tx.media auto|radio|radio2|both|off");
+      return res;
+    }
+    if (!env.supported && (p == TX_RADIO2 || p == TX_BOTH)) {
+      snprintf(reply, cap, "Error: radio2 is not supported on this radio");
+      return res;
+    }
+    res.save = p != r.saved.media;
+    r.saved.media = p;
+    snprintf(reply, cap, "OK - tx.media %s%s", policyName(p),
+             (p == TX_RADIO2 || p == TX_BOTH) && !canTransmit(r, 1) ? "; radio2 must be rxtx to send" : "");
+    return res;
   }
-  // set radio2
-  if (!supported) { snprintf(reply, cap, "Error: radio2 is not supported on this radio"); return r; }
-  if (!strcmp(arg, "off")) {
-    r.changed = c.mode != MODE_OFF;
-    c.mode = MODE_OFF;
-    snprintf(reply, cap, "OK - radio2 off");
-    return r;
+
+  // ---- radio2.cross ----
+  if (cross) {
+    if (verb == GET && !*arg) { snprintf(reply, cap, "> %s", crossName(r.saved.cross)); return res; }
+    if (verb != SET || (strcmp(arg, "auto") && strcmp(arg, "on") && strcmp(arg, "off"))) {
+      snprintf(reply, cap, "Error: use get/set radio2.cross [auto|on|off]");
+      return res;
+    }
+    const uint8_t c = !strcmp(arg, "on") ? CROSS_ON : !strcmp(arg, "off") ? CROSS_OFF : CROSS_AUTO;
+    res.save = c != r.saved.cross;
+    r.saved.cross = c;
+    snprintf(reply, cap, "OK");
+    return res;
   }
-  Config d = c;
+
+  // ---- tempradio / normalradio (the primary profile) ----
+  if (temp1 || normal) {
+    if (normal) {
+      res.apply_primary = r.temp1;
+      r.temp1 = false;
+      snprintf(reply, cap, "OK - normal radio restored");
+      return res;
+    }
+    if (!*arg) {
+      if (!r.temp1) { snprintf(reply, cap, "TempRadio inactive"); return res; }
+      snprintf(reply, cap, "TempRadio active: %.3f,%.2f,%u,%u %lus left", r.temp1_p.freq, r.temp1_p.bw, r.temp1_p.sf,
+               r.temp1_p.cr, (unsigned long)((msLeft(env.now_ms, r.temp1_end_ms) + 999) / 1000));
+      return res;
+    }
+    if (verb == GET) { snprintf(reply, cap, "Error: use tempradio freq,bw,sf,cr,minutes[,preamble]"); return res; }
+    char buf[96];
+    const size_t n = strlen(arg);
+    if (n >= sizeof buf) { snprintf(reply, cap, "Error: params too long"); return res; }
+    memcpy(buf, arg, n + 1);
+    char* f[7] = {};
+    const int count = splitFields(buf, f, 7);
+    Params p;
+    uint32_t sf = 0, cr = 0, minutes = 0;
+    char* e = nullptr;
+    bool ok = count == 5 || count == 6;
+    if (ok) { p.freq = strtof(f[0], &e); ok = !*e && *f[0]; }
+    if (ok) { p.bw = strtof(f[1], &e); ok = !*e && *f[1]; }
+    ok = ok && parseUint(f[2], sf) && sf <= 255 && parseUint(f[3], cr) && cr <= 255 && parseUint(f[4], minutes)
+         && minutes >= 1 && minutes <= kMaxTempMinutes;
+    p.sf = (uint8_t)sf;
+    p.cr = (uint8_t)cr;
+    if (ok && count == 6) ok = parsePreambleField(f[5], p.preamble);
+    if (!ok || !validParams(p)) {
+      snprintf(reply, cap, "ERR usage: tempradio freq,bw,sf,cr,minutes (minutes 1-%lu)", (unsigned long)kMaxTempMinutes);
+      return res;
+    }
+    if (active.mode != MODE_OFF && sameChannel(p, active.p)) {
+      snprintf(reply, cap, "Error: tempradio matches radio2");
+      return res;
+    }
+    r.temp1 = true;
+    r.temp1_p = p;
+    r.temp1_end_ms = env.now_ms + minutes * 60000UL;
+    res.apply_primary = true;
+    snprintf(reply, cap, "OK - temp params for %lu mins", (unsigned long)minutes);
+    return res;
+  }
+
+  // ---- getters for radio2 / tempradio2 ----
+  if ((base || temp) && verb == GET && !*arg) {
+    if (temp && !r.temp2) { snprintf(reply, cap, "> off"); return res; }
+    const Profile2 s = temp ? r.temp2_prof : savedProfile(r.saved);
+    formatProfileGet(env, s, reply, cap);
+    if (temp) appendLeft(msLeft(env.now_ms, r.temp2_end_ms), reply, cap);
+    if (s.mode != MODE_OFF) appendWarnings(previewTiming(env, s.p), s.p, reply, cap);
+    return res;
+  }
+
+  // ---- schedules: get / del ----
+  if (sched && (verb == GET || verb == DEL)) {
+    uint32_t index = 0;
+    if (*arg && strcmp(arg, "all") && (!parseUint(arg, index) || index < 1 || index > 4)) {
+      snprintf(reply, cap, "Error: slot must be 1-4 or all");
+      return res;
+    }
+    const int first = sched_temp ? 4 : 0;
+    if (verb == DEL) {
+      for (int i = 0; i < 4; ++i) {
+        if (index && index != (uint32_t)(i + 1)) continue;
+        if (r.sched[first + i].started && r.temp2 && r.temp2_slot == first + i) {
+          r.temp2 = false;
+          r.temp2_slot = 0xFF;
+          res.apply = true;
+        }
+        r.sched[first + i] = Schedule();
+      }
+      snprintf(reply, cap, "OK");
+      return res;
+    }
+    if (!index) {
+      snprintf(reply, cap, "> slots: ");
+      for (int i = 0; i < 4; ++i) {
+        if (!r.sched[first + i].active) continue;
+        const size_t used = strlen(reply);
+        if (used < cap) snprintf(reply + used, cap - used, "%d@%lu ", i + 1, (unsigned long)r.sched[first + i].start);
+      }
+      return res;
+    }
+    const Schedule& s = r.sched[first + index - 1];
+    if (!s.active) { snprintf(reply, cap, "> off"); return res; }
+    formatProfileGet(env, s.prof, reply, cap);
+    const size_t used = strlen(reply);
+    if (used < cap) snprintf(reply + used, cap - used, "; @%lu-%lu", (unsigned long)s.start, (unsigned long)s.end);
+    return res;
+  }
+
+  if (verb != SET) {
+    snprintf(reply, cap, "Error: invalid radio2 command");
+    return res;
+  }
+
+  // ---- set ... off ----
+  if ((base || temp) && !strcmp(arg, "off")) {
+    if (base) {
+      res.save = r.saved.mode != MODE_OFF;
+      r.saved.mode = MODE_OFF;
+      for (auto& s : r.sched) s = Schedule();
+    }
+    res.apply = r.temp2 || base;
+    endTemp2(r);
+    snprintf(reply, cap, "OK - %s", !base && r.saved.mode != MODE_OFF ? "saved radio2 restored" : "single radio");
+    return res;
+  }
+
+  if (!env.supported) {
+    snprintf(reply, cap, "Error: radio2 is not supported on this radio");
+    return res;
+  }
+
+  // ---- set radio2 / tempradio2 / radioat2 / tempradioat2 <tuple> ----
+  Profile2 prof;
+  const char* extra[2] = {};
+  const int n_extra = sched_temp ? 2 : (sched || temp) ? 1 : 0;
+  char buf[140];
   const char* why = "";
-  if (!parseRadio2(arg, d, &why)) { snprintf(reply, cap, "Error: %s", why); return r; }
-  if (sameChannel(d.p, main)) { snprintf(reply, cap, "Error: radio2 matches the main radio"); return r; }
-  r.changed = !sameParams(d.p, c.p) || d.mode != c.mode;
-  c = d;
-  char p[64];
-  formatParams(c, p, sizeof p);
-  snprintf(reply, cap, "OK - radio2 %s", p);
-  return r;
+  if (!parseTuple(arg, prof, extra, n_extra, buf, sizeof buf, &why)) {
+    if (base && strcmp(why, "fields") != 0) snprintf(reply, cap, "Error: %s", why);
+    else {
+      snprintf(reply, cap, "Error: use %s f,bw,sf,cr,rx|rxtx%s[,preamble|auto]", key,
+               sched_temp ? ",start,end (UTC or +minutes)" : sched ? ",start (UTC or +minutes)" : temp ? ",minutes" : "");
+    }
+    return res;
+  }
+  if (sameChannel(prof.p, env.main) || sameChannel(prof.p, env.main_saved)) {
+    snprintf(reply, cap, "Error: radio2 matches the main radio");
+    return res;
+  }
+  const Timing preview = previewTiming(env, prof.p);
+  const uint16_t pre = preview.valid ? preview.preamble[1] : 0;
+
+  if (sched) {
+    uint32_t start = 0, end = 0;
+    const uint32_t epoch = env.epoch;
+    bool ok = parseScheduleTime(extra[0], epoch, start);
+    if (ok && sched_temp) ok = parseScheduleTime(extra[1], epoch, end);
+    if (!ok) {
+      snprintf(reply, cap, "Error: use %s f,bw,sf,cr,rx|rxtx,%s[,preamble|auto]", key,
+               sched_temp ? "start,end (UTC or +minutes)" : "start (UTC or +minutes)");
+      return res;
+    }
+    if (!epoch || start <= epoch || start - epoch > kMaxScheduleSeconds
+        || (sched_temp && (end <= start || end - epoch > kMaxScheduleSeconds))) {
+      snprintf(reply, cap, "Error: future UTC start/end required, within 24 days");
+      return res;
+    }
+    const uint32_t start_ms = env.now_ms + (start - epoch) * 1000UL;
+    if (sched_temp) {
+      if (r.temp2 && (int32_t)(r.temp2_end_ms - start_ms) > 0) {
+        snprintf(reply, cap, "Error: temporary schedule overlaps active session");
+        return res;
+      }
+      for (int i = 4; i < 8; ++i) {
+        const Schedule& s = r.sched[i];
+        if (s.active && start < s.end && end > s.start) {
+          snprintf(reply, cap, "Error: temporary schedules overlap");
+          return res;
+        }
+      }
+    }
+    const int first = sched_temp ? 4 : 0;
+    for (int i = 0; i < 4; ++i) {
+      Schedule& s = r.sched[first + i];
+      if (s.active) continue;
+      s = Schedule();
+      s.prof = prof;
+      s.start = start;
+      s.end = end;
+      s.start_ms = start_ms;
+      s.end_ms = sched_temp ? env.now_ms + (end - epoch) * 1000UL : 0;
+      s.temporary = sched_temp;
+      s.active = true;
+      snprintf(reply, cap, "OK - %s %d queued, preamble=%u", key, i + 1, pre);
+      appendWarnings(preview, prof.p, reply, cap);
+      return res;
+    }
+    snprintf(reply, cap, "Error: all four schedule slots occupied");
+    return res;
+  }
+
+  if (temp) {
+    if (r.hasTempSchedule()) {
+      snprintf(reply, cap, "Error: clear tempradioat2 schedules first");
+      return res;
+    }
+    uint32_t minutes = 0;
+    if (!parseUint(extra[0], minutes) || minutes < 1 || minutes > kMaxTempMinutes) {
+      snprintf(reply, cap, "Error: use tempradio2 f,bw,sf,cr,rx|rxtx,minutes[,preamble|auto]");
+      return res;
+    }
+    r.temp2 = true;
+    r.temp2_prof = prof;
+    r.temp2_end_ms = env.now_ms + minutes * 60000UL;
+    r.temp2_slot = 0xFF;
+    res.apply = true;
+    snprintf(reply, cap, "OK - tempradio2 %lud%luh%lum (%lu min); preamble=%u", (unsigned long)(minutes / 1440),
+             (unsigned long)(minutes / 60 % 24), (unsigned long)(minutes % 60), (unsigned long)minutes, pre);
+    appendWarnings(preview, prof.p, reply, cap);
+    return res;
+  }
+
+  // set radio2 <tuple>
+  res.save = !sameParams(prof.p, r.saved.p) || prof.mode != r.saved.mode;
+  res.apply = res.save && !r.temp2;
+  r.saved.mode = prof.mode;
+  r.saved.p = prof.p;
+  snprintf(reply, cap, "OK - radio2 %s; preamble=%u", modeName(prof.mode), pre);
+  appendWarnings(preview, prof.p, reply, cap);
+  return res;
+}
+
+// ---- timers ---------------------------------------------------------------
+// Ends temporary sessions and starts schedules. Call every loop.
+
+struct TickResult {
+  bool save = false;
+  bool apply = false;
+  bool apply_primary = false;
+};
+
+inline TickResult tick(Runtime& r, uint32_t now_ms) {
+  TickResult t;
+  if (r.temp1 && deadlinePassed(now_ms, r.temp1_end_ms)) {
+    r.temp1 = false;
+    t.apply_primary = true;
+  }
+  if (r.temp2 && deadlinePassed(now_ms, r.temp2_end_ms)) {
+    if (r.temp2_slot < 8) r.sched[r.temp2_slot] = Schedule();
+    r.temp2 = false;
+    r.temp2_slot = 0xFF;
+    t.apply = true;
+  }
+  for (int i = 0; i < 8; ++i) {
+    Schedule& s = r.sched[i];
+    if (!s.active || s.started || !deadlinePassed(now_ms, s.start_ms)) continue;
+    if (!s.temporary) {
+      // radioat2: becomes the saved second profile.
+      r.saved.mode = s.prof.mode;
+      r.saved.p = s.prof.p;
+      s = Schedule();
+      t.save = true;
+      t.apply = t.apply || !r.temp2;
+    } else if (deadlinePassed(now_ms, s.end_ms)) {
+      s = Schedule();   // missed entirely (a long stall): nothing to run
+    } else {
+      s.started = true;
+      r.temp2 = true;
+      r.temp2_prof = s.prof;
+      r.temp2_end_ms = s.end_ms;
+      r.temp2_slot = (uint8_t)i;
+      t.apply = true;
+    }
+  }
+  return t;
 }
 
 }  // namespace mediamesh

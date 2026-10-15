@@ -153,6 +153,53 @@ public:
                       const char* text, uint32_t& est_timeout,
                       uint32_t* out_packet_hash4 = nullptr, TxtTxDebugInfo* out_dbg = nullptr);
 
+  // ---- radio2 TX choices (tx.user / tx.channel / #r2- channels; MEDIAMESH.md) ----
+  // Packets queued while a TxContext is alive take its choice; these wrappers put
+  // each contact's own choice around the core's contact sends.
+  struct TxContext {
+    uint8_t prev;
+    explicit TxContext(uint8_t policy) : prev(mediamesh::setTxContext(policy)) {}
+    ~TxContext() { mediamesh::setTxContext(prev); }
+  };
+  static uint8_t contactTxPolicy(const ContactInfo& c) { return mediamesh::userPolicy(c.id.pub_key); }
+  int sendLogin(const ContactInfo& recipient, const char* password, uint32_t& est_timeout) {
+    TxContext ctx(contactTxPolicy(recipient));
+    return BaseChatMesh::sendLogin(recipient, password, est_timeout);
+  }
+  int sendAnonReq(const ContactInfo& recipient, const uint8_t* data, uint8_t len, uint32_t& tag, uint32_t& est_timeout) {
+    TxContext ctx(contactTxPolicy(recipient));
+    return BaseChatMesh::sendAnonReq(recipient, data, len, tag, est_timeout);
+  }
+  int sendRequest(const ContactInfo& recipient, uint8_t req_type, uint32_t& tag, uint32_t& est_timeout) {
+    TxContext ctx(contactTxPolicy(recipient));
+    return BaseChatMesh::sendRequest(recipient, req_type, tag, est_timeout);
+  }
+  int sendRequest(const ContactInfo& recipient, const uint8_t* req_data, uint8_t data_len, uint32_t& tag,
+                  uint32_t& est_timeout) {
+    TxContext ctx(contactTxPolicy(recipient));
+    return BaseChatMesh::sendRequest(recipient, req_data, data_len, tag, est_timeout);
+  }
+  /** The channel slot the next group send is for: two slots can share a key
+   *  (`#x` and `#r2-x`), and only the slot says which routing applies. */
+  struct TxChannelSlot {
+    MyMesh& m;
+    int prev;
+    TxChannelSlot(MyMesh& mesh, int slot) : m(mesh), prev(mesh._tx_channel_slot) { mesh._tx_channel_slot = slot; }
+    ~TxChannelSlot() { m._tx_channel_slot = prev; }
+  };
+  /** The TX choice for a channel slot: radio2 for a `#r2-` name while radio2 is
+   *  configured, else its tx.channel setting. */
+  uint8_t channelTxPolicy(int slot);
+  /** A `#r2-` channel while radio2 is configured: sent and received on radio2 only. */
+  bool channelBoundToRadio2(int slot);
+  /** The channel as stored (the app's name and key). getChannel() resolves a
+   *  `#r2-` alias's automatic key to the wire key. */
+  bool getChannelRaw(int idx, ChannelDetails& dest) { return BaseChatMesh::getChannel(idx, dest); }
+  bool getChannel(int idx, ChannelDetails& dest);
+  bool setChannel(int idx, const ChannelDetails& src);
+  /** tx.user / tx.channel; false when `cmd` is neither. */
+  bool handleTxRouteCli(const char* cmd, char* reply, size_t cap);
+
   const char *getNodeName();
   NodePrefs *getNodePrefs();
   uint32_t getBLEPin();
@@ -266,6 +313,21 @@ protected:
   uint8_t getAutoAddMaxHops() const override;
   bool filterRecvFloodPacket(mesh::Packet* packet) override;
   bool allowPacketForward(const mesh::Packet* packet) override;
+  // The profile the packet being processed arrived on (radio2 channel lookups),
+  // and each contact's TX choice around the core's ACKs and replies.
+  mesh::DispatcherAction onRecvPacket(mesh::Packet* pkt) override;
+  void onPeerDataRecv(mesh::Packet* packet, uint8_t type, int sender_idx, const uint8_t* secret, uint8_t* data,
+                      size_t len) override;
+  bool onPeerPathRecv(mesh::Packet* packet, int sender_idx, const uint8_t* secret, uint8_t* path, uint8_t path_len,
+                      uint8_t extra_type, uint8_t* extra, uint8_t extra_len) override;
+  void onGroupDataRecv(mesh::Packet* packet, uint8_t type, const mesh::GroupChannel& channel, uint8_t* data,
+                       size_t len) override;
+  uint8_t _rx_origin = 0;
+  int _tx_channel_slot = -1;
+  /** The TX choice of the contact whose shared secret this is (none: kNoContext). */
+  uint8_t contactPolicyBySecret(const uint8_t* secret);
+  /** Configured slot for a channel key, preferring by the received profile. */
+  int findChannelSlotForRx(const mesh::GroupChannel& ch);
 
   void sendFloodScoped(const TransportKey& scope, mesh::Packet* pkt, uint32_t delay_millis);
   // Meshcomod: synthetic local command contact (no RF)
@@ -353,7 +415,7 @@ protected:
   bool onContactLoaded(const ContactInfo& contact) override { return addContact(contact); }
   bool getContactForSave(uint32_t idx, ContactInfo& contact) override { return getContactByIdx(idx, contact); }
   bool onChannelLoaded(uint8_t channel_idx, const ChannelDetails& ch) override { return setChannel(channel_idx, ch); }
-  bool getChannelForSave(uint8_t channel_idx, ChannelDetails& ch) override { return getChannel(channel_idx, ch); }
+  bool getChannelForSave(uint8_t channel_idx, ChannelDetails& ch) override { return getChannelRaw(channel_idx, ch); }
 
   void clearPendingReqs() {
     pending_login = pending_status = pending_telemetry = pending_discovery = pending_req = 0;
@@ -1056,7 +1118,7 @@ public:
   bool voxSendRaw(const uint8_t* path, uint8_t path_len, const uint8_t* data, size_t len) {
     mesh::Packet* pkt = createRawData(data, len);
     if (!pkt) return false;
-    mediamesh::markPacket(pkt);   // photo/voice transfer: radio2 when MediaMesh is on
+    mediamesh::markMedia(pkt);   // photo/voice transfer: tx.media
     sendDirect(pkt, path, path_len);
     return true;
   }
@@ -1064,11 +1126,11 @@ public:
   bool voxSendChannelData(int idx, uint16_t type, const uint8_t* data, size_t len) {
     ChannelDetails cd;
     if (idx < 0 || idx >= MAX_GROUP_CHANNELS || !getChannel(idx, cd) || !channelSlotConfigured(cd)) return false;
-    return sendGroupDataMedia(cd.channel, nullptr, OUT_PATH_UNKNOWN, type, data, (int)len);
+    return sendGroupDataMedia(cd.channel, nullptr, OUT_PATH_UNKNOWN, type, data, (int)len, idx);
   }
   /** sendGroupData that marks Open TAK photo/voice datagrams for MediaMesh. */
   bool sendGroupDataMedia(mesh::GroupChannel& channel, uint8_t* path, uint8_t path_len, uint16_t data_type,
-                          const uint8_t* data, int data_len);
+                          const uint8_t* data, int data_len, int slot = -1);
   /** A contact's route for raw data: packed out_path_len and its bytes. */
   bool voxContactRoute(const uint8_t pub[32], uint8_t* path, uint8_t* packed_len) {
     ContactInfo* c = lookupContactByPubKey(pub, PUB_KEY_SIZE);

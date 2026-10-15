@@ -71,6 +71,7 @@ class MeshIo : public otp::Io {
       while (*n == '#') n++;
       if (strcmp(n, name) != 0) continue;
       const uint32_t ts = the_mesh.getRTCClock()->getCurrentTimeUnique();
+      MyMesh::TxChannelSlot tx_slot(the_mesh, i);   // the slot's radio2 routing
       if (!the_mesh.sendGroupMessage(ts, cd.channel, the_mesh.getNodePrefs()->node_name, (char*)text,
                                      (int)strlen(text)))
         return false;

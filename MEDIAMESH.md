@@ -1,72 +1,145 @@
-# MediaMesh: photos and voice on a second frequency
+# MediaMesh and radio2: a second LoRa profile
 
-MediaMesh moves the photos and voice clips that
+MediaMesh puts a second LoRa profile (`radio2`) on the same radio. Its main use
+is moving the photos and voice clips that
 [MeshCore Open TAK](https://github.com/jade-on-mesh/meshcore-open-tak) sends onto
-their own LoRa channel (`radio2`). Text, adverts, ACKs and everything else stay
-on the main mesh. The same radio listens to both, so a node with MediaMesh on
-still hears the main mesh and can be used with stock repeaters.
+their own, faster channel while text, adverts and ACKs stay on the main mesh.
+The radio listens to both, so a node with MediaMesh on still hears the main mesh
+and works with stock repeaters.
 
-It follows the `radio2` design in
+It is the two-profile design of
 [mikecarper/MeshCore](https://github.com/mikecarper/MeshCore/blob/keymindCascade/docs/radio_profiles.md),
-including its command names, so an app can drive either firmware the same way.
+with the same commands and replies, so an app can drive either firmware the same
+way. Everything there is here except Meshtastic chat (`mt.*`, `#mt-` channels)
+and the infrastructure-only `tx.reply`.
 
 ## Turning it on
 
 **Settings → Radio → MediaMesh Settings**, under the main Radio card:
 
-- **Photos & voice on MediaMesh**: on = listen on radio2 and send media there.
-  Off = radio2 off; media goes back to the main mesh.
-- **Frequency, Bandwidth, SF, CR**: the MediaMesh radio. A field applies when you
+- **Photos & voice on MediaMesh**: on = radio2 on (`rxtx`), photos and voice sent
+  there (`tx.media radio2`), and nothing else copied onto it (`radio2.cross off`).
+  Off = radio2 off.
+- **Frequency, Bandwidth, SF, CR**: the radio2 profile. A field applies when you
   leave it. It must differ from the main radio.
-- **Listen main / media**: how long each scan visit lasts.
-- **MediaMesh preamble**: the preamble this node sends media with (see below).
+- **Listen main / media**, **MediaMesh preamble**, **Time on air**: the scan.
+- **Temporary profile**: a running `tempradio` / `tempradio2`, with the time left.
 
 Default settings: 911.500 MHz, 250 kHz, SF7, CR 4/5. That is about 4× faster than
 SF7/62.5 for roughly 6 dB less range. Everyone exchanging media has to use the
-same MediaMesh settings.
+same settings.
 
-## From an app (companion protocol)
+## Commands
 
-The radio answers the local CLI frame `CMD_RUN_CLI_COMMAND` (`0x42`) with
-`RESP_CODE_CLI_REPLY` (`0x1D`), with the same command text as mikecarper/MeshCore:
+From an app, the radio answers the local CLI frame `CMD_RUN_CLI_COMMAND` (`0x42`)
+with `RESP_CODE_CLI_REPLY` (`0x1D`). A two-character correlation tag is echoed:
+`ab|get radio2` → `ab|> off`. Unknown text answers `Unknown command`.
+
+The tuple is **frequency in MHz, bandwidth in kHz, spreading factor, coding-rate
+denominator, mode, optional preamble in symbols** (`auto` or omitted = worked
+out from the scan). Modes: `rx` (listen only) or `rxtx` (also `rx&tx`).
+
+### The second profile
 
 ```text
-get radio2                       > 911.500,250.00,7,5,rxtx    (or "> off")
-set radio2 911.5,250,7,5,rxtx    OK - radio2 911.500,250.00,7,5,rxtx
-set radio2 911.5,250,7,5,rx      listen only
-set radio2 911.5,250,7,5,rxtx,72 with an explicit preamble (symbols)
-set radio2 off
-get tx.media                     > radio2
-set tx.media radio|radio2        where photos and voice are sent
-get radio2.timing                > dwell=9.4,21.7ms; preamble=32,64; need=32,64; switch=840us
-get mediamesh                    summary, including "unsupported on this radio"
-set radio2.cross auto|on|off     accepted; a companion does not forward between profiles
+get radio2                         > 911.500,250.000,7,5,rxtx,32 (auto)
+set radio2 911.5,250,7,5,rxtx      OK - radio2 rxtx; preamble=32
+set radio2 911.5,250,7,5,rx,72     listen only, explicit preamble
+set radio2 off                     OK - single radio (also ends temporary sessions and schedules)
 ```
 
-A two-character correlation tag is echoed: `ab|get radio2` → `ab|> off`.
-Unknown text answers `Unknown command`.
+### Temporary and scheduled profiles
 
-## What goes where
+```text
+set tempradio2 910.5,500,8,5,rxtx,120     radio2 replaced for 120 minutes (1-10080)
+get tempradio2                            > 910.500,500.000,8,5,rxtx,40 (auto); 0d2h0m (120 min) left
+set tempradio2 off                        OK - saved radio2 restored
 
-Media means the packets that carry a photo or voice clip:
+set radioat2 910.5,500,8,5,rxtx,START[,PREAMBLE]          becomes the saved radio2 at START
+set tempradioat2 910.5,500,8,5,rxtx,START,END[,PREAMBLE]  a temporary radio2 from START to END
+get radioat2 | get radioat2 1 | del radioat2 1 | del tempradioat2 all
 
-| Packet | Sent on |
+tempradio 869.525,250,11,5,30[,PREAMBLE]  the main radio replaced for 30 minutes
+tempradio | get tempradio                 TempRadio active: 869.525,250.00,11,5 1800s left
+normalradio                               the saved main radio back now
+```
+
+`START` and `END` are UTC Unix seconds, or `+N` for N whole minutes from now
+(both measured from the moment the command is accepted). They must be in the
+future and within 24 days, which needs the clock set. Four slots per family;
+temporary schedules may not overlap each other or a running session.
+
+Temporary sessions and schedules live in RAM: they end on a reboot, and run on
+the millisecond clock, so setting the clock cannot stretch them.
+
+### Where traffic goes
+
+```text
+get radio2.cross | set radio2.cross auto|on|off
+get tx.media | set tx.media auto|radio|radio2|both|off
+get tx.user | get tx.user "Alice" | set tx.user key:0123456789AB radio2
+get tx.channel | get tx.channel 0 | set tx.channel #wardriving both
+```
+
+| Choice | Sends on |
 | --- | --- |
-| Raw data from the app (`CMD_SEND_RAW_DATA`): direct photo/voice transfers and fetch requests | radio2 |
-| Channel data type `0x5643` from the app or the on-device photo fetch | radio2 |
-| `VI1:` / `VE3:` announcements, `VR3:` fetch DMs, all other text | main |
-| Team positions (`0x5654`) and every other channel-data type | main |
-| Retries of a media packet | radio2 (same packet hash) |
-| Anything this node forwards with Client repeat | main |
+| `auto` | The `radio2.cross` rules below (default) |
+| `radio` | The main profile only |
+| `radio2` | radio2 only; the send fails while radio2 is off or `rx` |
+| `both` | Both, when radio2 can send; otherwise the main profile |
+| `off` | Neither (reception is unaffected) |
 
-The firmware marks each media packet by its MeshCore packet hash when it is
-created; the radio looks it up as the packet reaches the transmitter. Everything
-received on radio2 is delivered exactly like main-mesh traffic.
+`radio2.cross` decides what `auto` traffic does, and what a forwarded packet does
+(it keeps to the profile it arrived on unless crossing is allowed):
 
-**Both ends need MediaMesh.** A photo announced on the main mesh is fetched over
-radio2, so a receiver without MediaMesh (or with different MediaMesh settings)
-can see the announcement but not download it. The `VR3:` DM fetch still reaches
-the sender, but its reply goes out on radio2.
+| Main | Second | `auto` (default) | `on` | `off` |
+| --- | --- | --- | --- | --- |
+| saved | saved | both | both | isolated |
+| `tempradio` | `tempradio2` | both | both | isolated |
+| saved | `tempradio2` | isolated | both | isolated |
+| `tempradio` | saved | isolated | both | isolated |
+
+Crossing never sends on an `rx`-only radio2.
+
+- **tx.media** is for MeshCore Open TAK photos and voice: raw data from the app
+  (`CMD_SEND_RAW_DATA`) and channel data type `0x5643`. An explicit choice wins
+  over the contact's or channel's own; `auto` leaves it to them.
+- **tx.user** covers everything addressed to a contact: messages, logins,
+  requests, and the ACKs and path returns we send them. A contact is named
+  exactly (quote names with spaces) or by `key:` + 12-64 hex digits.
+- **tx.channel** covers a channel's messages and data. A channel is named by its
+  slot number or its exact name; `"1"` in quotes is a channel named 1.
+- Choices are saved (NVS key `mmroutes`, up to 48) by key, not by slot or name:
+  renaming keeps them, a new key loses them. Getters show `active=`, where the
+  next packet would go now.
+- A packet's profiles are fixed when it is queued: its retries keep them.
+
+### `#r2-` channels
+
+A channel named `#r2-name` uses the same key as `#name` (when the app derived the
+key from the name; a key you typed is kept). While radio2 is configured (`rx` or
+`rxtx`), it is bound to radio2: it sends there only (`rx` can't send), only
+packets received on radio2 reach it, and its packets are forwarded on radio2.
+`set tx.channel` can't change that; rename the channel instead. With radio2 off
+the prefix does nothing. If you have both `#name` and `#r2-name`, a packet heard
+on radio2 goes to `#r2-name` and one heard on the main profile to `#name`.
+`#r2-` alone, or nested prefixes, are refused.
+
+### Diagnostics
+
+```text
+get radio2.status    > rxtx; RX=12,40 TX=3,9 switches=5120 errors=0 max=1203us preamble=32,64; test=4/4 ready budget=1324us
+get radio2.scan      > slow=radio; listen_us=9421,21667; preamble=32,64
+get radio2.timing    > chirps=4.60,43.33; need=32,64; switch=1324us; loop=0us; test=4/4 ready; preamble=32,64
+get mediamesh        > radio2=...; tx.media=radio2; cross=off; media on radio2
+```
+
+`get radio.timing` is the same as `get radio2.timing`. Warnings follow the
+figures: `WARN recommended preamble: radio2=64` when a profile's preamble is
+shorter than a scanning receiver needs, `short override: radio2` when that is an
+explicit value you chose, `WARN need >128` when an automatic preamble had to stop
+at 128, `WARN main preamble too short for scanning` when the main mesh's stock
+preamble can't cover the radio2 visit.
 
 ## How the scan works
 
@@ -75,20 +148,26 @@ mikecarper/MeshCore's, recomputed for the actual settings:
 
 - The **slower** profile (longer LoRa symbol, normally the main mesh) gets a
   4.6-symbol visit. The faster one gets the rest of half the slow preamble,
-  minus two retunes. With SF7/62.5 main and SF7/500 MediaMesh: 9.4 ms main,
-  21.7 ms MediaMesh.
+  minus two retunes. With SF7/62.5 main and SF7/500 radio2: 9.4 ms main,
+  21.7 ms radio2.
 - The main mesh's preamble is fixed by stock nodes (MeshCore: 32 symbols at
-  SF≤8, 16 above), so MediaMesh only fits main presets where half that preamble
+  SF≤8, 16 above), so radio2 only fits main presets where half that preamble
   covers both visits. `get radio2.timing` warns otherwise.
-- MediaMesh packets are sent with a longer preamble that covers a receiver's
-  time on the main profile plus 16 symbols to lock on: 64 symbols for SF7/500,
-  40 for SF8/500, 32 for SF9/500 (rounded up to 8, capped at 128 when automatic).
-- Retune time is measured on the first hops and padded by 10%; until then
-  1.5 ms is assumed.
-- The receiver stays on a profile while a packet is arriving there, and while it
-  transmits. A packet on one profile means the other is deaf until it ends.
-  Heavy media traffic therefore costs main-mesh reception: a 255-byte SF7/250
-  packet is ~0.2 s.
+- radio2 packets are sent with a longer preamble that covers a receiver's time
+  on the main profile plus 16 symbols to lock on: 64 symbols for SF7/500, 40 for
+  SF8/500, 32 for SF9/500 (rounded up to 8, capped at 128 when automatic).
+- Retunes are fast: while scanning the oscillator stays on between visits (XOSC
+  standby), SF/BW/CR go to the chip in one command, and the preamble rides on the
+  packet setup the receive start sends anyway. mikecarper/MeshCore measured the
+  same changes taking a hop from about 3.2 ms to 1.2 ms. Keeping the oscillator
+  on draws a little more current while radio2 is on.
+- Retune time is measured on the first four hops after any profile change and
+  padded by 10%; until then 1.5 ms is assumed. `get radio2.status` shows `test=`.
+- The receiver stays on a profile while a packet is arriving there, until the
+  packet is read out, and while it transmits. A packet on one profile means the
+  other is deaf until it ends. Heavy media traffic therefore costs main-mesh
+  reception: a 255-byte SF7/250 packet is ~0.2 s.
+- A packet sent on `both` goes out twice, back to back, once per profile.
 - Buffered receive is switched on while radio2 is active (its drain task lifts
   each packet out within ~1 ms so the scan can move on), and goes back to your
   setting when radio2 is off.
@@ -99,7 +178,7 @@ SX1262/SX1268 boards whose DIO1 reaches a GPIO: T-Deck, T-Deck Pro/Max, Heltec V
 T-LoRa Pager (SX1262), Wio Tracker L2, CrowPanel 3.5, Attaky, RAK WisMesh Tap V2.
 LR1110/LR1121 boards (ThinkNode M9, T-LoRa Pager LR1121), the T-Display P4
 (polled DIO1) and Tanmatsu show "This radio can't run MediaMesh", and answer
-`set radio2` with an error.
+radio2 commands with an error. `tempradio` works on every board.
 
 ## Limits
 
@@ -107,15 +186,18 @@ LR1110/LR1121 boards (ThinkNode M9, T-LoRa Pager LR1121), the T-Display P4
   profiles, as with mikecarper's dual-profile bench results (197/200 packets).
 - Listen-before-talk checks the profile the radio is on at that moment, which may
   not be the one it is about to send on.
-- Settings are stored separately from the node preferences (NVS key `mediamesh`)
-  and are not in the settings backup yet.
+- A `#r2-` channel's packet heard on the main profile is still marked as seen
+  (the MeshCore core does that before decrypting), so the same packet arriving
+  later on radio2 is ignored. mikecarper/MeshCore avoids this in its core.
+- Settings are stored separately from the node preferences (NVS keys
+  `mediamesh`, `mmroutes`) and are not in the settings backup yet.
 
 ## Code
 
 | Piece | Where |
 | --- | --- |
-| Settings, CLI, scan timing, media marker (host-tested) | `src/helpers/MediaMeshCore.h`, `test/test_mediamesh_core.cpp` |
-| Scanning radio wrapper | `src/helpers/MediaMeshRadio.h` (variants declare `RADIO_DRIVER_CLASS radio_driver`) |
-| Storage, apply, CLI glue | `src/helpers/MediaMesh.{h,cpp}` |
-| Media marking, `CMD_RUN_CLI_COMMAND` | `src/MyMesh.cpp`, `src/MyMesh.h` |
+| Settings, CLI, routing rules, schedules, scan timing, markers, `#r2-` (host-tested) | `src/helpers/MediaMeshCore.h`, `test/test_mediamesh_core.cpp` |
+| Scanning radio wrapper: fast retune, per-packet profiles, receive origin, tempradio | `src/helpers/MediaMeshRadio.h` (variants declare `RADIO_DRIVER_CLASS radio_driver`) |
+| Storage, timers, apply, packet marking, CLI glue | `src/helpers/MediaMesh.{h,cpp}` |
+| Contact/channel contexts, `tx.user` / `tx.channel`, `#r2-` lookups, `CMD_RUN_CLI_COMMAND` | `src/MyMesh.cpp`, `src/MyMesh.h` |
 | MediaMesh Settings card | `src/ui-touch/UITask.cpp` (`buildMediaMeshCard`) |

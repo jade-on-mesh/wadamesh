@@ -1,12 +1,16 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// MediaMesh glue: the saved settings, applying them to the radio, the media
-// packet marker and the `radio2` / `tx.media` CLI. See MEDIAMESH.md.
+// MediaMesh / radio2 glue: the saved settings and the RAM-only temporary
+// profiles and schedules, applying them to the radio, the per-packet TX choice,
+// where received packets arrived, and the radio-profile CLI. The rules are in
+// MediaMeshCore.h; see MEDIAMESH.md.
 
 #pragma once
 
 #include <stddef.h>
 #include <stdint.h>
+
+#include <helpers/StaticPoolPacketManager.h>
 
 #include "MediaMeshCore.h"
 
@@ -14,26 +18,87 @@ namespace mesh { class Packet; }
 
 namespace mediamesh {
 
-/** True when this build's radio can run MediaMesh (SX126x on ESP32). */
+/** True when this build's radio can run a second profile (SX126x on ESP32). */
 bool supported();
 
 /** The saved settings (loaded on first use). */
 const Config& config();
 
-/** Load from storage and apply to the radio. Call once the main radio is set up. */
-void begin();
+/** The running state: saved settings plus temporary profiles and schedules. */
+const Runtime& runtime();
 
-/** Replace the settings: saves and applies. Returns false if invalid. */
+/** The saved primary profile (the node's radio settings), for tempradio's restore. */
+using SavedPrimaryFn = Params (*)();
+
+/** Load from storage and apply to the radio. Call once the main radio is set up. */
+void begin(SavedPrimaryFn saved_primary);
+
+/** Timers: temporary sessions ending, schedules starting. Call every loop. */
+void loop();
+
+/** Replace the saved settings: saves and applies. Returns false if invalid. */
 bool set(const Config& c);
 
-/** Mark a packet the firmware is about to send as media (photo or voice). */
-void markPacket(const mesh::Packet* pkt);
+// ---- TX choices -------------------------------------------------------------
+
+/** Mark a packet the firmware is about to send with an explicit choice
+ *  (Policy); TX_AUTO leaves the global rules to decide when it is queued. */
+void markPacket(const mesh::Packet* pkt, uint8_t policy);
+
+/** Whether a packet already carries a choice (markPacket / markMedia). */
+bool isMarked(const mesh::Packet* pkt);
+
+/** Mark a photo or voice packet: tx.media, or `channel_policy` when tx.media
+ *  is auto and the packet belongs to a channel. */
+void markMedia(const mesh::Packet* pkt, uint8_t channel_policy = TX_AUTO);
+
+/** Packets queued while a context is set get its choice (contact or channel
+ *  traffic, including ACKs and replies). Returns the previous context. */
+uint8_t setTxContext(uint8_t policy);
+static constexpr uint8_t kNoContext = 0xFF;
+
+/** Where a packet goes under the current settings and its choice, as a mask
+ *  (bit 0 primary, bit 1 radio2): for getters' `active=`. */
+uint8_t policyMaskNow(uint8_t policy);
+
+/** The packet manager MyMesh uses: marks each packet as it is queued. */
+class MarkingPacketManager : public StaticPoolPacketManager {
+ public:
+  explicit MarkingPacketManager(int pool_size) : StaticPoolPacketManager(pool_size) {}
+  void queueOutbound(mesh::Packet* packet, uint8_t priority, uint32_t scheduled_for) override;
+};
+
+// ---- receive ----------------------------------------------------------------
+
+/** The profile a received packet arrived on: 0 primary, 1 radio2. */
+uint8_t originOf(const mesh::Packet* pkt);
+
+/** Whether a second profile is configured now (rx or rxtx): `#r2-` channels
+ *  are bound to it. */
+bool radio2Defined();
 
 /** Whether photos and voice are currently sent on radio2. */
 bool mediaActive();
 
-/** Runs `get/set radio2`, `radio2.cross`, `radio2.timing`, `tx.media` and
- *  `get mediamesh`. Returns false when `cmd` is none of these. */
+// ---- per-contact / per-channel choices ---------------------------------------
+
+/** The saved choice for a contact (first 8 bytes of its public key) or a
+ *  channel (Routes id of its secret). TX_AUTO when none. */
+uint8_t userPolicy(const uint8_t* pub_key);
+uint8_t channelPolicyById(const uint8_t id[Routes::kIdSize]);
+/** Saves a choice; false when the table is full or storage failed. */
+bool setUserPolicy(const uint8_t* pub_key, uint8_t policy);
+bool setChannelPolicyById(const uint8_t id[Routes::kIdSize], uint8_t policy);
+int routeCount(uint8_t kind);
+/** A channel's Routes id: SHA-256 of its 32-byte secret, first 8 bytes. */
+void channelRouteId(const uint8_t secret[32], uint8_t out[Routes::kIdSize]);
+
+// ---- CLI ----------------------------------------------------------------------
+
+/** Runs the radio-profile commands (radio2, tempradio2, radioat2,
+ *  tempradioat2, tempradio, normalradio, radio2.cross, radio2.status,
+ *  radio2.scan, radio2.timing, tx.media, mediamesh). False when `cmd` is none
+ *  of these; tx.user / tx.channel are MyMesh's. */
 bool runCli(const char* cmd, char* reply, size_t cap);
 
 /** Live state for the settings page. */
@@ -44,6 +109,10 @@ struct Status {
   uint32_t switch_us = 0;
   uint32_t tx[2] = {};
   uint32_t rx[2] = {};
+  bool temp2 = false;             // tempradio2 running
+  uint32_t temp2_left_ms = 0;
+  bool temp1 = false;             // tempradio running
+  uint32_t temp1_left_ms = 0;
   Timing timing;
 };
 Status status();
