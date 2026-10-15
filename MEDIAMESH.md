@@ -15,15 +15,31 @@ and the infrastructure-only `tx.reply`.
 
 ## Turning it on
 
-**Settings → Radio → MediaMesh Settings**, under the main Radio card:
+**Settings → Radio → MediaMesh Settings**, under the main Radio card.
 
-- **Photos & voice on MediaMesh**: on = radio2 on (`rxtx`), photos and voice sent
-  there (`tx.media radio2`), and nothing else copied onto it (`radio2.cross off`).
-  Off = radio2 off.
+The **radio2 (MediaMesh)** card:
+
+- **radio2**: Off / Listen / Listen + send (`set radio2 ...,off|rx|rxtx`).
+  Turning it on from untouched settings also picks Photos & voice below.
+- **Sent on radio2**: *Photos & voice* (`tx.media radio2`, `radio2.cross off`) or
+  *Everything* (`tx.media auto`, `radio2.cross on`). Any other mix shows *Custom*;
+  set that in the Terminal.
 - **Frequency, Bandwidth, SF, CR**: the radio2 profile. A field applies when you
   leave it. It must differ from the main radio.
-- **Listen main / media**, **MediaMesh preamble**, **Time on air**: the scan.
-- **Temporary profile**: a running `tempradio` / `tempradio2`, with the time left.
+- Live figures, refreshed every second: listen time per profile, radio2
+  preamble, time on air, switch time (measured on the first four hops), packets
+  received and sent per profile, and any timing warnings in red.
+
+The **Temporary radio2** card: its own Frequency/Bandwidth/SF/CR, then
+*15 min / 1 hour / 2 hours* (`set tempradio2 ...,rxtx,mins`) or *Stop*
+(`set tempradio2 off`). *Running now* shows the frequency and time left.
+
+Per contact: the contact menu's **⇄ Radio** button cycles Auto → Main → radio2 →
+Both → Off (`tx.user`). Per channel: **Send on** in the channel's settings
+(`tx.channel`); an `#r2-` channel shows it is bound to radio2.
+
+Everything else (schedules, `tempradio`, diagnostics) works from
+**Terminal**: type the commands below, or `help`.
 
 Default settings: 911.500 MHz, 250 kHz, SF7, CR 4/5. That is about 4× faster than
 SF7/62.5 for roughly 6 dB less range. Everyone exchanging media has to use the
@@ -212,4 +228,5 @@ radio2 commands with an error. `tempradio` works on every board.
 | Scanning radio wrapper: fast retune, per-packet profiles, receive origin, tempradio | `src/helpers/MediaMeshRadio.h` (variants declare `RADIO_DRIVER_CLASS radio_driver`) |
 | Storage, timers, apply, packet marking, CLI glue | `src/helpers/MediaMesh.{h,cpp}` |
 | Contact/channel contexts, `tx.user` / `tx.channel`, `#r2-` lookups, `CMD_RUN_CLI_COMMAND` | `src/MyMesh.cpp`, `src/MyMesh.h` |
-| MediaMesh Settings card | `src/ui-touch/UITask.cpp` (`buildMediaMeshCard`) |
+| MediaMesh Settings cards, contact ⇄ Radio, channel Send on | `src/ui-touch/UITask.cpp` (`buildMediaMeshCard`, `actionSheetRadioCb`, `chanScopeRadioCb`) |
+| Terminal commands | `MyMesh::handleMeshcomodCommand` |

@@ -308,6 +308,15 @@ static const char* kMeshcomodHelpMsg =
   "tcp status|on|off\n"
   "ble status|on|off\n"
   "ota status|start|netdiag | ota url <https://...bin>\n"
+  "get|set radio2 <f,bw,sf,cr,rx|rxtx[,pre]>|off\n"
+  "get|set tempradio2 <f,bw,sf,cr,mode,mins>|off\n"
+  "get|set radioat2 / tempradioat2, del <n|all>\n"
+  "tempradio <f,bw,sf,cr,mins> | normalradio\n"
+  "get|set radio2.cross auto|on|off\n"
+  "get|set tx.media auto|radio|radio2|both|off\n"
+  "get|set tx.user key:<hex>|\"name\" <choice>\n"
+  "get|set tx.channel <slot|name> <choice>\n"
+  "get radio2.status | radio2.timing | mediamesh\n"
   "reboot              restart the device\n"
   "bootloader / dfu    reboot to download mode";
 
@@ -669,6 +678,17 @@ bool MyMesh::handleMeshcomodCommand(const char* text, int text_len) {
   if (strncasecmp(p, "help", 4) == 0 && (p[4] == '\0' || p[4] == ' ' || p[4] == '\t')) {
     pushMeshcomodReply(kMeshcomodHelpMsg);
     return true;
+  }
+
+  // radio2 / tempradio / tx.* routing: the same commands the apps send with
+  // CMD_RUN_CLI_COMMAND. They only claim their own keys, so plain "get" and
+  // "set freq" still fall through to the native handlers below.
+  {
+    char reply[200];
+    if (mediamesh::runCli(p, reply, sizeof reply) || handleTxRouteCli(p, reply, sizeof reply)) {
+      pushMeshcomodReply(reply);
+      return true;
+    }
   }
 
   // ---- Native MeshCore CLI commands (on-device terminal) ----

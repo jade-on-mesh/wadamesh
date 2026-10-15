@@ -406,6 +406,7 @@ Status status() {
   s.temp2_left_ms = s_rt.temp2 ? msLeft(now, s_rt.temp2_end_ms) : 0;
   s.temp1 = s_rt.temp1;
   s.temp1_left_ms = s_rt.temp1 ? msLeft(now, s_rt.temp1_end_ms) : 0;
+  s.temp2_prof = s_rt.temp2_prof;
 #if defined(MEDIAMESH_RADIO)
   s.scanning = radio_driver.mediaMeshScanning();
   s.profile = radio_driver.mediaMeshProfile();
@@ -416,6 +417,9 @@ Status status() {
     s.rx[i] = radio_driver.mediaMeshRxCount(i);
   }
   s.timing = radio_driver.mediaMeshTiming();
+  s.switch_samples = radio_driver.mediaMeshSwitchSamples();
+  s.switch_budget_us = radio_driver.mediaMeshSwitchBudgetUs();
+  s.switch_errors = radio_driver.mediaMeshSwitchErrors();
 #endif
   return s;
 }
