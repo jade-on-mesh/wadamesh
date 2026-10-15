@@ -902,9 +902,7 @@ void setup() {
     // whose DISPLAY_CLASS is a core driver the 1.17 core's palette makes that WHITE
     // (the boot logo grew a white border). Graphical pre-LVGL screens stay dark.
     display.startFrame((ColorVal)0x0000);
-    display.writePixelsRGB565((display.width()  - WADAMESH_MARK_W) / 2,
-                              (display.height() - WADAMESH_MARK_H) / 2,
-                              WADAMESH_MARK_W, WADAMESH_MARK_H, WADAMESH_MARK_RGB565);
+    wadameshDrawMark(display, (display.width()  - WADAMESH_MARK_W) / 2, (display.height() - WADAMESH_MARK_H) / 2);
     display.endFrame();
 #endif
   }

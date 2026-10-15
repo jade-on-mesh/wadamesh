@@ -4786,8 +4786,7 @@ static void drawRemotePlaceholder(bool exit_armed = false) {
   // underneath a 98 px logo. The outlined control is actionable with the
   // encoder knob; SPACE twice remains the keyboard fallback.
   if (W >= H) {
-    display.writePixelsRGB565(18, (H - WADAMESH_MARK_H) / 2,
-                              WADAMESH_MARK_W, WADAMESH_MARK_H, WADAMESH_MARK_RGB565);
+    wadameshDrawMark(display, 18, (H - WADAMESH_MARK_H) / 2);
     const int panel_x = 190;
     const int panel_w = W - panel_x - 14;
     display.setColor((ColorVal)0xFFFF);
@@ -4817,8 +4816,7 @@ static void drawRemotePlaceholder(bool exit_armed = false) {
     display.setColor((ColorVal)0xFFE0);
     display.drawTextCentered(panel_x + panel_w / 2, 180, "or press SPACE twice within 3s");
   } else {
-    display.writePixelsRGB565((W - WADAMESH_MARK_W) / 2, 18,
-                              WADAMESH_MARK_W, WADAMESH_MARK_H, WADAMESH_MARK_RGB565);
+    wadameshDrawMark(display, (W - WADAMESH_MARK_W) / 2, 18);
     display.setColor((ColorVal)0xFFFF);
     display.setTextSize(2);
     display.drawTextCentered(W / 2, 130, "REMOTE UI");
@@ -4850,8 +4848,7 @@ static void drawRemotePlaceholder(bool exit_armed = false) {
   // the UI's 2x scale (size 1 = 28 px, size 2 = 56 px), so the spacing is laid out for that,
   // not for the ~8 px text the generic layout below assumes. writePixelsRGB565 upscales 2x on
   // these panels, so the mark is placed in half-resolution coordinates and lands centred at 2x.
-  display.writePixelsRGB565((W / 2 - WADAMESH_MARK_W) / 2, 80,
-                            WADAMESH_MARK_W, WADAMESH_MARK_H, WADAMESH_MARK_RGB565);
+  wadameshDrawMark(display, (W / 2 - WADAMESH_MARK_W) / 2, 80);
   display.setColor((ColorVal)0xFFFF);
   display.setTextSize(2);
   display.drawTextCentered(W / 2, 400, "REMOTE MODE");
@@ -4876,8 +4873,7 @@ static void drawRemotePlaceholder(bool exit_armed = false) {
   // wadamesh mesh mark up top (same white-on-black artwork as the boot splash). The
   // touch DisplayDriver runs at scale 1.0, so writePixelsRGB565 shares text coords.
   const int ly = (H >= 288) ? 46 : 14;   // portrait panels have room to breathe; landscape sits high
-  display.writePixelsRGB565((W - WADAMESH_MARK_W) / 2, ly,
-                            WADAMESH_MARK_W, WADAMESH_MARK_H, WADAMESH_MARK_RGB565);
+  wadameshDrawMark(display, (W - WADAMESH_MARK_W) / 2, ly);
   int y = ly + WADAMESH_MARK_H + 18;
   // Prominent title (the logo already carries the brand — no redundant "wadamesh" line).
   display.setColor((ColorVal)0xFFFF);

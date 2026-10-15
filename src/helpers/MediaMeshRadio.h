@@ -222,13 +222,17 @@ class MediaMeshRadio : public Base {
       vTaskDelay(visitTicks(_cur));
       this->radioAcquire();
       if (_scan && !_paused && !_tx && this->isInRecvMode()) {
-        if (this->isReceivingPacket() || rxWaiting()) {
+        // Stay while a packet is arriving, and briefly (the drain task needs
+        // ~1 ms) while a finished one waits to be lifted out, so it is
+        // credited to this profile.
+        const bool receiving = this->isReceivingPacket();
+        if (receiving || rxWaiting()) {
           const uint32_t now = millis();
           if (!_hold_start) _hold_start = now;
-          if (now - _hold_start < maxHoldMs(_cur)) {
+          if (now - _hold_start < (receiving ? maxHoldMs(_cur) : 5)) {
             this->radioRelease();
             vTaskDelay(1);
-            continue;   // stay until the packet is in and lifted out
+            continue;
           }
         }
         _hold_start = 0;
@@ -271,6 +275,7 @@ class MediaMeshRadio : public Base {
   // The second profile in use (saved or temporary); off stops the scan.
   void mediaMeshConfigure(const mediamesh::Profile2& cfg) {
     this->radioAcquire();
+    syncOrigins();
     const bool params_changed = !mediamesh::sameParams(cfg.p, _cfg.p) || cfg.mode != _cfg.mode;
     _cfg = cfg;
     const bool scan = mediamesh::scanning(cfg) && _main_known;
@@ -302,6 +307,7 @@ class MediaMeshRadio : public Base {
   // tempradio: replace the primary profile until called with nullptr.
   void setTempPrimary(const Params* p) {
     this->radioAcquire();
+    syncOrigins();
     _main_temp = p != nullptr;
     _main = p ? *p : _main_saved;
     resetSwitchTest();
@@ -348,6 +354,7 @@ class MediaMeshRadio : public Base {
     const bool first = !_main_known;
     _main_known = true;
     if (!_main_temp) {
+      syncOrigins();
       _main = _main_saved;
       Base::setParams(freq, bw, sf, cr);
       _cur = 0;
