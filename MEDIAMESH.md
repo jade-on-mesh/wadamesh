@@ -105,14 +105,24 @@ Crossing never sends on an `rx`-only radio2.
   (`CMD_SEND_RAW_DATA`) and channel data type `0x5643`. An explicit choice wins
   over the contact's or channel's own; `auto` leaves it to them.
 - **tx.user** covers everything addressed to a contact: messages, logins,
-  requests, and the ACKs and path returns we send them. A contact is named
-  exactly (quote names with spaces) or by `key:` + 12-64 hex digits.
+  requests, path-return retries, every flood to them, and the ACKs and replies
+  we send them. Direct packets the core sends by itself (room keep-alives) are
+  matched to the one contact whose key and stored route they carry. A contact is
+  named exactly (quote names with spaces) or by `key:` + 12-64 hex digits.
 - **tx.channel** covers a channel's messages and data. A channel is named by its
   slot number or its exact name; `"1"` in quotes is a channel named 1.
 - Choices are saved (NVS key `mmroutes`, up to 48) by key, not by slot or name:
   renaming keeps them, a new key loses them. Getters show `active=`, where the
   next packet would go now.
-- A packet's profiles are fixed when it is queued: its retries keep them.
+- A packet's profiles are fixed when it is queued: its retries keep them. Anything
+  made while handling a received packet (forwards, ACKs, replies) starts from the
+  profile that packet arrived on, as mikecarper/MeshCore does.
+- A packet for `both` becomes two packets, one per profile, each sent on its own
+  (its own turn in the queue and its own busy-channel check). If no packet is
+  free to copy, the one packet goes out twice back to back instead.
+- If a profile changes after a packet was queued for it (new settings, a
+  temporary session starting or ending, radio2 off), the packet is not sent
+  there; with nothing left it is dropped. Retries of it are dropped the same way.
 
 ### `#r2-` channels
 
@@ -123,7 +133,9 @@ packets received on radio2 reach it, and its packets are forwarded on radio2.
 `set tx.channel` can't change that; rename the channel instead. With radio2 off
 the prefix does nothing. If you have both `#name` and `#r2-name`, a packet heard
 on radio2 goes to `#r2-name` and one heard on the main profile to `#name`.
-`#r2-` alone, or nested prefixes, are refused.
+A packet heard on the main profile that only an `#r2-` channel could open is
+dropped before it is marked as seen, so the same packet arriving on radio2 is
+still taken. `#r2-` alone, or nested prefixes, are refused.
 
 ### Diagnostics
 
@@ -167,7 +179,10 @@ mikecarper/MeshCore's, recomputed for the actual settings:
   packet is read out, and while it transmits. A packet on one profile means the
   other is deaf until it ends. Heavy media traffic therefore costs main-mesh
   reception: a 255-byte SF7/250 packet is ~0.2 s.
-- A packet sent on `both` goes out twice, back to back, once per profile.
+- Every received packet is read out of the radio before the scan moves on (the
+  scan waits for the chip's RX-done flag to clear), so it is credited to the
+  profile it arrived on. The same packet heard on both profiles is credited
+  copy by copy.
 - Buffered receive is switched on while radio2 is active (its drain task lifts
   each packet out within ~1 ms so the scan can move on), and goes back to your
   setting when radio2 is off.
@@ -184,11 +199,8 @@ radio2 commands with an error. `tempradio` works on every board.
 
 - One transceiver: this is a scan, not two receivers. Expect some loss on both
   profiles, as with mikecarper's dual-profile bench results (197/200 packets).
-- Listen-before-talk checks the profile the radio is on at that moment, which may
-  not be the one it is about to send on.
-- A `#r2-` channel's packet heard on the main profile is still marked as seen
-  (the MeshCore core does that before decrypting), so the same packet arriving
-  later on radio2 is ignored. mikecarper/MeshCore avoids this in its core.
+- Listen-before-talk checks the profile the radio is on when the packet's turn
+  comes, which may not be the one it is about to send on.
 - Settings are stored separately from the node preferences (NVS keys
   `mediamesh`, `mmroutes`) and are not in the settings backup yet.
 

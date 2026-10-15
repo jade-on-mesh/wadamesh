@@ -326,8 +326,16 @@ protected:
   int _tx_channel_slot = -1;
   /** The TX choice of the contact whose shared secret this is (none: kNoContext). */
   uint8_t contactPolicyBySecret(const uint8_t* secret);
+  void handleReturnPathRetry(const ContactInfo& contact, const uint8_t* path, uint8_t path_len) override;
+ public:
+  /** tx.user of the one contact whose key starts with `dest_hash` and whose
+   *  stored route is `path` (kNoContext when none or several). */
+  uint8_t contactPolicyForDirect(uint8_t dest_hash, const uint8_t* path, uint16_t path_len, int path_bytes);
+ protected:
   /** Configured slot for a channel key, preferring by the received profile. */
   int findChannelSlotForRx(const mesh::GroupChannel& ch);
+  /** False for a main-profile channel packet only a `#r2-` channel could take. */
+  bool groupPacketAllowedHere(mesh::Packet* pkt);
 
   void sendFloodScoped(const TransportKey& scope, mesh::Packet* pkt, uint32_t delay_millis);
   // Meshcomod: synthetic local command contact (no RF)

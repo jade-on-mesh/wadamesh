@@ -384,13 +384,35 @@ static void testMarks() {
   uint8_t last[kHashSize] = {MarkRing::kSlots - 1, 0xAA};
   assert(m.find(last, 3000) == 1);
 
+  // The same packet heard on radio2, then on the main profile: each copy is
+  // credited to the profile it came in on, oldest first.
   OriginRing o;
-  assert(o.find(h, 0) == kNoMark);
+  assert(o.take(h, 0) == kNoMark);
   o.add(h, 100, 1);
-  assert(o.find(h, 200) == 1);
   o.add(h, 300, 0);
-  assert(o.find(h, 400) == 0);
-  assert(o.find(h, 300 + OriginRing::kTtlMs + 1) == kNoMark);
+  assert(o.take(h, 400) == 1);
+  assert(o.take(h, 400) == 0);
+  assert(o.take(h, 400) == kNoMark);
+  o.add(h, 500, 1);
+  assert(o.take(h, 500 + OriginRing::kTtlMs + 1) == kNoMark);
+
+  // Queued packets keep their profiles until a profile changes.
+  QueueMarks q;
+  int a = 0, b = 0;
+  const uint32_t g1[2] = {1, 1};
+  assert(q.live(&a, g1) == kNoMark && !q.has(&a));
+  assert(q.set(&a, 3, g1) && q.set(&b, 2, g1) && q.has(&a));
+  assert(q.live(&a, g1) == 3 && q.live(&b, g1) == 2);
+  const uint32_t g2[2] = {1, 2};   // radio2 changed
+  assert(q.live(&a, g2) == 1 && q.live(&b, g2) == 0);
+  const uint32_t g3[2] = {2, 1};   // the main profile changed (tempradio)
+  assert(q.live(&a, g3) == 2);
+  q.erase(&a);
+  assert(!q.has(&a) && q.has(&b));
+  int many[QueueMarks::kSlots];
+  QueueMarks full;
+  for (int i = 0; i < QueueMarks::kSlots; ++i) assert(full.set(&many[i], 1, g1));
+  assert(!full.set(&a, 1, g1));
 }
 
 static void testRoutes() {

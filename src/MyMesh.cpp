@@ -3357,6 +3357,8 @@ void MyMesh::sendFloodScoped(const TransportKey& scope, mesh::Packet* pkt, uint3
 }
 
 void MyMesh::sendFloodScoped(const ContactInfo& recipient, mesh::Packet* pkt, uint32_t delay_millis) {
+  // Every flood to a contact passes here, so its tx.user choice covers them all.
+  if (!mediamesh::isMarked(pkt)) mediamesh::markPacket(pkt, contactTxPolicy(recipient));
   uiTrackSentFp(txtFloodFp(pkt));
   // UNICAST floods (login, DM when out_path is unknown, status/telemetry reqs,
   // acks, path-returns) must be able to reach their specific target regardless of
@@ -4044,6 +4046,7 @@ void MyMesh::onSendTimeout() {}
 
 // ---- radio2: what tempradio returns to (MediaMesh.h) ----
 static MyMesh* s_mm_self = nullptr;
+static uint8_t mmResolveContactPolicy(const mesh::Packet* pkt);   // below, with the radio2 routing
 
 // The node's saved radio settings: what tempradio returns to.
 static mediamesh::Params savedPrimaryParams() {
@@ -4254,6 +4257,7 @@ void MyMesh::begin(bool has_display) {
 
   applyRadioFromPrefs();   // freq/bw/sf/cr + TX power + RX-boost (shared with the live UI apply)
   s_mm_self = this;
+  mediamesh::setContactPolicyResolver(mmResolveContactPolicy);
   mediamesh::begin(savedPrimaryParams);   // radio2 profiles, once the main radio settings are known
 #if defined(DISPLAY_CLASS)
   // Boot diag: identity prefix + radio config so we can confirm the touch
@@ -5754,11 +5758,72 @@ uint8_t MyMesh::contactPolicyBySecret(const uint8_t* secret) {
 }
 
 mesh::DispatcherAction MyMesh::onRecvPacket(mesh::Packet* pkt) {
-  const uint8_t prev = _rx_origin;
-  _rx_origin = mediamesh::originOf(pkt);
+  const uint8_t prev = mediamesh::beginRx(pkt);
+  const uint8_t prev_origin = _rx_origin;
+  _rx_origin = mediamesh::rxOrigin();
+  if (!groupPacketAllowedHere(pkt)) {
+    // Dropped before the core marks it as seen (it does that before looking at
+    // channels), so the same packet arriving on radio2 is still taken.
+    _rx_origin = prev_origin;
+    mediamesh::endRx(prev);
+    return ACTION_RELEASE;
+  }
   const mesh::DispatcherAction a = BaseChatMesh::onRecvPacket(pkt);
-  _rx_origin = prev;
+  _rx_origin = prev_origin;
+  mediamesh::endRx(prev);
   return a;
+}
+
+// A channel packet heard on the main profile that only an `#r2-` channel could
+// take: an `#r2-` slot's key opens it, and no slot the main profile reaches has
+// that key. Only an authenticated match counts, never the one-byte channel hash
+// alone, so unrelated channels and relaying are untouched. As
+// mikecarper/MeshCore's allowGroupPacketOnRadio().
+bool MyMesh::groupPacketAllowedHere(mesh::Packet* pkt) {
+  if (_rx_origin != 0 || !pkt || pkt->payload_len < 3 || pkt->payload_len > MAX_PACKET_PAYLOAD) return true;
+  const uint8_t t = pkt->getPayloadType();
+  if ((t != PAYLOAD_TYPE_GRP_TXT && t != PAYLOAD_TYPE_GRP_DATA) || !mediamesh::radio2Defined()) return true;
+  for (int i = 0; i < MAX_GROUP_CHANNELS; i++) {
+    ChannelDetails cd;
+    if (!getChannel(i, cd) || !channelSlotConfigured(cd) || cd.channel.hash[0] != pkt->payload[0]) continue;
+    if (mediamesh::parseAlias(cd.name).kind != mediamesh::ALIAS_R2) continue;
+    uint8_t data[MAX_PACKET_PAYLOAD];
+    if (mesh::Utils::MACThenDecrypt(cd.channel.secret, data, pkt->payload + 1, pkt->payload_len - 1) <= 0) continue;
+    return findConfiguredChannelIdx(cd.channel) >= 0;   // an ordinary slot with this key takes it
+  }
+  return true;
+}
+
+void MyMesh::handleReturnPathRetry(const ContactInfo& contact, const uint8_t* path, uint8_t path_len) {
+  TxContext ctx(contactTxPolicy(contact));
+  BaseChatMesh::handleReturnPathRetry(contact, path, path_len);
+}
+
+// The contact a direct peer packet is addressed to, for sends no wrapper names
+// (the core's keep-alives and replies): its first key byte and its stored route
+// must both match, and only one contact may. Never by the short hash alone.
+static uint8_t mmResolveContactPolicy(const mesh::Packet* pkt) {
+  if (!s_mm_self || !pkt || !pkt->isRouteDirect() || pkt->payload_len < 2) return mediamesh::kNoContext;
+  const uint8_t t = pkt->getPayloadType();
+  if (t != PAYLOAD_TYPE_REQ && t != PAYLOAD_TYPE_RESPONSE && t != PAYLOAD_TYPE_TXT_MSG && t != PAYLOAD_TYPE_PATH &&
+      t != PAYLOAD_TYPE_ANON_REQ) {
+    return mediamesh::kNoContext;
+  }
+  return s_mm_self->contactPolicyForDirect(pkt->payload[0], pkt->path, pkt->path_len, pkt->getPathByteLen());
+}
+
+uint8_t MyMesh::contactPolicyForDirect(uint8_t dest_hash, const uint8_t* path, uint16_t path_len, int path_bytes) {
+  ContactsIterator it = startContactsIterator();
+  ContactInfo c;
+  int matches = 0;
+  uint8_t policy = mediamesh::kNoContext;
+  while (it.hasNext(this, c)) {
+    if (c.type == ADV_TYPE_NONE || c.id.pub_key[0] != dest_hash || c.out_path_len == OUT_PATH_UNKNOWN) continue;
+    if (c.out_path_len != path_len || (path_bytes > 0 && memcmp(c.out_path, path, path_bytes) != 0)) continue;
+    if (++matches > 1) return mediamesh::kNoContext;
+    policy = contactTxPolicy(c);
+  }
+  return policy;
 }
 
 void MyMesh::onPeerDataRecv(mesh::Packet* packet, uint8_t type, int sender_idx, const uint8_t* secret, uint8_t* data,
