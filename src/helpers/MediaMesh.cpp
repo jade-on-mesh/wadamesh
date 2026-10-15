@@ -20,11 +20,26 @@ constexpr const char* kRoutesKey = "mmroutes";
 Runtime s_rt;
 Routes s_routes;
 bool s_loaded = false;
-MarkRing s_marks;
+MarkRing s_marks;            // choices made before a packet is queued, by hash
+QueueMarks s_queued;         // each queued packet's profiles, by packet
 OriginRing s_origins;
 SavedPrimaryFn s_saved_primary = nullptr;
+ContactPolicyResolver s_resolver = nullptr;
 volatile uint8_t s_ctx = kNoContext;
+uint8_t s_rx_origin = kNoMark;   // while a received packet is being processed
 bool s_temp1_applied = false;
+
+// Profile generations: bumped whenever a profile in use changes, so queued
+// packets bound to the old one are not sent there.
+uint32_t s_gen[2] = {1, 1};
+Profile2 s_applied2;
+bool s_applied2_known = false;
+Params s_applied1;
+bool s_applied1_temp = false;
+
+// The packet the dispatcher is about to send (getNextOutbound -> startSendRaw).
+uint8_t s_next_mask = 1;
+bool s_next_valid = false;
 
 void ensureLoaded() {
   if (s_loaded) return;
@@ -61,8 +76,13 @@ void packetHash(const uint8_t* raw, int len, uint8_t out[kHashSize], bool* ok) {
   *ok = true;
 }
 
-// Called from the radio for every packet about to be transmitted.
+// Called from the radio for every packet about to be transmitted: the profiles
+// getNextOutbound settled for it.
 uint8_t classifyRaw(const uint8_t* raw, int len) {
+  if (s_next_valid) {
+    s_next_valid = false;
+    return s_next_mask;
+  }
   bool ok;
   uint8_t hash[kHashSize];
   packetHash(raw, len, hash, &ok);
@@ -72,6 +92,9 @@ uint8_t classifyRaw(const uint8_t* raw, int len) {
   }
   return transmitMask(s_rt, 0);
 }
+
+// For the dispatcher's airtime estimate of that packet; 0 = not known.
+uint8_t peekMask() { return s_next_valid ? s_next_mask : 0; }
 
 // Called from the radio for every packet received.
 void noteOrigin(const uint8_t* raw, int len, uint8_t origin) {
@@ -92,14 +115,23 @@ Params savedPrimary() {
 }
 
 void applySecondary() {
+  const Profile2 a = s_rt.active2();
+  if (!s_applied2_known || a.mode != s_applied2.mode || !sameParams(a.p, s_applied2.p)) {
+    if (s_applied2_known) ++s_gen[1];
+    s_applied2 = a;
+    s_applied2_known = true;
+  }
 #if defined(MEDIAMESH_RADIO)
-  radio_driver.setMediaClassifier(classifyRaw);
+  radio_driver.setMediaClassifier(classifyRaw, peekMask);
   radio_driver.setOriginSink(noteOrigin);
-  radio_driver.mediaMeshConfigure(s_rt.active2());
+  radio_driver.mediaMeshConfigure(a);
 #endif
 }
 
 void applyPrimary() {
+  if (s_rt.temp1 != s_applied1_temp || (s_rt.temp1 && !sameParams(s_rt.temp1_p, s_applied1))) ++s_gen[0];
+  s_applied1_temp = s_rt.temp1;
+  s_applied1 = s_rt.temp1_p;
 #if defined(MEDIAMESH_RADIO)
   radio_driver.setTempPrimary(s_rt.temp1 ? &s_rt.temp1_p : nullptr);
 #else
@@ -220,35 +252,95 @@ uint8_t policyMaskNow(uint8_t policy) {
   return policyMask(s_rt, policy);
 }
 
-void MarkingPacketManager::queueOutbound(mesh::Packet* packet, uint8_t priority, uint32_t scheduled_for) {
-  if (packet) {
-    ensureLoaded();
+void setContactPolicyResolver(ContactPolicyResolver fn) { s_resolver = fn; }
+
+uint8_t beginRx(const mesh::Packet* pkt) {
+  uint8_t o = kNoMark;
+  if (pkt) {
     uint8_t hash[MAX_HASH_SIZE];
-    packet->calculatePacketHash(hash);
-    const uint32_t now = millis();
-    if (s_marks.find(hash, now) == kNoMark) {
-      // Fix the choice now, as the packet is created: a forward follows the
-      // profile it arrived on, local traffic its contact/channel context.
-      const uint8_t origin = s_origins.find(hash, now);
-      uint8_t mask;
-      if (origin != kNoMark) mask = transmitMask(s_rt, origin);
-      else if (s_ctx != kNoContext) mask = policyMask(s_rt, s_ctx);
-      else mask = transmitMask(s_rt, 0);
-      s_marks.add(hash, now, mask);
+    pkt->calculatePacketHash(hash);
+    o = s_origins.take(hash, millis());
+  }
+  if (o == kNoMark) o = 0;
+  const uint8_t prev = s_rx_origin;
+  s_rx_origin = o;
+  return prev;
+}
+
+void endRx(uint8_t prev) { s_rx_origin = prev; }
+
+uint8_t rxOrigin() { return s_rx_origin == kNoMark ? 0 : s_rx_origin; }
+
+// A packet's profiles, decided as it is queued (mikecarper/MeshCore fixes them
+// when the packet is created):
+//   1. a choice marked on it before (photo/voice, channel, #r2-);
+//   2. the contact/channel context it was made in, when explicit;
+//   3. the contact a direct packet is addressed to (core sends nothing wraps);
+//   4. made while handling a received packet (forwards, ACKs, replies): the
+//      global rules from the profile that packet arrived on;
+//   5. otherwise the global rules for local traffic.
+// A packet for both profiles becomes two packets, one per profile, each sent
+// (and checked for a busy channel) on its own.
+void MarkingPacketManager::queueOutbound(mesh::Packet* packet, uint8_t priority, uint32_t scheduled_for) {
+  if (!packet) return;
+  ensureLoaded();
+  if (s_queued.has(packet)) {   // re-queued (a held text put back): keeps its profiles
+    StaticPoolPacketManager::queueOutbound(packet, priority, scheduled_for);
+    return;
+  }
+  uint8_t hash[MAX_HASH_SIZE];
+  packet->calculatePacketHash(hash);
+  const uint32_t now = millis();
+  uint8_t mask = s_marks.find(hash, now);
+  if (mask == kNoMark && s_ctx != kNoContext && s_ctx != TX_AUTO) mask = policyMask(s_rt, s_ctx);
+  if (mask == kNoMark && s_ctx == kNoContext && s_rx_origin == kNoMark && s_resolver &&
+      s_routes.count(Routes::USER) > 0) {
+    const uint8_t p = s_resolver(packet);
+    if (p != kNoContext && p != TX_AUTO) mask = policyMask(s_rt, p);
+  }
+  if (mask == kNoMark) mask = transmitMask(s_rt, s_rx_origin != kNoMark ? s_rx_origin : 0);
+
+  if (mask == 3 && getFreeCount() > 2) {
+    mesh::Packet* copy = allocNew();
+    if (copy) {
+      *copy = *packet;
+      if (s_queued.set(packet, 1, s_gen) && s_queued.set(copy, 2, s_gen)) {
+        StaticPoolPacketManager::queueOutbound(packet, priority, scheduled_for);
+        StaticPoolPacketManager::queueOutbound(copy, priority, scheduled_for);
+        return;
+      }
+      s_queued.erase(packet);
+      free(copy);
     }
   }
+  s_queued.set(packet, mask, s_gen);   // when full, getNextOutbound falls back to the rules
   StaticPoolPacketManager::queueOutbound(packet, priority, scheduled_for);
 }
 
-// ---- receive ----------------------------------------------------------------
-
-uint8_t originOf(const mesh::Packet* pkt) {
-  if (!pkt) return 0;
-  uint8_t hash[MAX_HASH_SIZE];
-  pkt->calculatePacketHash(hash);
-  const uint8_t o = s_origins.find(hash, millis());
-  return o == kNoMark ? 0 : o;
+mesh::Packet* MarkingPacketManager::getNextOutbound(uint32_t now) {
+  for (;;) {
+    mesh::Packet* p = StaticPoolPacketManager::getNextOutbound(now);
+    if (!p) return nullptr;
+    uint8_t mask = s_queued.live(p, s_gen);
+    if (mask == kNoMark) mask = transmitMask(s_rt, 0);
+    if (mask == 0) {
+      // Its profile changed or went away since it was queued, or its choice
+      // can't be sent now (radio2 while rx-only): drop it, as a failed send.
+      free(p);
+      continue;
+    }
+    s_next_mask = mask;
+    s_next_valid = true;
+    return p;
+  }
 }
+
+void MarkingPacketManager::free(mesh::Packet* packet) {
+  s_queued.erase(packet);
+  StaticPoolPacketManager::free(packet);
+}
+
+// ---- receive ----------------------------------------------------------------
 
 bool radio2Defined() {
   ensureLoaded();

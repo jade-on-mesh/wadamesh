@@ -403,10 +403,12 @@ struct MarkRing {
   void clear() { memset(used, 0, sizeof(used)); next = 0; }
 };
 
-// Which profile recent packets arrived on, by hash: a forwarded packet keeps
-// the hash it arrived with, and channel lookups need the profile.
+// Which profile each received packet arrived on, by hash, from the moment the
+// radio hands it over until the mesh processes it (which can be delayed). Each
+// arrival is one entry and processing takes the oldest one for its hash, so the
+// same packet heard on both profiles is credited correctly to each copy.
 struct OriginRing {
-  static constexpr int kSlots = 32;
+  static constexpr int kSlots = 64;
   uint8_t hash[kSlots][kHashSize] = {};
   uint32_t at[kSlots] = {};
   uint8_t origin[kSlots] = {};
@@ -421,13 +423,59 @@ struct OriginRing {
     used[next] = true;
     next = (uint8_t)((next + 1) % kSlots);
   }
-  // 0 or 1, or kNoMark when not seen recently. The newest entry wins.
-  uint8_t find(const uint8_t* h, uint32_t now_ms) const {
-    for (int k = 1; k <= kSlots; ++k) {
+  // Takes the oldest unprocessed arrival of this packet: 0 or 1, or kNoMark.
+  uint8_t take(const uint8_t* h, uint32_t now_ms) {
+    for (int k = kSlots; k >= 1; --k) {
       const int i = (next - k + kSlots) % kSlots;
-      if (used[i] && now_ms - at[i] <= kTtlMs && memcmp(hash[i], h, kHashSize) == 0) return origin[i];
+      if (used[i] && now_ms - at[i] <= kTtlMs && memcmp(hash[i], h, kHashSize) == 0) {
+        used[i] = false;
+        return origin[i];
+      }
     }
     return kNoMark;
+  }
+};
+
+// Each queued packet's profiles, by packet object (two copies of one packet
+// share a hash), with the generation of each profile when it was queued. A
+// profile that has changed since (new settings, a temporary session starting
+// or ending, radio2 off) drops its bit: stale packets and retries are not
+// sent there, as in mikecarper/MeshCore.
+struct QueueMarks {
+  static constexpr int kSlots = 48;   // more than the packet pool
+  const void* pkt[kSlots] = {};
+  uint8_t mask[kSlots] = {};
+  uint32_t gen[kSlots][2] = {};
+
+  int find(const void* p) const {
+    for (int i = 0; i < kSlots; ++i) if (pkt[i] == p) return i;
+    return -1;
+  }
+  bool has(const void* p) const { return p && find(p) >= 0; }
+  // False when full (the packet then follows the global rules).
+  bool set(const void* p, uint8_t m, const uint32_t g[2]) {
+    if (!p) return false;
+    int i = find(p);
+    if (i < 0) i = find(nullptr);
+    if (i < 0) return false;
+    pkt[i] = p;
+    mask[i] = m;
+    gen[i][0] = g[0];
+    gen[i][1] = g[1];
+    return true;
+  }
+  void erase(const void* p) {
+    const int i = p ? find(p) : -1;
+    if (i >= 0) pkt[i] = nullptr;
+  }
+  // The profiles still valid for this packet now, or kNoMark when unknown.
+  uint8_t live(const void* p, const uint32_t now_gen[2]) const {
+    const int i = p ? find(p) : -1;
+    if (i < 0) return kNoMark;
+    uint8_t m = mask[i];
+    if ((m & 1) && gen[i][0] != now_gen[0]) m &= (uint8_t)~1;
+    if ((m & 2) && gen[i][1] != now_gen[1]) m &= (uint8_t)~2;
+    return m;
   }
 };
 
