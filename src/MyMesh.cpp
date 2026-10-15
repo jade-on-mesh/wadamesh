@@ -4046,6 +4046,7 @@ void MyMesh::onSendTimeout() {}
 
 // ---- radio2: what tempradio returns to (MediaMesh.h) ----
 static MyMesh* s_mm_self = nullptr;
+static uint8_t mmResolveContactPolicy(const mesh::Packet* pkt);   // below, with the radio2 routing
 
 // The node's saved radio settings: what tempradio returns to.
 static mediamesh::Params savedPrimaryParams() {
