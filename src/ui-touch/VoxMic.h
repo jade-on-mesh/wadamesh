@@ -49,3 +49,15 @@ int level();
 bool take(uint8_t* mode, uint8_t** bits, size_t* len, uint32_t* ms, uint32_t min_ms = 600);
 
 }  // namespace VoxMic
+
+// A task for recording and voice playback, created once at boot (begin()) so
+// its 16 KB internal-RAM stack is there when the user presses the mic, however
+// fragmented the heap has become since. Boards without a mic: all false.
+namespace VoxAudioTask {
+bool begin();
+// The worker exists and is idle.
+bool available();
+// Runs fn(arg) on the worker (fn returns; it must not delete its task). False
+// if there's no worker or it's busy: make a task of your own then.
+bool run(void (*fn)(void*), void* arg);
+}  // namespace VoxAudioTask

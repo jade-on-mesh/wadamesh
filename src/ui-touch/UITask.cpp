@@ -69306,7 +69306,7 @@ static volatile bool     s_vox_voice_stop = false;
 #if CAP_LUA_AUDIO && VOX_CODEC2_AVAILABLE
 struct VoxVoicePlayback { uint8_t* frames; size_t len; int mode; };
 
-static void voxVoiceTask(void* arg) {
+static void voxVoiceJob(void* arg) {
   VoxVoicePlayback* pb = static_cast<VoxVoicePlayback*>(arg);
   VoxCodec2Stream codec;
   LuaAudioSinkSession sink;
@@ -69346,6 +69346,9 @@ static void voxVoiceTask(void* arg) {
   free(pb);
   __atomic_store_n(&s_lua_audio_active, false, __ATOMIC_RELEASE);
   s_vox_voice_sid = 0;
+}
+static void voxVoiceTask(void* arg) {   // when the audio worker is busy or missing
+  voxVoiceJob(arg);
   vTaskDelete(nullptr);
 }
 
@@ -69368,7 +69371,9 @@ static bool voxVoicePlay(uint32_t sid, const char** err) {
   s_vox_voice_sid = sid;
   // ~8 KB of Codec2 decode stack (test/test_codec2_stack.c; lib/codec2 keeps its
   // scratch in the instance, in PSRAM), from internal RAM while it plays.
-  if (xTaskCreate(voxVoiceTask, "vox_voice", 16 * 1024, pb, 3, nullptr) != pdPASS) {
+  // On the audio worker made at boot (VoxMic.h) if there is one.
+  if (!VoxAudioTask::run(voxVoiceJob, pb) &&
+      xTaskCreate(voxVoiceTask, "vox_voice", 16 * 1024, pb, 3, nullptr) != pdPASS) {
     s_vox_voice_sid = 0;
     __atomic_store_n(&s_lua_audio_active, false, __ATOMIC_RELEASE);
     free(pb->frames);
@@ -72446,6 +72451,9 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
     // largest block, so the worker could never start and tiles, the update
     // check and the app catalog were all silently dead.
     reserveTileFetchStack();
+#if defined(HAS_TDECK_GT911) && CAP_LUA_AUDIO && VOX_CODEC2_AVAILABLE
+    VoxAudioTask::begin();   // likewise the voice record/playback stack (16 KB)
+#endif
     lv_init();
     initTouchFontFallbacks();
     // NB: re-pointing the LVGL theme's font here does NOT work (tried, verified

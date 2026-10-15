@@ -180,9 +180,19 @@ constexpr uint32_t kTaskStack = 16 * 1024;   // ~10 KB used; the rest is margin 
 constexpr size_t kDriverBytes = 8 * 1024;
 // What has to stay free for everything else while recording (Wi-Fi, BLE, LVGL).
 constexpr size_t kHeadroom = 8 * 1024;
-char s_mem_err[64];
+char s_mem_err[80];
 
-void captureTask(void*) {
+// "Not enough memory to record (41K free, 12K block, low)": what was short and
+// where it failed, shown on screen so it can be reported without a serial log.
+void memError(const char* where) {
+  snprintf(s_mem_err, sizeof s_mem_err, "Not enough memory to record (%uK free, %uK block, %s)",
+           (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) / 1024),
+           (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) / 1024),
+           where);
+  Serial.printf("[VOX] %s\n", s_mem_err);
+}
+
+void captureJob(void*) {
   VoxMicPrep prep;
   VoxCodec2Encoder enc;
   bool ok = enc.begin(s_mode);
@@ -249,7 +259,33 @@ void captureTask(void*) {
                 (unsigned)uxTaskGetStackHighWaterMark(nullptr), (unsigned)kTaskStack);
   s_state = s_cancel ? kIdle : ok ? kReady : kFailed;
   s_task_running = false;
+}
+
+void captureTask(void* arg) {   // the fallback, on a task of its own
+  captureJob(arg);
   vTaskDelete(nullptr);
+}
+
+// ---- the audio worker ------------------------------------------------------------
+// One task, created at boot while the internal heap is still whole, that runs
+// recordings and voice playback (never both: the UI keeps them apart). Making
+// the stack on demand needed a free 16 KB block at the moment the mic was
+// pressed, which a T-Deck with Wi-Fi up and a while of uptime may not have;
+// this one is held for good instead.
+constexpr uint32_t kWorkerStack = 16 * 1024;
+TaskHandle_t s_worker = nullptr;
+void (*volatile s_job)(void*) = nullptr;
+void* volatile s_job_arg = nullptr;
+volatile bool s_worker_busy = false;
+
+void workerTask(void*) {
+  for (;;) {
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    void (*fn)(void*) = s_job;
+    if (fn) fn(s_job_arg);
+    s_job = nullptr;
+    s_worker_busy = false;
+  }
 }
 
 void shutdownHardware() {
@@ -294,18 +330,20 @@ bool start(int wire_mode, const char** err) {
   // contiguous block, so check the largest block as well as the total. (This
   // used to demand 72 KB free in total, more than a T-Deck with Wi-Fi, BLE
   // and the UI up usually has, so recording was refused on a healthy device.)
+  // With the audio worker (made at boot) only the I2S driver needs internal RAM
+  // now; without it, the stack does too, in one block.
   const size_t free_int = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
   const size_t big_int = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-  if (big_int < kTaskStack + 1024 || free_int < kTaskStack + kDriverBytes + kHeadroom) {
-    snprintf(s_mem_err, sizeof s_mem_err, "Not enough memory to record (%uK free, %uK block)",
-             (unsigned)(free_int / 1024), (unsigned)(big_int / 1024));
-    Serial.printf("[VOX] %s\n", s_mem_err);
+  const bool worker = VoxAudioTask::available();
+  if (worker ? (big_int < 4096 || free_int < kDriverBytes + kHeadroom)
+             : (big_int < kTaskStack + 1024 || free_int < kTaskStack + kDriverBytes + kHeadroom)) {
+    memError(worker ? "low" : "no worker");
     *err = s_mem_err;
     return false;
   }
   s_bits = (uint8_t*)heap_caps_malloc(kMaxBits, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   if (!s_bits) s_bits = (uint8_t*)heap_caps_malloc(kMaxBits, MALLOC_CAP_8BIT);
-  if (!s_bits) { *err = "Not enough memory to record"; return false; }
+  if (!s_bits) { memError("clip"); *err = s_mem_err; return false; }
   if (!es7210Start()) {
     es7210Stop();
     dropClip();
@@ -324,12 +362,14 @@ bool start(int wire_mode, const char** err) {
   s_level = 0;
   s_state = kRecording;
   s_task_running = true;
-  if (xTaskCreate(captureTask, "vox_mic", kTaskStack, nullptr, 3, nullptr) != pdPASS) {
+  if (!VoxAudioTask::run(captureJob, nullptr) &&
+      xTaskCreate(captureTask, "vox_mic", kTaskStack, nullptr, 3, nullptr) != pdPASS) {
     s_task_running = false;
     s_state = kIdle;
     shutdownHardware();
     dropClip();
-    *err = "Not enough memory to record";
+    memError("no task");
+    *err = s_mem_err;
     return false;
   }
   reap();   // note the hardware is up
@@ -385,7 +425,38 @@ bool take(uint8_t* mode, uint8_t** bits, size_t* len, uint32_t* ms, uint32_t min
 
 }  // namespace VoxMic
 
+namespace VoxAudioTask {
+
+bool begin() {
+  if (s_worker) return true;
+  if (xTaskCreate(workerTask, "vox_audio", kWorkerStack, nullptr, 3, &s_worker) != pdPASS) {
+    s_worker = nullptr;
+    Serial.println("[VOX] audio worker: no memory at boot; recording will make its own task");
+    return false;
+  }
+  return true;
+}
+
+bool available() { return s_worker && !s_worker_busy; }
+
+bool run(void (*fn)(void*), void* arg) {
+  if (!s_worker || s_worker_busy || !fn) return false;
+  s_worker_busy = true;
+  s_job_arg = arg;
+  s_job = fn;
+  xTaskNotifyGive(s_worker);
+  return true;
+}
+
+}  // namespace VoxAudioTask
+
 #else  // no microphone on this board
+
+namespace VoxAudioTask {
+bool begin() { return false; }
+bool available() { return false; }
+bool run(void (*)(void*), void*) { return false; }
+}  // namespace VoxAudioTask
 
 namespace VoxMic {
 bool available() { return false; }
