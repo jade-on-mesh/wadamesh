@@ -5132,7 +5132,7 @@ void MyMesh::handleCmdFrame(size_t len) {
       }
       auto pkt = createRawData(&cmd_frame[i], len - i);
       if (pkt) {
-        mediamesh::markMedia(pkt);   // app raw data = Open TAK photo/voice transfers (tx.media)
+        markTransfer(pkt, &cmd_frame[i], (size_t)(len - i));   // app raw data = Open TAK photo/voice transfers
         sendDirect(pkt, path, path_len);
         writeOKFrame();
       } else {
@@ -5713,7 +5713,7 @@ bool MyMesh::sendGroupDataMedia(mesh::GroupChannel& channel, uint8_t* path, uint
   // An explicit tx.media wins over the channel's choice, except on a #r2-
   // channel, whose receivers only listen on radio2.
   if (data_type == VoxWire::kChannelDataType && !(slot >= 0 && channelBoundToRadio2(slot))) {
-    mediamesh::markMedia(pkt, chan_policy);
+    markTransfer(pkt, data, data_len > 0 ? (size_t)data_len : 0, chan_policy);
   } else {
     mediamesh::markPacket(pkt, chan_policy);
   }

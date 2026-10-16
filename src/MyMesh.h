@@ -110,6 +110,7 @@
 #include <helpers/TransportKeyStore.h>
 #include "RegionRegistry.h"
 #include "helpers/MediaMesh.h"   // MediaMesh media marking (voxSendRaw / sendGroupDataMedia)
+#include "ui-touch/VoxWire.h"     // isFetchRequest (markTransfer)
 
 /* -------------------------------------------------------------------------------------- */
 
@@ -1128,7 +1129,7 @@ public:
   bool voxSendRaw(const uint8_t* path, uint8_t path_len, const uint8_t* data, size_t len) {
     mesh::Packet* pkt = createRawData(data, len);
     if (!pkt) return false;
-    mediamesh::markMedia(pkt);   // photo/voice transfer: tx.media
+    markTransfer(pkt, data, len);   // photo/voice transfer: tx.media (a request: both radios)
     sendDirect(pkt, path, path_len);
     return true;
   }
@@ -1137,6 +1138,16 @@ public:
     ChannelDetails cd;
     if (idx < 0 || idx >= MAX_GROUP_CHANNELS || !getChannel(idx, cd) || !channelSlotConfigured(cd)) return false;
     return sendGroupDataMedia(cd.channel, nullptr, OUT_PATH_UNKNOWN, type, data, (int)len, idx);
+  }
+  /** Mark an Open TAK transfer packet for MediaMesh. Photo and voice packets
+   *  follow tx.media (or `channel_policy`); a fetch request is a few bytes
+   *  asking someone for them, and goes out on both radios (the main one alone
+   *  when radio2 can't send), so a sender on either one hears it. On radio2
+   *  only, a sender that is only on the main mesh never did. */
+  void markTransfer(const mesh::Packet* pkt, const uint8_t* data, size_t len,
+                    uint8_t channel_policy = mediamesh::TX_AUTO) {
+    if (VoxWire::isFetchRequest(data, len)) mediamesh::markPacket(pkt, mediamesh::TX_BOTH);
+    else mediamesh::markMedia(pkt, channel_policy);
   }
   /** sendGroupData that marks Open TAK photo/voice datagrams for MediaMesh. */
   bool sendGroupDataMedia(mesh::GroupChannel& channel, uint8_t* path, uint8_t path_len, uint16_t data_type,
