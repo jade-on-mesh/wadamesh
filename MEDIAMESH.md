@@ -45,6 +45,32 @@ Default settings: 911.500 MHz, 250 kHz, SF7, CR 4/5. That is about 4× faster th
 SF7/62.5 for roughly 6 dB less range. Everyone exchanging media has to use the
 same settings.
 
+## Repeaters
+
+A repeater running MeshCore with radio profiles
+([mikecarper/MeshCore](https://github.com/mikecarper/MeshCore/blob/keymindCascade/docs/radio_profiles.md))
+can carry radio2 too. Log in as admin (contact menu → **Admin**), then tap the
+antenna button in the console's header for its **MediaMesh** page:
+
+- Both radios side by side, joined by the bridging state, and a status line.
+- **Live**: packets heard and sent per radio, the share heard on radio2, switch
+  time, preambles, switch errors and the repeater's warnings. **Refresh** asks
+  again; nothing is polled, to save airtime.
+- **radio2 profile**: Off / Listen / Listen + send, frequency, bandwidth, SF, CR
+  and an optional preamble (empty = the repeater picks it), applied with **Apply
+  to repeater** after a confirm. The repeater answers first and switches after,
+  so if you reach it over radio2 you may lose contact until your radio follows.
+- **Bridging** (`radio2.cross`): Both ways (`on`), Auto, or Separate (`off`).
+- **Replies to admins** (`tx.reply`): Both (the default), Main, radio2 or Auto;
+  *Also on a listen-only radio2* adds `force`.
+- **Temporary radio2** (`set tempradio2 ...,minutes`) for 15 min to 6 h, or Stop.
+
+The page tags its commands (`A0|get radio2`) so their replies stay out of the
+console log. A repeater without radio2 says so on the page; one whose role only
+takes radio2 changes over USB shows that as an alert. Stock repeaters still pass
+MediaMesh traffic heard on the main mesh. MeshCore Open TAK has the same page
+under repeater management → **MediaMesh (radio2)**.
+
 ## Commands
 
 From an app, the radio answers the local CLI frame `CMD_RUN_CLI_COMMAND` (`0x42`)
