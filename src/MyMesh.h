@@ -323,6 +323,8 @@ protected:
   void onGroupDataRecv(mesh::Packet* packet, uint8_t type, const mesh::GroupChannel& channel, uint8_t* data,
                        size_t len) override;
   uint8_t _rx_origin = 0;
+  uint8_t rxVia() const;
+  uint8_t rxViaFrameTag(uint8_t none) const;
   int _tx_channel_slot = -1;
   /** The TX choice of the contact whose shared secret this is (none: kNoContext). */
   uint8_t contactPolicyBySecret(const uint8_t* secret);

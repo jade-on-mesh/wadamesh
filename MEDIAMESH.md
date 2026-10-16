@@ -169,6 +169,22 @@ explicit value you chose, `WARN need >128` when an automatic preamble had to sto
 at 128, `WARN main preamble too short for scanning` when the main mesh's stock
 preamble can't cover the radio2 visit.
 
+### Where a photo or voice clip came from
+
+While radio2 is configured, a downloaded photo or voice clip says how it got
+here, under its bubble: **Received via MediaMesh**, **Received via main mesh**,
+or **Received via MediaMesh and main mesh** when its packets came both ways.
+It is counted per packet while downloading, so it is gone after a reboot.
+
+The app gets the same from the frames it is sent, in a byte stock firmware
+leaves reserved: `0xA0` main mesh, `0xA1` radio2, anything else unknown
+(radio2 off, or other firmware).
+
+| Frame | Byte |
+| --- | --- |
+| `PUSH_CODE_RAW_DATA` (`0x84`): `[code][snr][rssi][via][payload]` | 3 (stock: `0xFF`) |
+| `RESP_CODE_CHANNEL_DATA_RECV` (27): `[code][snr][via][0][idx][path][type 2][len][data]` | 2 (stock: `0`) |
+
 ## How the scan works
 
 One SX1262 alternates between the two profiles. The timing is

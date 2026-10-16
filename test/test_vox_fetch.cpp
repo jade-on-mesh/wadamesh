@@ -162,6 +162,9 @@ struct Sim : VoxFetchIo {
   }
   void changed(uint32_t) override { changes++; }
 
+  // The radio profile every delivered payload is tagged with (MediaMesh).
+  uint8_t via = VoxFetch::kViaUnknown;
+
   // Advance time, delivering what's due and ticking the engine.
   void run(uint32_t ms) {
     const uint32_t end = now + ms;
@@ -171,7 +174,7 @@ struct Sim : VoxFetchIo {
         if ((int32_t)(now - inbox[i].at) >= 0) {
           Event e = inbox[i];
           inbox.erase(inbox.begin() + (long)i);
-          fetch->onPayload(e.data.data(), e.data.size(), e.channel);
+          fetch->onPayload(e.data.data(), e.data.size(), e.channel, via);
         } else {
           i++;
         }
@@ -216,6 +219,27 @@ int main() {
     sim.run(60000);
     assert(gotIt(sim, f) && sim.raw_requests == 1 && sim.last_req_had_path[0]);
     printf("direct: %d request, %d packets\n", sim.raw_requests, sim.served_packets);
+  }
+
+  // 1b. Where the packets came from: untagged is unknown; tagged radio2 reads
+  //     "Received via MediaMesh".
+  {
+    Sim sim; setup(sim, 2750);
+    VoxFetch f(sim); sim.fetch = &f;
+    f.onEnvelope(envFor(sim), sim.sender_pub, nullptr, -1, true);
+    sim.run(60000);
+    assert(gotIt(sim, f) && f.via(kSid) == 0 && VoxFetch::viaText(f.via(kSid)) == nullptr);
+  }
+  {
+    Sim sim; setup(sim, 2750); sim.via = VoxFetch::kViaRadio2;
+    VoxFetch f(sim); sim.fetch = &f;
+    f.onEnvelope(envFor(sim), sim.sender_pub, nullptr, -1, true);
+    sim.run(60000);
+    assert(gotIt(sim, f) && f.via(kSid) == 2);
+    assert(!strcmp(VoxFetch::viaText(f.via(kSid)), "Received via MediaMesh"));
+    assert(!strcmp(VoxFetch::viaText(1), "Received via main mesh"));
+    assert(!strcmp(VoxFetch::viaText(3), "Received via MediaMesh and main mesh"));
+    printf("via: %s\n", VoxFetch::viaText(f.via(kSid)));
   }
 
   // 2. 25% loss: re-asks only for what's missing until it has everything.

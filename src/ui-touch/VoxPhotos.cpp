@@ -233,8 +233,8 @@ void onChannelText(const char* text, int channel_idx) {
   g_fetch.onEnvelope(env, nullptr, name, channel_idx, false);
 }
 
-void onPayload(const uint8_t* data, size_t len, int channel_idx) {
-  g_fetch.onPayload(data, len, channel_idx);
+void onPayload(const uint8_t* data, size_t len, int channel_idx, uint8_t via) {
+  g_fetch.onPayload(data, len, channel_idx, via);
   g_serve.onPayload(data, len, channel_idx);
 }
 
@@ -258,6 +258,11 @@ VoxFetch::Status status(uint32_t sid, int* received, int* total) {
 }
 
 const char* statusText(uint32_t sid, char* buf, size_t cap) { return g_fetch.statusText(sid, buf, cap); }
+
+const char* viaText(uint32_t sid) {
+  if (g_fetch.status(sid) != VoxFetch::kComplete) return nullptr;
+  return VoxFetch::viaText(g_fetch.via(sid));
+}
 
 bool load(uint32_t sid, uint8_t** data, size_t* len) { return loadFile(sid, false, data, len); }
 

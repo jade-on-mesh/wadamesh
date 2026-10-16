@@ -255,19 +255,22 @@ void VoxFetch::fail(Session& s, const char* why) {
 
 // --------------------------------------------------------------- packets
 
-void VoxFetch::onPayload(const uint8_t* data, size_t len, int channel) {
+void VoxFetch::onPayload(const uint8_t* data, size_t len, int channel, uint8_t via) {
   (void)channel;
   if (!data || len == 0 || VoxWire::isFetchRequest(data, len)) return;   // this radio doesn't serve
   VoxWire::Packet p;
   if (!VoxWire::parsePacket(data, len, &p)) return;
   Session* s = find(p.sid);
   if (!s || s->st == kComplete) return;
-  accept(*s, p);
+  accept(*s, p, via);
 }
 
-void VoxFetch::accept(Session& s, const VoxWire::Packet& p) {
+void VoxFetch::accept(Session& s, const VoxWire::Packet& p, uint8_t via) {
   if (!ensureStorage(s)) return;
   if (!s.asm_.add(p)) return;
+  if (via == kViaMain || via == kViaRadio2) {
+    if (s.via_count[via] < 0xFFFF) s.via_count[via]++;
+  }
   s.last_touch = io_.nowMs();
   if (s.asm_.complete()) {
     complete(s);
@@ -322,6 +325,21 @@ VoxFetch::Method VoxFetch::lastMethod(uint32_t sid) const {
 int VoxFetch::attempts(uint32_t sid) const {
   const Session* s = find(sid);
   return s ? s->attempts : 0;
+}
+
+uint8_t VoxFetch::via(uint32_t sid) const {
+  const Session* s = find(sid);
+  if (!s) return 0;
+  return (uint8_t)((s->via_count[kViaMain] ? 1 : 0) | (s->via_count[kViaRadio2] ? 2 : 0));
+}
+
+const char* VoxFetch::viaText(uint8_t via) {
+  switch (via & 3) {
+    case 1: return "Received via main mesh";
+    case 2: return "Received via MediaMesh";
+    case 3: return "Received via MediaMesh and main mesh";
+    default: return nullptr;
+  }
 }
 
 const char* VoxFetch::statusText(uint32_t sid, char* buf, size_t cap) const {
