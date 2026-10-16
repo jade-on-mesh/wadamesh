@@ -1074,6 +1074,7 @@ extern "C" const lv_font_t clock_font_96;
 #endif
 #include "ui_icons.h"
 #include "map_icons.h"   // the app's map icons (Material Icons, map_icons_14)
+#include "../helpers/PsramStatic.h"   // UI-only buffers in PSRAM (internal RAM is for Wi-Fi, BLE, TLS, stacks)
 static lv_font_t g_font_semi_12;
 static lv_font_t g_font_semi_14;
 static lv_font_t g_font_semi_16;
@@ -5257,7 +5258,7 @@ struct NavTip {
   const char* key_hint;   // a line for the keyboard only ("Hold Enter: settings")
   bool        own_hold;   // holding it already does something: no generic touch card
 };
-static NavTip      s_nav_tips[64];
+static auto&       s_nav_tips = psramStatic<NavTip[64]>();
 static lv_obj_t*   s_nav_tip_box   = nullptr;
 static lv_obj_t*   s_nav_tip_title = nullptr;
 static lv_obj_t*   s_nav_tip_hint  = nullptr;
@@ -5478,7 +5479,7 @@ static const int kNavMax = 160;   // spatial-nav mirror capacity — MUST exceed
                                   // grid or its tail is keypad-unreachable on the Tanmatsu: focusables
                                   // past this cap land in the LVGL group but not s_nav_objs[], so
                                   // navMoveDir() never reaches them (the 122-cell emoji picker — GH #141).
-static lv_obj_t* s_nav_objs[kNavMax] = { nullptr };
+static auto& s_nav_objs = psramStatic<lv_obj_t*[kNavMax]>();
 static lv_obj_t* s_nav_tabbar   = nullptr;     // the bottom tab bar (btnmatrix), added last to the group
 static lv_obj_t* s_nav_drawer_corner = nullptr;
 static lv_obj_t* s_nav_drawer_gear   = nullptr;
@@ -12511,7 +12512,7 @@ static void physicalKeyboardModalAutoFocusAsync(void* root) {
 constexpr size_t CLIPBOARD_MAX = 640;   // must cover the largest copyable text — a full composer draft
                                         // plus the 600-byte label-staging buffer (clipboardSet's callers);
                                         // 192 silently truncated long copy/pastes (GH #120).
-static char s_clipboard[CLIPBOARD_MAX] = {0};
+static auto& s_clipboard = psramStatic<char[CLIPBOARD_MAX]>();
 
 static void clipboardSet(const char* text, const char* tag) {
   if (!text) return;
@@ -28911,7 +28912,7 @@ static bool trackStatus(char* out, size_t cap) {
 // This session's track as one line on the map pan layer (points off the view are skipped,
 // and a long track is thinned to what one lv_line can hold).
 static lv_obj_t*  s_trk_line = nullptr;
-static lv_point_t s_trk_line_pts[256];
+static auto& s_trk_line_pts = psramStatic<lv_point_t[256]>();
 static void trackFreeMapObj() {
   if (s_trk_line) { lv_obj_del(s_trk_line); s_trk_line = nullptr; }
 }
@@ -29047,8 +29048,8 @@ static bool discoverRowsReady() {
 static void discoverBuildFeed() {
   if (!s_discover_feed) return;
   const uint32_t now = millis();
-  static MyMesh::DiscoverHit hits[MyMesh::DISCOVER_MAX];
-  static uint8_t idx[MyMesh::DISCOVER_MAX];
+  static auto& hits = psramStatic<MyMesh::DiscoverHit[MyMesh::DISCOVER_MAX]>();
+  static auto& idx = psramStatic<uint8_t[MyMesh::DISCOVER_MAX]>();
   uint8_t m = 0;
   uint8_t n = the_mesh.discoverCount();
   for (uint8_t i = 0; i < n && m < MyMesh::DISCOVER_MAX; i++) {
@@ -29058,7 +29059,7 @@ static void discoverBuildFeed() {
     for (uint8_t b = (uint8_t)(a + 1); b < m; b++)
       if (hits[idx[b]].our_rssi > hits[idx[a]].our_rssi) { uint8_t t = idx[a]; idx[a] = idx[b]; idx[b] = t; }
 
-  static char buf[3200];
+  static auto& buf = psramStatic<char[3200]>();
   int q = 0, rpt = 0, comp = 0;
   const int MAXROWS = DISC_MAXROWS;
   s_disc_row_n = 0;
@@ -36116,7 +36117,7 @@ constexpr int k_map_links_max = 32;
 // drawn. The status label reports the shortfall instead of hiding it.
 static int s_map_markers_drawn = 0;
 static int s_map_markers_wanted = 0;
-static MapMarker s_map_markers[k_map_markers_max] = {};
+static auto& s_map_markers = psramStatic<MapMarker[k_map_markers_max]>();
 // Effective dot limit: the user's setting (Map settings), clamped to the array. 0 in
 // the setting means "no limit", i.e. everything in view up to the firmware ceiling.
 static int mapMarkerCap() {
@@ -36189,7 +36190,7 @@ static void hideRouteHud();
 // Plots the Discover app's logged coverage samples (s_disc_track[], populated in discoverWardriveTick)
 // as signal-coloured dots — a personal RF-coverage map: a 0-hop hit means "reachable from that point",
 // so green = strong contact, red = weak. Object pool freed alongside the other map markers.
-static lv_obj_t* s_disc_map_objs[k_disc_track_max] = {nullptr};
+static auto& s_disc_map_objs = psramStatic<lv_obj_t*[k_disc_track_max]>();
 static int       s_disc_map_obj_n = 0;
 static void discoverFreeMapObjs() {
   for (int i = 0; i < s_disc_map_obj_n; ++i)
@@ -56826,7 +56827,7 @@ static void statusBarFitRow2Font(lv_obj_t* l) {
 static void chatHeaderSubtitle(char* out, size_t cap) {
   out[0] = '\0';
   if (!g_lv.task || !g_lv.task->hasActiveThread()) return;
-  static int idx[512];
+  static auto& idx = psramStatic<int[512]>();
   const int n = g_lv.task->getActiveThreadMessageCount(idx, 512, true);
   const bool ch = g_lv.task->activeThreadIsChannel();
   mesh::RTCClock* rtc = the_mesh.getRTCClock();
@@ -65059,7 +65060,7 @@ static void chanScopeRegionPickCb(lv_event_t* e) {
 // ---- Blocked-users (ignore-list) manager ----------------------------------
 static lv_obj_t* s_blocked_modal = nullptr;
 static uint8_t   s_blocked_snap[TOUCH_IGNORED_MAX * TOUCH_IGNORE_KEY_BYTES];
-static char      s_blocked_names_snap[TOUCH_IGNORED_NAMES_MAX * TOUCH_IGNORED_NAME_LEN];
+static auto&     s_blocked_names_snap = psramStatic<char[TOUCH_IGNORED_NAMES_MAX * TOUCH_IGNORED_NAME_LEN]>();
 static void blockedModalClose() {
   if (s_blocked_modal) { popupClose(&s_blocked_modal); }
   if (s_apppage_close == blockedModalClose) {   // release the tall title bar back to normal
@@ -65128,7 +65129,7 @@ static lv_obj_t* s_regions_scan_status = nullptr;
 static lv_timer_t* s_regions_scan_timer = nullptr;
 static RegionDiscoveryResults s_region_candidates;
 static constexpr uint8_t REGION_SCAN_MAX_REPEATERS = 16;
-static uint8_t s_region_scan_keys[REGION_SCAN_MAX_REPEATERS][PUB_KEY_SIZE] = {};
+static auto& s_region_scan_keys = psramStatic<uint8_t[REGION_SCAN_MAX_REPEATERS][PUB_KEY_SIZE]>();
 static uint8_t s_region_scan_count = 0;
 static uint8_t s_region_scan_next = 0;
 static bool s_region_scan_waiting = false;
@@ -67252,7 +67253,9 @@ static void openTelemetryWindow(const uint8_t* key6, const char* name, int state
 
   // ---- Read the per-node log into the chosen display window ----
   static const int k_max = 300;
-  static uint16_t mvs[k_max]; static int16_t t10s[k_max]; static int16_t hums[k_max];
+  static auto& mvs = psramStatic<uint16_t[k_max]>();
+  static auto& t10s = psramStatic<int16_t[k_max]>();
+  static auto& hums = psramStatic<int16_t[k_max]>();
   int n = 0;
   const uint32_t now = wallClockIsCurrent() ? (uint32_t)time(nullptr) : 0;
   const uint32_t age_lo = (uint32_t)s_telem_win_now_h  * 3600u;

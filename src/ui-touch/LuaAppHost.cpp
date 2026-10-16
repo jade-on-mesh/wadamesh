@@ -3,6 +3,7 @@
 //   1. PSRAM-capped allocator + instruction-budget hook (containment)
 //   2. the wada.* bindings (ui/input/timer/sys/store) — API v1
 //   3. lifecycle: launch -> run chunk -> callbacks via guarded pcall -> dismiss
+#include "../helpers/PsramStatic.h"
 #include "LuaAppHost.h"
 #if defined(ESP32)
 #include "mbedtls/md.h"      // wada.crypto: HMAC/SHA in C, not interpreted Lua
@@ -1592,7 +1593,7 @@ int mpGc(lua_State* L) { return mpClose(L); }
 // Names only. The channel secret is never handed to Lua, so an app can post to a
 // channel the user already has but can neither derive one nor pass it on.
 int meshChannels(lua_State* L) {
-  static char names[MAX_GROUP_CHANNELS][32];
+  static auto& names = psramStatic<char[MAX_GROUP_CHANNELS][32]>();
   const int n = luaHostMeshChannelNames(names, MAX_GROUP_CHANNELS);
   lua_createtable(L, n, 0);
   for (int i = 0; i < n; i++) {

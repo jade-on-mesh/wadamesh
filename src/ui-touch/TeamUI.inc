@@ -391,10 +391,10 @@ static void houndRefresh() {
 
 // ---- map overlay ---------------------------------------------------------------------------
 constexpr int kMapObjs = 256;
-static lv_obj_t* s_map_objs[kMapObjs];
+static auto& s_map_objs = psramStatic<lv_obj_t*[kMapObjs]>();
 static int s_map_obj_n = 0;
 struct Hit { int16_t x, y; uint8_t kind; uint8_t idx; };   // kind 0 member, 1 pin, 2 watched report, 3 shared pin
-static Hit s_hits[kMapObjs];
+static auto& s_hits = psramStatic<Hit[kMapObjs]>();
 static int s_hit_n = 0;
 
 static void mapTrack(lv_obj_t* o) { if (s_map_obj_n < kMapObjs) s_map_objs[s_map_obj_n++] = o; else lv_obj_del(o); }

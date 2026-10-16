@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "VoxPhotos.h"
 
+#include <esp_heap_caps.h>
+#include <new>
+
 #include <Arduino.h>
 #include <FS.h>
 #include <ctype.h>
@@ -148,7 +151,15 @@ class MeshIo : public VoxFetchIo {
 };
 
 MeshIo g_io;
-VoxFetch g_fetch(g_io);
+// The fetch and serve engines (~4 KB together) live in PSRAM: they are only ever
+// used from the loop task, and internal RAM is what Wi-Fi, BLE and TLS need.
+template <typename T, typename Io>
+T& inPsram(Io& io) {
+  void* p = heap_caps_malloc(sizeof(T), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!p) p = malloc(sizeof(T));
+  return *new (p) T(io);
+}
+VoxFetch& g_fetch = inPsram<VoxFetch>(g_io);
 
 // Answers downloads of the clips this radio holds (VoxServe).
 class ServeIo : public VoxServeIo {
@@ -192,7 +203,7 @@ class ServeIo : public VoxServeIo {
 };
 
 ServeIo g_serve_io;
-VoxServe g_serve(g_serve_io);
+VoxServe& g_serve = inPsram<VoxServe>(g_serve_io);
 
 bool parseChannelPost(const char* text, char* name, size_t name_cap, VoxWire::Envelope* env) {
   const char* body = ChannelSenderSplit::split(text, name, name_cap);
