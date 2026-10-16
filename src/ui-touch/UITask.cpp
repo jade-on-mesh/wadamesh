@@ -4394,6 +4394,28 @@ static void glyphDrawCb(lv_event_t* e) {
 // user flags are all the nav's; WIDGET_1 is free on a plain object (only a msgbox
 // uses it, on itself).
 #define AVATAR_SQUARE_FLAG LV_OBJ_FLAG_WIDGET_1
+// The MeshCore Open TAK app's avatar colour for [name] (mesh_ui.dart AvatarCircle):
+// one of its six hues, picked by the same string hash, so a person's initials
+// are the same colour on the device and in the app.
+static uint32_t appAvatarHue(const char* name) {
+  static const uint32_t kHues[6] = {0x0EA5E9, 0xDE7FDB, 0x22C55E, 0xF59E0B, 0x8FA8F0, 0x6FD9CE};
+  uint32_t h = 0;
+  // Dart hashes UTF-16 code units; names are ASCII almost always, and for the rest
+  // the UTF-8 bytes still give a stable (if different) pick.
+  for (const unsigned char* q = (const unsigned char*)(name ? name : ""); *q; ++q) h = (h * 31 + *q) & 0x7FFFFFFFu;
+  return kHues[h % 6];
+}
+
+// The app's avatar look on [av]: [accent] tinted into the background, a ring and
+// the content in [accent] (AvatarCircle: 14 % fill, 40 % border).
+static void appAvatarTint(lv_obj_t* av, uint32_t accent) {
+  lv_obj_set_style_radius(av, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+  lv_obj_set_style_bg_color(av, lv_color_mix(lv_color_hex(accent), lv_color_hex(COLOR_PANEL), 36), LV_PART_MAIN);
+  lv_obj_set_style_border_color(av, lv_color_mix(lv_color_hex(accent), lv_color_hex(COLOR_PANEL), 102), LV_PART_MAIN);
+  lv_obj_set_style_border_width(av, 1, LV_PART_MAIN);
+  lv_obj_set_style_border_opa(av, LV_OPA_COVER, LV_PART_MAIN);
+}
+
 static void avatarApplyLook(lv_obj_t* av, const char* name, bool initials, bool day, bool more,
                             uint8_t style, uint32_t raised, uint32_t glow) {
   if (!av) return;
@@ -4411,9 +4433,9 @@ static void avatarApplyLook(lv_obj_t* av, const char* name, bool initials, bool 
     lv_obj_set_style_border_width(av, 2, LV_PART_MAIN);
     const uint32_t ink = 0x000000;
 #else
-    lv_obj_set_style_bg_color(av, lv_color_hex(hsvRgb(nameHue(name), 55, 42)), LV_PART_MAIN);
-    lv_obj_set_style_border_width(av, 0, LV_PART_MAIN);
-    const uint32_t ink = 0xE6EBED;
+    // The app's look and colour for this name (appAvatarHue).
+    const uint32_t ink = appAvatarHue(name);
+    appAvatarTint(av, ink);
 #endif
     char ini[12];
     int o = 0, glyphs = 0;
@@ -28668,14 +28690,15 @@ static uint32_t    s_discover_last_scan_ms = 0;
 static void closeDiscoverPage();
 static void discoverJumpToMapHere();   // "Show on map" — defined with the map code (uses map statics)
 
-// node_type -> row colour / short label (mirrors the map marker colours).
+// node_type -> row colour / short label: the app's Contacts / Discovery colours
+// (contact_visuals.dart contactTypeColor).
 static uint32_t discTypeColor(uint8_t t) {
   switch (t) {
-    case ADV_TYPE_REPEATER: return 0x4DA8FF;   // blue
-    case ADV_TYPE_CHAT:     return 0x53C06B;   // green
-    case ADV_TYPE_ROOM:     return 0xF0A020;   // amber
-    case ADV_TYPE_SENSOR:   return 0x35C9C9;   // cyan
-    default:                return 0x9AA0A6;   // grey
+    case ADV_TYPE_REPEATER: return 0xF59E0B;   // orange
+    case ADV_TYPE_CHAT:     return 0x0EA5E9;   // blue
+    case ADV_TYPE_ROOM:     return 0xDE7FDB;   // magenta
+    case ADV_TYPE_SENSOR:   return 0x4ACCC4;   // teal
+    default:                return 0x94A3B8;   // grey
   }
 }
 static const char* discTypeName(uint8_t t) {
@@ -44800,19 +44823,21 @@ static lv_obj_t* makeContactChip(lv_obj_t* parent, const char* text,
   return chip;
 }
 
-// Two-byte chip labels for advert types. Colors echo MCterm's palette.
+// Two-byte chip labels for advert types, in the MeshCore Open TAK app's
+// Contacts colours (contact_visuals.dart contactTypeColor).
 static void contactTypeChipStyle(uint8_t type, const char*& label,
                                  uint32_t& bg, uint32_t& fg) {
+  fg = 0xFFFFFF;
   switch (type) {
     case ADV_TYPE_REPEATER:
-      label = "RPT"; bg = 0xC59F00; fg = 0x171a0e; break;   // yellow
+      label = "RPT"; bg = 0xF59E0B; break;   // orange
     case ADV_TYPE_ROOM:
-      label = "SRV"; bg = 0x6A4FC8; fg = 0xF1ECFF; break;   // purple
+      label = "SRV"; bg = 0xDE7FDB; break;   // magenta
     case ADV_TYPE_SENSOR:
-      label = "SNS"; bg = 0x2A6BD0; fg = 0xE6F2FF; break;   // blue
+      label = "SNS"; bg = 0x4ACCC4; break;   // teal
     case ADV_TYPE_CHAT:
     default:
-      label = "USR"; bg = 0x2A3848; fg = 0xCFE0F4; break;   // muted
+      label = "USR"; bg = 0x0EA5E9; break;   // blue
   }
 }
 
@@ -45210,7 +45235,21 @@ static void refreshContactsList() {
 
     lv_obj_t* av = makeGlyphAvatar(rb, e.name, e.type == ADV_TYPE_CHAT ? GLYPH_CIRCLE : GLYPH_SQUARE, kAv);
     lv_obj_align(av, LV_ALIGN_LEFT_MID, av_x, 0);
-    {
+    if (e.type == ADV_TYPE_REPEATER || e.type == ADV_TYPE_ROOM || e.type == ADV_TYPE_SENSOR) {
+      // As the app's Contacts list: the type's icon in its colour (orange tower,
+      // magenta room, teal sensor) instead of a name avatar.
+      const uint32_t tc = e.type == ADV_TYPE_REPEATER ? 0xF59E0B : e.type == ADV_TYPE_ROOM ? 0xDE7FDB : 0x4ACCC4;
+      lv_obj_remove_event_cb(av, glyphDrawCb);
+      lv_obj_clean(av);
+      lv_obj_set_user_data(av, nullptr);
+      appAvatarTint(av, tc);
+      lv_obj_t* ti = lv_label_create(av);
+      lv_label_set_text(ti, e.type == ADV_TYPE_REPEATER ? mapicons::kCellTower
+                            : e.type == ADV_TYPE_ROOM  ? mapicons::kMeetingRoom : mapicons::kSensors);
+      lv_obj_set_style_text_font(ti, &map_icons_14, LV_PART_MAIN);
+      lv_obj_set_style_text_color(ti, lv_color_hex(tc), LV_PART_MAIN);
+      lv_obj_center(ti);
+    } else {
       // Same icon as the contact's chat (#646): the one picked for the chat, which is
       // keyed on the advertised name, else the first emoji in the shown name (#640).
       char eb[20];
