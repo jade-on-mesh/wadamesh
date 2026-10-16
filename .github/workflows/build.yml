@@ -150,6 +150,39 @@ jobs:
           DAV=$(~/.platformio/packages/toolchain-xtensa-esp32s3/bin/xtensa-esp32s3-elf-nm -S --size-sort \
                 .pio/build/${{ matrix.env }}/firmware.elf | grep -ciE ' dav1d_' || true)
           echo "::notice title=${{ matrix.env }} size::firmware.bin ${BIN} bytes; dav1d symbols linked: ${DAV}"
+      # Internal RAM (ESP32-S3: IRAM and DRAM share the same 512 KB SRAM; what the
+      # image takes statically is gone from the heap Wi-Fi, BLE, TLS and task
+      # stacks need). Totals and the largest internal-RAM symbols as annotations.
+      - name: Internal RAM (static)
+        shell: bash
+        env:
+          B: .pio/build/${{ matrix.env }}
+        run: |
+          [ -f "$B/firmware.elf" ] || exit 0
+          python3 - <<'PY'
+          import os, subprocess
+          b = os.environ["B"]; env = b.split("/")[-1]
+          t = os.path.expanduser("~/.platformio/packages/toolchain-xtensa-esp32s3/bin/xtensa-esp32s3-elf-")
+          secs = {}
+          for l in subprocess.run([t + "size", "-A", b + "/firmware.elf"], capture_output=True, text=True).stdout.splitlines():
+              f = l.split()
+              if len(f) >= 3 and f[0].startswith("."):
+                  secs[f[0]] = (int(f[1]), int(f[2]))
+          def tot(pred): return sum(sz for n, (sz, a) in secs.items() if pred(n, a))
+          dram = tot(lambda n, a: 0x3FC88000 <= a < 0x3FD00000)
+          iram = tot(lambda n, a: 0x40370000 <= a < 0x403E0000)
+          psram = tot(lambda n, a: 0x3C000000 <= a < 0x3E000000 and "bss" in n)
+          print(f"::notice title={env} internal RAM::DRAM static {dram} B, IRAM {iram} B, total {dram + iram} B; PSRAM bss {psram} B")
+          syms = []
+          for l in subprocess.run([t + "nm", "-S", "--size-sort", "-C", b + "/firmware.elf"], capture_output=True, text=True).stdout.splitlines():
+              f = l.split(" ", 3)
+              if len(f) != 4 or f[2] not in "bBdD": continue
+              try: a = int(f[0], 16); n = int(f[1], 16)
+              except ValueError: continue
+              if 0x3FC88000 <= a < 0x3FD00000: syms.append((n, f[3][:90]))
+          syms.sort(reverse=True)
+          print(f"::notice title={env} largest internal RAM symbols::" + "%0A".join(f"{n} {s}" for n, s in syms[:60]))
+          PY
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.env }}
