@@ -1074,6 +1074,7 @@ extern "C" const lv_font_t clock_font_96;
 #endif
 #include "ui_icons.h"
 #include "map_icons.h"   // the app's map icons (Material Icons, map_icons_14)
+#include "../helpers/PsramStatic.h"   // UI-only buffers in PSRAM (internal RAM is for Wi-Fi, BLE, TLS, stacks)
 static lv_font_t g_font_semi_12;
 static lv_font_t g_font_semi_14;
 static lv_font_t g_font_semi_16;
@@ -5257,7 +5258,7 @@ struct NavTip {
   const char* key_hint;   // a line for the keyboard only ("Hold Enter: settings")
   bool        own_hold;   // holding it already does something: no generic touch card
 };
-static NavTip      s_nav_tips[64];
+static auto&       s_nav_tips = psramStatic<NavTip[64]>();
 static lv_obj_t*   s_nav_tip_box   = nullptr;
 static lv_obj_t*   s_nav_tip_title = nullptr;
 static lv_obj_t*   s_nav_tip_hint  = nullptr;
@@ -5478,7 +5479,7 @@ static const int kNavMax = 160;   // spatial-nav mirror capacity — MUST exceed
                                   // grid or its tail is keypad-unreachable on the Tanmatsu: focusables
                                   // past this cap land in the LVGL group but not s_nav_objs[], so
                                   // navMoveDir() never reaches them (the 122-cell emoji picker — GH #141).
-static lv_obj_t* s_nav_objs[kNavMax] = { nullptr };
+static auto& s_nav_objs = psramStatic<lv_obj_t*[kNavMax]>();
 static lv_obj_t* s_nav_tabbar   = nullptr;     // the bottom tab bar (btnmatrix), added last to the group
 static lv_obj_t* s_nav_drawer_corner = nullptr;
 static lv_obj_t* s_nav_drawer_gear   = nullptr;
@@ -8502,11 +8503,20 @@ static void otaStartInstall(int target_n) {
   }
   if (target_n < 1) return;        // no valid release to fetch
   if (s_ota_state == 1) return;    // already running
+  // The download runs on its own 16 KB task, and TLS can't use a PSRAM stack, so it
+  // needs that much internal RAM in one piece. Bluetooth (NimBLE) holds tens of KB of
+  // it: let it go now, on the UI thread, as the radio restarts after the update anyway.
+  bool ble_released = false;
+#if defined(MULTI_TRANSPORT_COMPANION)
+  if (g_lv.task && g_lv.task->serialInterface())
+    ble_released = static_cast<MultiTransportCompanionInterface*>(g_lv.task->serialInterface())->releaseBleForUpdate();
+#endif
   s_ota_msg[0] = 0; s_ota_pct = 0; s_ota_target_n = target_n; s_ota_state = 1; s_ota_request = true;   // hand off to the worker
   if (s_ota_btn) { lv_obj_add_state(s_ota_btn, LV_STATE_DISABLED); lv_obj_clear_flag(s_ota_btn, LV_OBJ_FLAG_CLICKABLE); }
   if (s_ota_status_lbl) {
-    char sb[48];
-    snprintf(sb, sizeof sb, "Installing %s...\nDo not power off.", relName(target_n));
+    char sb[112];
+    snprintf(sb, sizeof sb, "Installing %s...\nDo not power off.%s", relName(target_n),
+             ble_released ? "\nBluetooth is off until the radio restarts." : "");
     otaStatusText(sb);
     lv_obj_set_style_text_color(s_ota_status_lbl, lightSurfaceTextColor(0xE2A23A), LV_PART_MAIN);
   }
@@ -12502,7 +12512,7 @@ static void physicalKeyboardModalAutoFocusAsync(void* root) {
 constexpr size_t CLIPBOARD_MAX = 640;   // must cover the largest copyable text — a full composer draft
                                         // plus the 600-byte label-staging buffer (clipboardSet's callers);
                                         // 192 silently truncated long copy/pastes (GH #120).
-static char s_clipboard[CLIPBOARD_MAX] = {0};
+static auto& s_clipboard = psramStatic<char[CLIPBOARD_MAX]>();
 
 static void clipboardSet(const char* text, const char* tag) {
   if (!text) return;
@@ -28265,7 +28275,7 @@ static ReaderLocalResult readerReadLocal(const char* url, uint8_t* raw, size_t c
 }
 
 // Worker (core 0): load s_reader_url, strip to s_reader_text, publish via s_reader_dirty.
-static void readerFetchTaskFn(void*) {
+static void readerFetchBody() {
   const uint32_t generation = s_reader_task_generation;
   char url[300]; strncpy(url, s_reader_url, sizeof url - 1); url[sizeof url - 1] = 0;
   bool result_ok = false;
@@ -28374,8 +28384,14 @@ static void readerFetchTaskFn(void*) {
     snprintf(s_reader_msg, sizeof s_reader_msg, "%s", result_msg);
   }
   s_reader_task = nullptr; s_reader_busy = false; s_reader_dirty = true;
+}
+static void readerFetchTaskFn(void*) {
+  readerFetchBody();
   vTaskDelete(nullptr);
 }
+// On the shared audio worker (VoxAudioTask): its 16 KB internal stack is held from
+// boot, so a page load doesn't need a second free 16 KB block (TLS can't use PSRAM).
+static void readerFetchWorkerFn(void*) { readerFetchBody(); }
 // Navigate to a URL. push=true records it in history (a fresh navigation from Go / a
 // link / Enter); push=false is a back / forward / refresh replay that must NOT grow
 // history. readerStart() is the public "new navigation" entry point.
@@ -28403,7 +28419,10 @@ static bool readerNavigate(const char* in, bool push) {
   // Immediate feedback (we're on the UI thread): collapse the URL into the topbar and
   // show a Loading placeholder at once, so a tapped link visibly does something now.
   if (s_reader_root) { readerSetAddrExpanded(false); readerShowLoading(); }
-  if (xTaskCreatePinnedToCore(readerFetchTaskFn, "reader", 16384, nullptr, 4, &s_reader_task, 0) != pdPASS) {
+  // Marked running before the job starts, so a fresh navigation doesn't drop the busy flag.
+  s_reader_task = reinterpret_cast<TaskHandle_t>(&s_reader_task);
+  if (!VoxAudioTask::run(readerFetchWorkerFn, nullptr) &&
+      xTaskCreatePinnedToCore(readerFetchTaskFn, "reader", 16384, nullptr, 4, &s_reader_task, 0) != pdPASS) {
     // Couldn't spawn the fetch worker (low internal RAM) — don't leave it stuck on
     // "Loading…" forever; surface it and drop the busy flag so a retry works.
     s_reader_task = nullptr; s_reader_busy = false;
@@ -28893,7 +28912,7 @@ static bool trackStatus(char* out, size_t cap) {
 // This session's track as one line on the map pan layer (points off the view are skipped,
 // and a long track is thinned to what one lv_line can hold).
 static lv_obj_t*  s_trk_line = nullptr;
-static lv_point_t s_trk_line_pts[256];
+static auto& s_trk_line_pts = psramStatic<lv_point_t[256]>();
 static void trackFreeMapObj() {
   if (s_trk_line) { lv_obj_del(s_trk_line); s_trk_line = nullptr; }
 }
@@ -29029,8 +29048,8 @@ static bool discoverRowsReady() {
 static void discoverBuildFeed() {
   if (!s_discover_feed) return;
   const uint32_t now = millis();
-  static MyMesh::DiscoverHit hits[MyMesh::DISCOVER_MAX];
-  static uint8_t idx[MyMesh::DISCOVER_MAX];
+  static auto& hits = psramStatic<MyMesh::DiscoverHit[MyMesh::DISCOVER_MAX]>();
+  static auto& idx = psramStatic<uint8_t[MyMesh::DISCOVER_MAX]>();
   uint8_t m = 0;
   uint8_t n = the_mesh.discoverCount();
   for (uint8_t i = 0; i < n && m < MyMesh::DISCOVER_MAX; i++) {
@@ -29040,7 +29059,7 @@ static void discoverBuildFeed() {
     for (uint8_t b = (uint8_t)(a + 1); b < m; b++)
       if (hits[idx[b]].our_rssi > hits[idx[a]].our_rssi) { uint8_t t = idx[a]; idx[a] = idx[b]; idx[b] = t; }
 
-  static char buf[3200];
+  static auto& buf = psramStatic<char[3200]>();
   int q = 0, rpt = 0, comp = 0;
   const int MAXROWS = DISC_MAXROWS;
   s_disc_row_n = 0;
@@ -30413,7 +30432,7 @@ static void fileTransferDownloadRead(const char* command) {
     fileTransferReply("ERR invalid download offset");
     return;
   }
-  static uint8_t outbound[WebFileTransfer::MAX_OUTBOUND_BYTES];
+  static auto& outbound = psramStatic<uint8_t[WebFileTransfer::MAX_OUTBOUND_BYTES]>();
   const size_t remaining = s_file_transfer_download_size - s_file_transfer_download_offset;
   const size_t wanted = remaining > 2048 ? 2048 : remaining;
   const size_t got = s_file_transfer_read_file.read(outbound + 5, wanted);
@@ -30474,7 +30493,7 @@ static void webFileTransferTick() {
     }
     return;
   }
-  static uint8_t frame[WebFileTransfer::MAX_INBOUND_BYTES];
+  static auto& frame = psramStatic<uint8_t[WebFileTransfer::MAX_INBOUND_BYTES]>();
   uint8_t opcode = 0;
   int budget = 3;
   while (budget-- > 0) {
@@ -36098,7 +36117,7 @@ constexpr int k_map_links_max = 32;
 // drawn. The status label reports the shortfall instead of hiding it.
 static int s_map_markers_drawn = 0;
 static int s_map_markers_wanted = 0;
-static MapMarker s_map_markers[k_map_markers_max] = {};
+static auto& s_map_markers = psramStatic<MapMarker[k_map_markers_max]>();
 // Effective dot limit: the user's setting (Map settings), clamped to the array. 0 in
 // the setting means "no limit", i.e. everything in view up to the firmware ceiling.
 static int mapMarkerCap() {
@@ -36171,7 +36190,7 @@ static void hideRouteHud();
 // Plots the Discover app's logged coverage samples (s_disc_track[], populated in discoverWardriveTick)
 // as signal-coloured dots — a personal RF-coverage map: a 0-hop hit means "reachable from that point",
 // so green = strong contact, red = weak. Object pool freed alongside the other map markers.
-static lv_obj_t* s_disc_map_objs[k_disc_track_max] = {nullptr};
+static auto& s_disc_map_objs = psramStatic<lv_obj_t*[k_disc_track_max]>();
 static int       s_disc_map_obj_n = 0;
 static void discoverFreeMapObjs() {
   for (int i = 0; i < s_disc_map_obj_n; ++i)
@@ -56808,7 +56827,7 @@ static void statusBarFitRow2Font(lv_obj_t* l) {
 static void chatHeaderSubtitle(char* out, size_t cap) {
   out[0] = '\0';
   if (!g_lv.task || !g_lv.task->hasActiveThread()) return;
-  static int idx[512];
+  static auto& idx = psramStatic<int[512]>();
   const int n = g_lv.task->getActiveThreadMessageCount(idx, 512, true);
   const bool ch = g_lv.task->activeThreadIsChannel();
   mesh::RTCClock* rtc = the_mesh.getRTCClock();
@@ -65041,7 +65060,7 @@ static void chanScopeRegionPickCb(lv_event_t* e) {
 // ---- Blocked-users (ignore-list) manager ----------------------------------
 static lv_obj_t* s_blocked_modal = nullptr;
 static uint8_t   s_blocked_snap[TOUCH_IGNORED_MAX * TOUCH_IGNORE_KEY_BYTES];
-static char      s_blocked_names_snap[TOUCH_IGNORED_NAMES_MAX * TOUCH_IGNORED_NAME_LEN];
+static auto&     s_blocked_names_snap = psramStatic<char[TOUCH_IGNORED_NAMES_MAX * TOUCH_IGNORED_NAME_LEN]>();
 static void blockedModalClose() {
   if (s_blocked_modal) { popupClose(&s_blocked_modal); }
   if (s_apppage_close == blockedModalClose) {   // release the tall title bar back to normal
@@ -65110,7 +65129,7 @@ static lv_obj_t* s_regions_scan_status = nullptr;
 static lv_timer_t* s_regions_scan_timer = nullptr;
 static RegionDiscoveryResults s_region_candidates;
 static constexpr uint8_t REGION_SCAN_MAX_REPEATERS = 16;
-static uint8_t s_region_scan_keys[REGION_SCAN_MAX_REPEATERS][PUB_KEY_SIZE] = {};
+static auto& s_region_scan_keys = psramStatic<uint8_t[REGION_SCAN_MAX_REPEATERS][PUB_KEY_SIZE]>();
 static uint8_t s_region_scan_count = 0;
 static uint8_t s_region_scan_next = 0;
 static bool s_region_scan_waiting = false;
@@ -67234,7 +67253,9 @@ static void openTelemetryWindow(const uint8_t* key6, const char* name, int state
 
   // ---- Read the per-node log into the chosen display window ----
   static const int k_max = 300;
-  static uint16_t mvs[k_max]; static int16_t t10s[k_max]; static int16_t hums[k_max];
+  static auto& mvs = psramStatic<uint16_t[k_max]>();
+  static auto& t10s = psramStatic<int16_t[k_max]>();
+  static auto& hums = psramStatic<int16_t[k_max]>();
   int n = 0;
   const uint32_t now = wallClockIsCurrent() ? (uint32_t)time(nullptr) : 0;
   const uint32_t age_lo = (uint32_t)s_telem_win_now_h  * 3600u;
@@ -74920,7 +74941,7 @@ static bool ssaverTick(uint32_t now) {
   static bool s_north = false;
   if (!s_ssaver_nodes_ms || (uint32_t)(now - s_ssaver_nodes_ms) >= 5000) {
     s_ssaver_nodes_ms = now ? now : 1;
-    static CstNode nodes[kSsaverNodes];   // UI thread only; keeps ~700 bytes off the loop stack
+    static auto& nodes = psramStatic<CstNode[kSsaverNodes]>();   // UI thread only; PSRAM, off the loop stack and out of internal RAM
     const int n = ssaverBuildNodes(nodes, s_north);
     cstSetNodes(nodes, n);
   }

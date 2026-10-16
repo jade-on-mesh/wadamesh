@@ -1,3 +1,4 @@
+#include "helpers/PsramStatic.h"   // buffers in PSRAM (internal RAM is for Wi-Fi, BLE, TLS, stacks)
 #include <Arduino.h>   // needed for PlatformIO
 #include <Mesh.h>
 #include "MyMesh.h"
@@ -465,7 +466,7 @@ bool meshcomodMigrateSpiffsToSd(bool force) {
   bool identity_ok = false;
   bool identity_deferred = false;
   int copied = 0, failed = 0;
-  static uint8_t buf[4096];
+  static auto& buf = psramStatic<uint8_t[4096]>();   // once, at most: PSRAM, not 4 KB of internal RAM for good
   // This routine runs only on loopTask. Keep the working paths off its stack:
   // the manual recovery used to be called from a deep LVGL event callback and
   // field evidence showed this buffer being corrupted after dozens of files.

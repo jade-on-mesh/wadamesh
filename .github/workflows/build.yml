@@ -73,6 +73,8 @@ jobs:
           g++ -std=c++17 -Wall -I src -DQRGEN=/tmp/lvgl/src/extra/libs/qrcode test/test_pad_qr.cpp /tmp/qrgen.o -o /tmp/pad_qr_fit && /tmp/pad_qr_fit
 
   firmware:
+    permissions:
+      contents: write   # the internal-RAM report goes to the ram-report branch
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -100,6 +102,8 @@ jobs:
         run: |
           unset WIFI_SSID WIFI_PWD
           set -o pipefail
+          # A linker map, for the internal-RAM report below (changes nothing in the image).
+          export PLATFORMIO_BUILD_FLAGS="-Wl,-Map,.pio/build/${{ matrix.env }}/firmware.map"
           pio run -e ${{ matrix.env }} 2>&1 | tee build.log
       - name: Compiler errors as annotations
         if: failure()
@@ -150,6 +154,76 @@ jobs:
           DAV=$(~/.platformio/packages/toolchain-xtensa-esp32s3/bin/xtensa-esp32s3-elf-nm -S --size-sort \
                 .pio/build/${{ matrix.env }}/firmware.elf | grep -ciE ' dav1d_' || true)
           echo "::notice title=${{ matrix.env }} size::firmware.bin ${BIN} bytes; dav1d symbols linked: ${DAV}"
+      # Internal RAM (ESP32-S3: IRAM and DRAM share the same 512 KB SRAM; what the
+      # image takes statically is gone from the heap Wi-Fi, BLE, TLS and task
+      # stacks need). Totals and the largest internal-RAM symbols as annotations.
+      - name: Internal RAM (static)
+        shell: bash
+        env:
+          B: .pio/build/${{ matrix.env }}
+        run: |
+          [ -f "$B/firmware.elf" ] || exit 0
+          python3 - <<'PY'
+          import os, subprocess
+          b = os.environ["B"]; env = b.split("/")[-1]
+          t = os.path.expanduser("~/.platformio/packages/toolchain-xtensa-esp32s3/bin/xtensa-esp32s3-elf-")
+          secs = {}
+          for l in subprocess.run([t + "size", "-A", b + "/firmware.elf"], capture_output=True, text=True).stdout.splitlines():
+              f = l.split()
+              if len(f) >= 3 and f[0].startswith("."):
+                  secs[f[0]] = (int(f[1]), int(f[2]))
+          def tot(pred): return sum(sz for n, (sz, a) in secs.items() if pred(n, a))
+          dram = tot(lambda n, a: 0x3FC88000 <= a < 0x3FD00000 and n != ".dram0.dummy")   # dummy: IRAM seen from DRAM
+          iram = tot(lambda n, a: 0x40370000 <= a < 0x403E0000)
+          psram = tot(lambda n, a: 0x3C000000 <= a < 0x3E000000 and "bss" in n)
+          print(f"::notice title={env} internal RAM::DRAM static {dram} B, IRAM {iram} B, total {dram + iram} B; PSRAM bss {psram} B")
+          syms = []
+          for l in subprocess.run([t + "nm", "-S", "--size-sort", "-C", b + "/firmware.elf"], capture_output=True, text=True).stdout.splitlines():
+              f = l.split(" ", 3)
+              if len(f) != 4 or f[2] not in "bBdD": continue
+              try: a = int(f[0], 16); n = int(f[1], 16)
+              except ValueError: continue
+              if 0x3FC88000 <= a < 0x3FD00000: syms.append((n, f[3][:90]))
+          syms.sort(reverse=True)
+          print(f"::notice title={env} largest internal RAM symbols::" + "%0A".join(f"{n} {s}" for n, s in syms[:60]))
+          print(f"::notice title={env} internal RAM sections::" + "%0A".join(
+              f"{n} {sz} @0x{a:x}" for n, (sz, a) in sorted(secs.items(), key=lambda x: -x[1][0])
+              if (0x3FC88000 <= a < 0x3FD00000 or 0x40370000 <= a < 0x403E0000) and sz))
+          # Who puts it there: input sections of the linker map in internal RAM, by
+          # library (archive) and by object file.
+          import re, collections
+          mp = b + "/firmware.map"
+          by_lib, by_obj = collections.Counter(), collections.Counter()
+          print(f"::notice title={env} linker map::{'found' if os.path.exists(mp) else 'MISSING'} {mp}")
+          if os.path.exists(mp):
+              pend = None
+              rx = re.compile(r"^\s*(\.\S+)?\s+0x([0-9a-f]+)\s+0x([0-9a-f]+)\s+(\S+)")
+              for line in open(mp, errors="replace"):
+                  m = rx.match(line)
+                  if not m:
+                      t = line.strip()
+                      pend = t if t.startswith(".") and " " not in t else None
+                      continue
+                  a, n, src = int(m.group(2), 16), int(m.group(3), 16), m.group(4)
+                  if not n or not (0x3FC88000 <= a < 0x3FD00000 or 0x40370000 <= a < 0x403E0000): continue
+                  lib = src.split("(")[0].split("/")[-1]
+                  obj = src.split("/")[-1]
+                  by_lib[lib] += n; by_obj[obj[:80]] += n
+              print(f"::notice title={env} internal RAM by library::" + "%0A".join(f"{n} {k}" for k, n in by_lib.most_common(40)))
+          # Annotations are capped per job, so the whole report also goes to a branch.
+          if True:
+              with open("ram-report.txt", "w") as out:
+                  out.write("sections\n" + "\n".join(f"{sz:8} {n} @0x{a:x}" for n, (sz, a) in sorted(secs.items(), key=lambda x: -x[1][0]) if sz) + "\n\n")
+                  out.write("by library (internal RAM: DRAM + IRAM)\n" + "\n".join(f"{n:8} {k}" for k, n in by_lib.most_common(80)) + "\n\n")
+                  out.write("by object\n" + "\n".join(f"{n:8} {k}" for k, n in by_obj.most_common(150)) + "\n\n")
+                  out.write("symbols\n" + "\n".join(f"{n:8} {s}" for n, s in syms[:200]) + "\n")
+          PY
+          if [ -f ram-report.txt ]; then
+            d=$(mktemp -d); cp ram-report.txt "$d/${{ matrix.env }}.txt"; cd "$d"
+            git init -q -b ram-report && git add -A
+            git -c user.name=ci -c user.email=ci@users.noreply.github.com commit -qm "RAM report ${GITHUB_SHA::7} ${{ matrix.env }}"
+            git push -qf "https://x-access-token:${{ github.token }}@github.com/${GITHUB_REPOSITORY}.git" "ram-report:ram-report/${{ matrix.env }}" || true
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.env }}

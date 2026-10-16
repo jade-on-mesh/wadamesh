@@ -1501,7 +1501,7 @@ static void buildPad() {
 }
 
 // ---- Import from SD -------------------------------------------------------------------------
-static char s_import_names[24][40];
+static auto& s_import_names = psramStatic<char[24][40]>();
 static uint32_t s_import_sizes[24];
 static int s_import_n = 0;
 static void importFileCb(lv_event_t* e) {

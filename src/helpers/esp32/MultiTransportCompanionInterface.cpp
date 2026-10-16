@@ -317,6 +317,19 @@ void MultiTransportCompanionInterface::setBlePhoneLinkPaused(bool paused) {
   else        _ble.enable();
 }
 
+bool MultiTransportCompanionInterface::releaseBleForUpdate() {
+  if (!_ble_begun) return false;
+  _ble_enabled = false;   // in RAM only: nothing brings it back up before the restart
+  _ble.disable();         // stop advertising and drop the phone
+  bleDetachServerCallbacks();
+#if CAP_BLE_KEYBOARD
+  BleKbd::stackGoingDown();
+#endif
+  NimBLEDevice::deinit(true);
+  _ble_begun = false;
+  return true;
+}
+
 void MultiTransportCompanionInterface::disableBle() {
   _ble_enabled = false;
   wifiConfigSetBleEnabled(false);   // persist so BT stays off across reboot

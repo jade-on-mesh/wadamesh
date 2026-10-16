@@ -1,3 +1,4 @@
+#include "../PsramStatic.h"
 #include "TouchPrefsStore.h"
 #include "TouchPrefsSchema.h"
 
@@ -2114,7 +2115,7 @@ int touchPrefsCopyNicknames(uint8_t* out_buf) {
 
 bool touchPrefsSetNickname(const uint8_t* pub_key6, const char* nick) {
   if (!pub_key6) return false;
-  static uint8_t buf[TOUCH_NICK_MAX * TOUCH_NICK_REC_BYTES];   // 1.8 KB: too much for the UI stack
+  static auto& buf = psramStatic<uint8_t[TOUCH_NICK_MAX * TOUCH_NICK_REC_BYTES]>();   // 1.8 KB: too much for the UI stack, and for internal RAM
   int n = touchPrefsCopyNicknames(buf);
   int at = -1;
   for (int i = 0; i < n; ++i)
