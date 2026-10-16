@@ -30432,7 +30432,7 @@ static void fileTransferDownloadRead(const char* command) {
     fileTransferReply("ERR invalid download offset");
     return;
   }
-  static uint8_t outbound[WebFileTransfer::MAX_OUTBOUND_BYTES];
+  static auto& outbound = psramStatic<uint8_t[WebFileTransfer::MAX_OUTBOUND_BYTES]>();
   const size_t remaining = s_file_transfer_download_size - s_file_transfer_download_offset;
   const size_t wanted = remaining > 2048 ? 2048 : remaining;
   const size_t got = s_file_transfer_read_file.read(outbound + 5, wanted);
@@ -30493,7 +30493,7 @@ static void webFileTransferTick() {
     }
     return;
   }
-  static uint8_t frame[WebFileTransfer::MAX_INBOUND_BYTES];
+  static auto& frame = psramStatic<uint8_t[WebFileTransfer::MAX_INBOUND_BYTES]>();
   uint8_t opcode = 0;
   int budget = 3;
   while (budget-- > 0) {
@@ -74941,7 +74941,7 @@ static bool ssaverTick(uint32_t now) {
   static bool s_north = false;
   if (!s_ssaver_nodes_ms || (uint32_t)(now - s_ssaver_nodes_ms) >= 5000) {
     s_ssaver_nodes_ms = now ? now : 1;
-    static CstNode nodes[kSsaverNodes];   // UI thread only; keeps ~700 bytes off the loop stack
+    static auto& nodes = psramStatic<CstNode[kSsaverNodes]>();   // UI thread only; PSRAM, off the loop stack and out of internal RAM
     const int n = ssaverBuildNodes(nodes, s_north);
     cstSetNodes(nodes, n);
   }

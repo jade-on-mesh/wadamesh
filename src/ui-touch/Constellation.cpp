@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "Constellation.h"
+#include "../helpers/PsramStatic.h"   // its tables in PSRAM (only the per-pixel cone table stays internal)
 
 #include <initializer_list>
 #include <math.h>
@@ -76,7 +77,7 @@ constexpr uint32_t kSweepPeriodMs = 6000;   // one turn
 constexpr int      kTailDeg       = 40;     // afterglow behind the beam
 constexpr int      kClutter       = 96;     // faint returns that light up in the beam's wake
 struct Clutter { int16_t deg10; int16_t dx, dy; };   // bearing, and its offset from you
-Clutter s_clutter[kClutter];
+auto& s_clutter = psramStatic<Clutter[kClutter]>();
 // The range rings' dots, worked out once per show (offsets from you): the beam
 // redraws the rings under it every frame, and trig per dot per frame was most
 // of the cost.
@@ -113,21 +114,21 @@ lv_obj_t*  s_core = nullptr;               // you: the core, its glow and its ri
 lv_obj_t*  s_core_glow = nullptr;
 lv_obj_t*  s_self_ring = nullptr;
 
-CstNode    s_nodes[kMaxNodes];
-Pt         s_pos[kMaxNodes];
+auto&      s_nodes = psramStatic<CstNode[kMaxNodes]>();
+auto&      s_pos = psramStatic<Pt[kMaxNodes]>();
 int        s_n   = 0;
 uint32_t   s_sig = 0;
 // lv_line keeps a POINTER to its points instead of copying them, so the arrays
 // have to outlive the line objects. Static, sized for the worst case.
 constexpr int kLinkPts = 5;            // a link in 4 pieces (see drawLineInPieces)
-lv_point_t s_link[kMaxNodes][kLinkPts];
-lv_point_t s_diamond[kMaxNodes][5];
+auto&      s_link = psramStatic<lv_point_t[kMaxNodes][kLinkPts]>();
+auto&      s_diamond = psramStatic<lv_point_t[kMaxNodes][5]>();
 
-Flow       s_flow[kFlows];
-uint32_t   s_flow_col[kFlows];        // each route's light, in its node's colour
+auto&      s_flow = psramStatic<Flow[kFlows]>();
+auto&      s_flow_col = psramStatic<uint32_t[kFlows]>();        // each route's light, in its node's colour
 int        s_nflow = 0;
 
-Leg        s_leg[kDots];
+auto&      s_leg = psramStatic<Leg[kDots]>();
 int        s_next_ping = 0;
 int        s_next_dot  = 0;
 
@@ -137,7 +138,7 @@ bool       s_st_set = false;
 // Space already taken this rebuild (the HUD, your own node, placed labels), so a
 // node's name goes where it can be read or not at all.
 struct Box { lv_coord_t x0, y0, x1, y1; };
-Box        s_box[kMaxNodes * 2 + 8];
+auto&      s_box = psramStatic<Box[kMaxNodes * 2 + 8]>();
 int        s_nbox = 0;
 
 // The status (clock, date, unread, the line about the mesh, the battery) moves to
