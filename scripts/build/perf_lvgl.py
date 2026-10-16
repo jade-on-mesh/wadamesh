@@ -1,7 +1,11 @@
 # PlatformIO pre-script: how LVGL itself is compiled, per environment.
 #
 #   custom_lvgl_o2 = yes
-#       LVGL's sources at -O2 instead of the framework's -Os. The software renderer is
+#   custom_lvgl_o2 = core, draw, font, misc
+#       LVGL's sources (or only those under the named lvgl/src/ folders) at -O2
+#       instead of the framework's -Os. The folders that carry a frame are core (the
+#       object tree, styles, refresh), draw, font and misc; widgets and extra are
+#       mostly set-up code and cost flash at -O2 for nothing a frame notices. The software renderer is
 #       where a frame's time goes (walking the object tree, styles, glyphs, filling),
 #       and -Os gives its loops up for size. Everything else keeps -Os, so the flash
 #       cost stays with the code that earns it. -O2 goes a little deeper into the loop
@@ -23,7 +27,12 @@ Import("env")
 
 flags_env = os.environ.get("PLATFORMIO_BUILD_FLAGS", "")
 
-o2 = str(env.GetProjectOption("custom_lvgl_o2", "")).strip().lower() in ("1", "yes", "true", "on")
+o2_opt = str(env.GetProjectOption("custom_lvgl_o2", "")).strip().lower()
+o2 = o2_opt in ("1", "yes", "true", "on")
+o2_dirs = []   # empty: every LVGL source
+if not o2 and o2_opt and o2_opt not in ("0", "no", "false", "off"):
+    o2_dirs = [d.strip().strip("/") for d in o2_opt.split(",") if d.strip()]
+    o2 = bool(o2_dirs)
 if "-DPERF_LVGL_O2" in flags_env:
     o2 = True
 if "-DBENCH_NO_O2" in flags_env:
@@ -42,12 +51,13 @@ if o2 or iram:
 
     def lvgl_object(env, node):
         flags = list(env["CCFLAGS"])
-        if o2:
+        path = str(node.srcnode().get_abspath()).replace("\\", "/")
+        if o2 and (not o2_dirs or any("/lvgl/src/%s/" % d in path for d in o2_dirs)):
             flags = [f for f in flags if f not in ("-Os", "-O1", "-O3")] + ["-O2"]
         if node.name in iram:
             flags += ["-include", IRAM_H]
         return env.Object(node, CCFLAGS=flags)
 
     env.AddBuildMiddleware(lvgl_object, "*lvgl/src/*")
-    print("perf: LVGL %s%s" % ("at -O2" if o2 else "at -Os",
+    print("perf: LVGL %s%s" % (("at -O2" + (" in " + ", ".join(o2_dirs) if o2_dirs else "")) if o2 else "at -Os",
                                (", IRAM: " + " ".join(iram)) if iram else ""))
