@@ -73,6 +73,8 @@ jobs:
           g++ -std=c++17 -Wall -I src -DQRGEN=/tmp/lvgl/src/extra/libs/qrcode test/test_pad_qr.cpp /tmp/qrgen.o -o /tmp/pad_qr_fit && /tmp/pad_qr_fit
 
   firmware:
+    permissions:
+      contents: write   # the internal-RAM report goes to the ram-report branch
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -208,7 +210,19 @@ jobs:
                   by_lib[lib] += n; by_obj[obj[:80]] += n
               print(f"::notice title={env} internal RAM by library::" + "%0A".join(f"{n} {k}" for k, n in by_lib.most_common(40)))
               print(f"::notice title={env} internal RAM by object::" + "%0A".join(f"{n} {k}" for k, n in by_obj.most_common(50)))
+              # Annotations are capped per job, so the whole report also goes to a branch.
+              with open("ram-report.txt", "w") as out:
+                  out.write("sections\n" + "\n".join(f"{sz:8} {n} @0x{a:x}" for n, (sz, a) in sorted(secs.items(), key=lambda x: -x[1][0]) if sz) + "\n\n")
+                  out.write("by library (internal RAM: DRAM + IRAM)\n" + "\n".join(f"{n:8} {k}" for k, n in by_lib.most_common(80)) + "\n\n")
+                  out.write("by object\n" + "\n".join(f"{n:8} {k}" for k, n in by_obj.most_common(150)) + "\n\n")
+                  out.write("symbols\n" + "\n".join(f"{n:8} {s}" for n, s in syms[:200]) + "\n")
           PY
+          if [ -f ram-report.txt ]; then
+            d=$(mktemp -d); cp ram-report.txt "$d/${{ matrix.env }}.txt"; cd "$d"
+            git init -q -b ram-report && git add -A
+            git -c user.name=ci -c user.email=ci@users.noreply.github.com commit -qm "RAM report ${GITHUB_SHA::7} ${{ matrix.env }}"
+            git push -qf "https://x-access-token:${{ github.token }}@github.com/${GITHUB_REPOSITORY}.git" "ram-report:ram-report/${{ matrix.env }}" || true
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.env }}
