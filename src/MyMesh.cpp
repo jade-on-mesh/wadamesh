@@ -3284,6 +3284,7 @@ void MyMesh::queueMessage(const ContactInfo &from, uint8_t txt_type, mesh::Packe
   // "VR3:" DMs are photo/voice fetch requests between MeshCore Open TAK apps:
   // the app (if one is connected) still gets the frame above, the chat doesn't.
   if (VoxWire::isControlText(text)) should_display = false;
+  if (txt_type == TXT_TYPE_PLAIN) noteFetchText(text);   // a VR3 request: which radio to answer on
   if (txt_type == TXT_TYPE_PLAIN) VoxPhotos::onDirectText(text, from.id.pub_key);
   // One-time-pad traffic for a contact we share a pad with: OTP Messenger shows
   // the decrypted text; the chat would only show hex.
@@ -3587,6 +3588,7 @@ void MyMesh::onChannelDataRecv(const mesh::GroupChannel &channel, mesh::Packet *
   if (resolved_idx < 0 || resolved_idx >= MAX_GROUP_CHANNELS) return;   // not one of our channels
 
 #ifdef DISPLAY_CLASS
+  if (data_type == VoxWire::kChannelDataType) noteFetchPayload(data, (size_t)data_len);   // for markTransfer
   if (data_type == VoxWire::kChannelDataType) VoxPhotos::onPayload(data, data_len, resolved_idx, rxVia());
   if (data_type == TeamWire::kDataType) teamOnChannelData(resolved_idx, data, data_len);   // Open TAK team
   if (_ui) _ui->onChannelData((uint8_t)resolved_idx, data_type, data, data_len, pkt->isRouteFlood());
@@ -3974,6 +3976,7 @@ void MyMesh::discoverUpsert(const uint8_t* pk, uint8_t pklen, uint8_t node_type,
 
 void MyMesh::onRawDataRecv(mesh::Packet *packet) {
 #ifdef DISPLAY_CLASS
+  noteFetchPayload(packet->payload, packet->payload_len);   // which radio to answer on (markTransfer)
   VoxPhotos::onPayload(packet->payload, packet->payload_len, -1, rxVia());   // photo packets for this radio
 #endif
   if (packet->payload_len + 4 > sizeof(out_frame)) {

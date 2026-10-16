@@ -324,6 +324,11 @@ protected:
   void onGroupDataRecv(mesh::Packet* packet, uint8_t type, const mesh::GroupChannel& channel, uint8_t* data,
                        size_t len) override;
   uint8_t _rx_origin = 0;
+  // Which profile each recent photo/voice fetch request came in on (markTransfer).
+  struct ReqVia { uint32_t sid = 0; uint8_t mask = 0; uint32_t at = 0; };
+  static constexpr int kReqViaSlots = 8;
+  static constexpr uint32_t kReqViaMs = 5UL * 60UL * 1000UL;   // a transfer and its retries
+  ReqVia _req_via[kReqViaSlots];
   uint8_t rxVia() const;
   uint8_t rxViaFrameTag(uint8_t none) const;
   int _tx_channel_slot = -1;
@@ -1139,15 +1144,55 @@ public:
     if (idx < 0 || idx >= MAX_GROUP_CHANNELS || !getChannel(idx, cd) || !channelSlotConfigured(cd)) return false;
     return sendGroupDataMedia(cd.channel, nullptr, OUT_PATH_UNKNOWN, type, data, (int)len, idx);
   }
-  /** Mark an Open TAK transfer packet for MediaMesh. Photo and voice packets
-   *  follow tx.media (or `channel_policy`); a fetch request is a few bytes
-   *  asking someone for them, and goes out on both radios (the main one alone
-   *  when radio2 can't send), so a sender on either one hears it. On radio2
-   *  only, a sender that is only on the main mesh never did. */
+  /** Mark an Open TAK transfer packet for MediaMesh.
+   *  - A fetch request is a few bytes asking someone for a photo or clip: both
+   *    radios (the main one alone when radio2 can't send), so a sender on either
+   *    one hears it.
+   *  - A photo or voice packet goes back the way it was asked for: a clip only
+   *    requested over the main mesh is answered there, whatever tx.media says,
+   *    so a requester without radio2 (a T1000, a phone on another radio) gets it.
+   *    Asked for on radio2 (or not known), it follows tx.media / `channel_policy`.
+   *  This covers this radio's own answers and an app's answers sent through it. */
   void markTransfer(const mesh::Packet* pkt, const uint8_t* data, size_t len,
                     uint8_t channel_policy = mediamesh::TX_AUTO) {
-    if (VoxWire::isFetchRequest(data, len)) mediamesh::markPacket(pkt, mediamesh::TX_BOTH);
+    if (VoxWire::isFetchRequest(data, len)) { mediamesh::markPacket(pkt, mediamesh::TX_BOTH); return; }
+    VoxWire::Packet p;
+    const uint8_t asked = VoxWire::parsePacket(data, len, &p) ? requestedVia(p.sid) : 0;
+    if (asked == 1) mediamesh::markPacket(pkt, mediamesh::TX_RADIO);          // main mesh only
+    else if (asked == 3) mediamesh::markPacket(pkt, mediamesh::TX_BOTH);      // asked on both
     else mediamesh::markMedia(pkt, channel_policy);
+  }
+  /** A fetch request heard (raw data, channel data or a VR3 DM, for this radio or
+   *  the app on it): remember which profile it came in on, for markTransfer. */
+  void noteFetchRequest(uint32_t sid, uint8_t via) {
+    if (via > 1) return;   // radio2 off: there is only the main mesh
+    const uint32_t now = millis();
+    int slot = 0;
+    for (int i = 0; i < kReqViaSlots; i++) {
+      if (_req_via[i].sid == sid && _req_via[i].mask) { slot = i; break; }
+      if ((int32_t)(_req_via[i].at - _req_via[slot].at) < 0) slot = i;   // else the oldest
+    }
+    ReqVia& r = _req_via[slot];
+    if (r.sid != sid || now - r.at > kReqViaMs) r.mask = 0;
+    r.sid = sid;
+    r.mask |= (uint8_t)(1u << via);
+    r.at = now;
+  }
+  /** Bit 0: asked for on the main mesh lately, bit 1: on radio2; 0 when unknown. */
+  uint8_t requestedVia(uint32_t sid) const {
+    for (int i = 0; i < kReqViaSlots; i++) {
+      const ReqVia& r = _req_via[i];
+      if (r.mask && r.sid == sid && millis() - r.at <= kReqViaMs) return r.mask;
+    }
+    return 0;
+  }
+  void noteFetchPayload(const uint8_t* data, size_t len) {
+    VoxWire::FetchRequest r;
+    if (VoxWire::parseFetch(data, len, &r)) noteFetchRequest(r.sid, rxVia());
+  }
+  void noteFetchText(const char* text) {
+    VoxWire::FetchRequest r;
+    if (VoxWire::isControlText(text) && VoxWire::parseTextFetch(text, &r)) noteFetchRequest(r.sid, rxVia());
   }
   /** sendGroupData that marks Open TAK photo/voice datagrams for MediaMesh. */
   bool sendGroupDataMedia(mesh::GroupChannel& channel, uint8_t* path, uint8_t path_len, uint16_t data_type,
