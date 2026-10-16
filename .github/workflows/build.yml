@@ -100,6 +100,8 @@ jobs:
         run: |
           unset WIFI_SSID WIFI_PWD
           set -o pipefail
+          # A linker map, for the internal-RAM report below (changes nothing in the image).
+          export PLATFORMIO_BUILD_FLAGS="-Wl,-Map,.pio/build/${{ matrix.env }}/firmware.map"
           pio run -e ${{ matrix.env }} 2>&1 | tee build.log
       - name: Compiler errors as annotations
         if: failure()
@@ -182,6 +184,30 @@ jobs:
               if 0x3FC88000 <= a < 0x3FD00000: syms.append((n, f[3][:90]))
           syms.sort(reverse=True)
           print(f"::notice title={env} largest internal RAM symbols::" + "%0A".join(f"{n} {s}" for n, s in syms[:60]))
+          print(f"::notice title={env} internal RAM sections::" + "%0A".join(
+              f"{n} {sz} @0x{a:x}" for n, (sz, a) in sorted(secs.items(), key=lambda x: -x[1][0])
+              if (0x3FC88000 <= a < 0x3FD00000 or 0x40370000 <= a < 0x403E0000) and sz))
+          # Who puts it there: input sections of the linker map in internal RAM, by
+          # library (archive) and by object file.
+          import re, collections
+          mp = b + "/firmware.map"
+          if os.path.exists(mp):
+              by_lib, by_obj = collections.Counter(), collections.Counter()
+              pend = None
+              rx = re.compile(r"^\s*(\.\S+)?\s+0x([0-9a-f]+)\s+0x([0-9a-f]+)\s+(\S+)")
+              for line in open(mp, errors="replace"):
+                  m = rx.match(line)
+                  if not m:
+                      t = line.strip()
+                      pend = t if t.startswith(".") and " " not in t else None
+                      continue
+                  a, n, src = int(m.group(2), 16), int(m.group(3), 16), m.group(4)
+                  if not n or not (0x3FC88000 <= a < 0x3FD00000 or 0x40370000 <= a < 0x403E0000): continue
+                  lib = src.split("(")[0].split("/")[-1]
+                  obj = src.split("/")[-1]
+                  by_lib[lib] += n; by_obj[obj[:80]] += n
+              print(f"::notice title={env} internal RAM by library::" + "%0A".join(f"{n} {k}" for k, n in by_lib.most_common(40)))
+              print(f"::notice title={env} internal RAM by object::" + "%0A".join(f"{n} {k}" for k, n in by_obj.most_common(50)))
           PY
       - uses: actions/upload-artifact@v4
         with:
