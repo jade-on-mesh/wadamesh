@@ -36322,31 +36322,28 @@ static void renderMapMarkers() {
       self_sy >= -10 && self_sy < k_map_canvas_h + 10) {
     MapMarker& m = s_map_markers[0];
     m.mesh_idx = -1;
+    // As the app: a white person pin on a dark disc with a white rim.
     m.obj = lv_label_create(parent);
-    lv_label_set_text(m.obj, LV_SYMBOL_GPS);
-    lv_obj_set_style_text_font(m.obj, &g_font_16, LV_PART_MAIN);
+    lv_label_set_text(m.obj, mapicons::kPersonPin);
+    lv_obj_set_style_text_font(m.obj, &map_icons_14, LV_PART_MAIN);
     lv_obj_set_style_text_color(m.obj, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
-    // A bare white glyph disappears on light tiles (#366). The contact markers
-    // below already carry a dark border for exactly this reason; the self
-    // marker never got one. Same treatment: a dark chip behind the glyph, so it
-    // reads on any basemap without needing a colour that means something else.
-    lv_obj_set_style_bg_color(m.obj, lv_color_hex(0x101418), LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(m.obj, LV_OPA_70, LV_PART_MAIN);
+    // The app's dark disc (MapPalette.panelDark) with a white rim, so it reads
+    // on any basemap (#366): 14 px glyph + 3 px pad + 2 px rim = 24 px, centred.
+    lv_obj_set_style_bg_color(m.obj, lv_color_hex(0x0B1220), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(m.obj, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_radius(m.obj, LV_RADIUS_CIRCLE, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(m.obj, 2, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(m.obj, 3, LV_PART_MAIN);
     lv_obj_set_style_border_color(m.obj, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
-    lv_obj_set_style_border_width(m.obj, 1, LV_PART_MAIN);
-    lv_obj_set_style_border_opa(m.obj, LV_OPA_60, LV_PART_MAIN);
-    // The glyph's optical center isn't at its bbox center — fudge the
-    // align slightly so the crosshair lines up with the tile pixel. The 3 px
-    // of chip (2 pad + 1 border) shifts it again, so take that off too.
-    lv_obj_set_pos(m.obj, self_sx - 8 - 3, self_sy - 11 - 3);
+    lv_obj_set_style_border_width(m.obj, 2, LV_PART_MAIN);
+    lv_obj_set_pos(m.obj, self_sx - 12, self_sy - 12);
   }
 
-  // ---- Contact markers — coloured discs with the app's type icon (20×20 with
-  //      a 2-px black border so they read on any tile background).
+  // ---- Contact markers — as the app draws them: a disc in the type / age colour
+  //      with a white rim, the type's white icon and a status dot (20×20).
   int slot = 1;   // slot 0 reserved for self
   s_map_markers_wanted = 0;
+  uint32_t map_now_secs = 0;
+  { mesh::RTCClock* rtc = the_mesh.getRTCClock(); if (rtc) map_now_secs = rtc->getCurrentTime(); }
   // Contact markers — skipped entirely when "Contacts on map" is off (self stays).
   const int marker_cap = mapMarkerCap();
   for (uint32_t i = 0; s_map_show_contacts && i < the_mesh.getNumContacts(); ++i) {
@@ -36371,11 +36368,16 @@ static void renderMapMarkers() {
     s_map_markers_wanted++;
     if (slot >= marker_cap + 1) continue;   // +1: slot 0 is self
 
-    // Color by contact type so a glance at the map maps to the chip
-    // colors on the Contacts tab. Defaults to chat-peer orange.
-    uint32_t color = 0xFF6F4D;
-    if (c.type == ADV_TYPE_REPEATER) color = 0x4DA8FF;
-    else if (c.type == ADV_TYPE_ROOM) color = 0xC9A24A;
+    // The app's colours (map_screen.dart _markerColor / _ageColor): repeaters
+    // blue, rooms purple, sensors teal; people by when they were last heard,
+    // green within the hour, amber within the day, grey after.
+    const uint32_t age = (map_now_secs > c.last_advert_timestamp && c.last_advert_timestamp != 0)
+                             ? map_now_secs - c.last_advert_timestamp : 0xFFFFFFFFu;
+    const uint32_t age_rgb = age <= 3600 ? 0x22C55E : age <= 86400 ? 0xF59E0B : 0x94A3B8;
+    uint32_t color = age_rgb;
+    if (c.type == ADV_TYPE_REPEATER) color = 0x2563EB;
+    else if (c.type == ADV_TYPE_ROOM) color = 0x7C3AED;
+    else if (c.type == ADV_TYPE_SENSOR) color = 0x0F766E;
 
     MapMarker& m = s_map_markers[slot];
     m.mesh_idx = (int)i;
@@ -36385,16 +36387,31 @@ static void renderMapMarkers() {
     lv_obj_set_pos(m.obj, sx - 10, sy - 10);
     lv_obj_set_style_bg_color(m.obj, lv_color_hex(color), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(m.obj, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_set_style_border_color(m.obj, lv_color_hex(0x000000), LV_PART_MAIN);
+    lv_obj_set_style_border_color(m.obj, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
     lv_obj_set_style_border_width(m.obj, 2, LV_PART_MAIN);
     lv_obj_set_style_radius(m.obj, LV_RADIUS_CIRCLE, LV_PART_MAIN);
-    // The app's icon for the contact's type (person, repeater, room, sensor).
+    lv_obj_set_style_clip_corner(m.obj, false, LV_PART_MAIN);
+    // The app's white icon for the contact's type (person, repeater, room, sensor).
     lv_obj_t* icon = lv_label_create(m.obj);
     lv_label_set_text(icon, mapicons::contactType(c.type));
     lv_obj_set_style_text_font(icon, &map_icons_14, LV_PART_MAIN);
     lv_obj_set_style_text_color(icon, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
     lv_obj_clear_flag(icon, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_center(icon);
+    // And its status dot, bottom right: green heard within the hour, amber within
+    // the day, grey after (the app's online / recent / stale).
+    lv_obj_t* st = lv_obj_create(m.obj);
+    lv_obj_remove_style_all(st);
+    lv_obj_set_size(st, 8, 8);
+    lv_obj_align(st, LV_ALIGN_BOTTOM_RIGHT, 3, 3);
+    lv_obj_set_style_bg_color(st, lv_color_hex(age <= 3600 ? 0x22C55E : age <= 86400 ? 0xF59E0B : 0x6B7280),
+                              LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(st, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_radius(st, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+    lv_obj_set_style_border_color(st, lv_color_hex(0x0B1220), LV_PART_MAIN);
+    lv_obj_set_style_border_width(st, 1, LV_PART_MAIN);
+    lv_obj_add_flag(st, LV_OBJ_FLAG_IGNORE_LAYOUT | LV_OBJ_FLAG_FLOATING);
+    lv_obj_clear_flag(st, LV_OBJ_FLAG_CLICKABLE);
     // Markers are NOT clickable themselves — taps go to the canvas, whose
     // RELEASED handler scans all markers within ~16 px of the tap point.
     // This makes overlapping markers selectable (disambiguation sheet) and
