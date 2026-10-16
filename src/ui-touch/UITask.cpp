@@ -1073,6 +1073,7 @@ extern "C" const lv_font_t clock_font_40;   // the same face at the screensaver'
 extern "C" const lv_font_t clock_font_96;
 #endif
 #include "ui_icons.h"
+#include "map_icons.h"   // the app's map icons (Material Icons, map_icons_14)
 static lv_font_t g_font_semi_12;
 static lv_font_t g_font_semi_14;
 static lv_font_t g_font_semi_16;
@@ -36342,8 +36343,8 @@ static void renderMapMarkers() {
     lv_obj_set_pos(m.obj, self_sx - 8 - 3, self_sy - 11 - 3);
   }
 
-  // ---- Contact markers — colored circles sized for taps (14×14 with a
-  //      2-px black border so they read on any tile background).
+  // ---- Contact markers — coloured discs with the app's type icon (20×20 with
+  //      a 2-px black border so they read on any tile background).
   int slot = 1;   // slot 0 reserved for self
   s_map_markers_wanted = 0;
   // Contact markers — skipped entirely when "Contacts on map" is off (self stays).
@@ -36380,13 +36381,20 @@ static void renderMapMarkers() {
     m.mesh_idx = (int)i;
     m.obj = lv_obj_create(parent);
     lv_obj_remove_style_all(m.obj);
-    lv_obj_set_size(m.obj, 14, 14);
-    lv_obj_set_pos(m.obj, sx - 7, sy - 7);
+    lv_obj_set_size(m.obj, 20, 20);
+    lv_obj_set_pos(m.obj, sx - 10, sy - 10);
     lv_obj_set_style_bg_color(m.obj, lv_color_hex(color), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(m.obj, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_border_color(m.obj, lv_color_hex(0x000000), LV_PART_MAIN);
     lv_obj_set_style_border_width(m.obj, 2, LV_PART_MAIN);
-    lv_obj_set_style_radius(m.obj, 7, LV_PART_MAIN);
+    lv_obj_set_style_radius(m.obj, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+    // The app's icon for the contact's type (person, repeater, room, sensor).
+    lv_obj_t* icon = lv_label_create(m.obj);
+    lv_label_set_text(icon, mapicons::contactType(c.type));
+    lv_obj_set_style_text_font(icon, &map_icons_14, LV_PART_MAIN);
+    lv_obj_set_style_text_color(icon, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
+    lv_obj_clear_flag(icon, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_center(icon);
     // Markers are NOT clickable themselves — taps go to the canvas, whose
     // RELEASED handler scans all markers within ~16 px of the tap point.
     // This makes overlapping markers selectable (disambiguation sheet) and
@@ -75848,6 +75856,41 @@ void gpsEnsureBigRxRing() {}
 #endif
 
 void UITask::msgRead(int msgcount) { _msgcount = msgcount; }
+
+int UITask::sharedPins(const sharedpins::Pin** out) {
+  static sharedpins::Pin* s_pins = nullptr;
+  static int s_n = 0;
+  static uint32_t s_key_seq = 0;
+  static int s_key_count = -1, s_key_head = -1;
+  if (out) *out = s_pins;
+  if (s_key_seq == _ui_seq_next && s_key_count == _ui_msg_count && s_key_head == _ui_msg_head) return s_n;
+  if (!s_pins) {
+    const size_t bytes = sizeof(sharedpins::Pin) * sharedpins::kMaxPins;
+#if defined(ESP32)
+    s_pins = (sharedpins::Pin*)heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!s_pins) s_pins = (sharedpins::Pin*)malloc(bytes);
+#else
+    s_pins = (sharedpins::Pin*)malloc(bytes);
+#endif
+    if (!s_pins) return 0;
+    if (out) *out = s_pins;
+  }
+  if (!_ui_msgs) return 0;
+  sharedpins::Collector c(s_pins, sharedpins::kMaxPins);
+  const char* self = the_mesh.getNodePrefs()->node_name;
+  // Newest first (ring order, as threadLastMessage explains), so each key keeps its latest.
+  for (int i = 0; i < _ui_msg_count && c.n < sharedpins::kMaxPins; ++i) {
+    const int slot = (_ui_msg_head - 1 - i + _ui_msg_cap) % _ui_msg_cap;
+    const UIMessage& m = _ui_msgs[slot];
+    if (!m.text[0] || !strstr(m.text, "m:")) continue;
+    c.add(m.text, m.thread, m.channel ? m.sender : m.thread, m.channel, m.outgoing, m.ts, self);
+  }
+  s_n = c.n;
+  s_key_seq = _ui_seq_next;
+  s_key_count = _ui_msg_count;
+  s_key_head = _ui_msg_head;
+  return s_n;
+}
 
 // ---- "At a glance" notification --------------------------------------------
 // New, board-agnostic feature (distinct from the T-Deck's existing opt-in

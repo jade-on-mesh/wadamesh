@@ -142,6 +142,11 @@ void Core::roleName(int id, char* out, size_t cap) const {
   else snprintf(out, cap, "Role %d", id);
 }
 
+uint16_t Core::roleIcon(int id) const {
+  const TeamWire::RoleDef* d = roleEdit(id);
+  return d ? d->icon : 0;
+}
+
 char Core::roleLetter(int id) const {
   const TeamWire::RoleDef* d = roleEdit(id);
   if (d)
