@@ -20713,6 +20713,7 @@ static const char* k_admin_help_banner =
   "  neighbor.remove <hex>\n"
   "  tempradio f bw sf cr mins\n"
   "  clear stats\n"
+  "MediaMesh (radio2): the antenna button\n"
   "Settings:\n"
   "  get <key> / set <key> <val>\n"
   "  sensor list / get / set\n"
@@ -20756,6 +20757,16 @@ static const AdminCmdEntry k_admin_cmds[] = {
   { "neighbor.remove <hex>",              "neighbor.remove " },
   { "tempradio <freq> <bw> <sf> <cr> <m>", "tempradio " },
   { "clear stats",                        "clear stats" },
+  // MediaMesh: the antenna button above has the same as a page
+  { "[ RADIO2 / MEDIAMESH ]", nullptr },
+  { "get radio2",                         "get radio2" },
+  { "get radio2.status - live figures",   "get radio2.status" },
+  { "set radio2 <f>,<bw>,<sf>,<cr>,rxtx", "set radio2 " },
+  { "set radio2 off",                     "set radio2 off" },
+  { "set radio2.cross auto/on/off",       "set radio2.cross " },
+  { "set tx.reply both/radio/radio2/auto", "set tx.reply " },
+  { "set tempradio2 <f>,<bw>,<sf>,<cr>,rxtx,<min>", "set tempradio2 " },
+  { "set tempradio2 off",                 "set tempradio2 off" },
   // Settings / radio prefs (always available — these target NodePrefs,
   // not sensor hardware)
   { "[ RADIO PREFS ]", nullptr },
@@ -20851,7 +20862,10 @@ static void closeAdminPwPrompt() {
   loginWaitCancel();   // abandoning the prompt abandons the no-reply watchdog too
 }
 
+namespace rr2 { void closePage(); void openPage(const uint8_t* pub32, const char* name); }   // RepeaterRadio2.inc
+
 static void closeAdminConsole() {
+  rr2::closePage();
   if (s_admin_root) {
     hideKb();
     closeAdminCmdPicker();
@@ -21034,6 +21048,8 @@ static void adminCmdSubmit() {
   if (g_lv.keyboard && s_kb_bind_ta == s_admin_cmd_ta) kbMirrorBind(s_admin_cmd_ta);
 }
 
+#include "RepeaterRadio2.inc"   // the MediaMesh (radio2) page for the repeater we are logged in to
+
 static void openAdminConsole(const ContactInfo& c) {
   closeAdminPwPrompt();
   closeAdminConsole();
@@ -21078,9 +21094,27 @@ static void openAdminConsole(const ContactInfo& c) {
     closeAdminConsole();
   });
   // Trim the title's right side so a long repeater name can't slide under
-  // the X. Header is sw=240 wide; reserve 36 px for the X badge.
+  // the X. Header is sw=240 wide; reserve 36 px for the X badge and 40 for
+  // the MediaMesh button beside it.
   lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
-  lv_obj_set_width(title, sw - 8 - 36);
+  lv_obj_set_width(title, sw - 8 - 36 - 40);
+  // MediaMesh (radio2) on this repeater: its own page (RepeaterRadio2.inc).
+  {
+    lv_obj_t* mm = lv_btn_create(hdr);
+    lv_obj_set_size(mm, 34, 28);
+    lv_obj_align(mm, LV_ALIGN_RIGHT_MID, -36, 0);
+    styleButton(mm);
+    lv_obj_set_style_pad_all(mm, 0, LV_PART_MAIN);
+    lv_obj_t* ml = lv_label_create(mm);
+    setIconLabel(ml, UI_ICON_ANTENNA);
+    lv_obj_set_style_text_color(ml, lv_color_hex(0xDE7FDB), LV_PART_MAIN);
+    lv_obj_center(ml);
+    lv_obj_add_event_cb(mm, [](lv_event_t* e) {
+      if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+      hideKb();
+      rr2::openPage(s_admin_pub32, s_admin_name);
+    }, LV_EVENT_CLICKED, nullptr);
+  }
 
   // Scrolling log area. Heights are relative to the SHIFTED root (which
   // starts at y=STATUSBAR_H and is sh-STATUSBAR_H tall) — using bare `sh`
@@ -67820,6 +67854,7 @@ void UITask::onAdminCommandReply(const ContactInfo& contact, const char* text) {
   // Only append if the reply is from the contact we're currently logged
   // into. Replies from a different repeater would be confusing — the
   // companion-serial side handles those separately via queueMessage.
+  if (rr2::onAdminReply(contact, text)) return;   // the MediaMesh page's own command
   if (memcmp(contact.id.pub_key, s_admin_pub32, 32) != 0) return;
   adminLogAppend("", text ? text : "");
 }
