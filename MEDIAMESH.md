@@ -41,9 +41,11 @@ Both → Off (`tx.user`). Per channel: **Send on** in the channel's settings
 Everything else (schedules, `tempradio`, diagnostics) works from
 **Terminal**: type the commands below, or `help`.
 
-Default settings: 911.500 MHz, 250 kHz, SF7, CR 4/5. That is about 4× faster than
-SF7/62.5 for roughly 6 dB less range. Everyone exchanging media has to use the
-same settings.
+Default settings: 912.000 MHz, 125 kHz, SF7, CR 4/5. That is about 2× faster than
+SF7/62.5 for roughly 3 dB less range, so in a city it keeps most of the main
+mesh's reach. 912.0 is inside a BayMesh 3 cavity filter tuned for 910.525 (flat
+about 908.6–912.8 MHz) and 1.5 MHz clear of the main channel. Everyone exchanging
+media has to use the same settings. Radios already set up keep their own.
 
 ## Repeaters
 
@@ -84,9 +86,9 @@ out from the scan). Modes: `rx` (listen only) or `rxtx` (also `rx&tx`).
 ### The second profile
 
 ```text
-get radio2                         > 911.500,250.000,7,5,rxtx,32 (auto)
-set radio2 911.5,250,7,5,rxtx      OK - radio2 rxtx; preamble=32
-set radio2 911.5,250,7,5,rx,72     listen only, explicit preamble
+get radio2                         > 912.000,125.000,7,5,rxtx,32 (auto)
+set radio2 912.0,125,7,5,rxtx      OK - radio2 rxtx; preamble=32
+set radio2 912.0,125,7,5,rx,72     listen only, explicit preamble
 set radio2 off                     OK - single radio (also ends temporary sessions and schedules)
 ```
 
