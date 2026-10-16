@@ -70,10 +70,12 @@ struct Config {
   Params p;
 };
 
-// Defaults for a new radio2: the US band, 250 kHz SF7 (about 4x faster than
-// SF7/62.5 for ~6 dB less range).
-static constexpr float kDefaultFreq = 911.500f;
-static constexpr float kDefaultBw = 250.0f;
+// Defaults for a new radio2: 912.0 MHz, 125 kHz SF7 (about 2x faster than
+// SF7/62.5 for ~3 dB less range, so most of the main mesh's reach). 912.0 is
+// inside a BayMesh 3 cavity filter tuned for 910.525 (flat about 908.6-912.8
+// MHz) and 1.5 MHz clear of the main channel.
+static constexpr float kDefaultFreq = 912.000f;
+static constexpr float kDefaultBw = 125.0f;
 static constexpr uint8_t kDefaultSf = 7;
 static constexpr uint8_t kDefaultCr = 5;
 

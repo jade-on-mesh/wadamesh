@@ -630,8 +630,8 @@ static void fillFields() {
   if (!s || !root || !s->r2_known || !w_freq) return;
   char b[16];
   const bool have = s->r2_on;
-  snprintf(b, sizeof b, "%.3f", have ? s->r2_f : 911.5f); lv_textarea_set_text(w_freq, b);
-  snprintf(b, sizeof b, "%g", have ? s->r2_bw : 250.0f); lv_textarea_set_text(w_bw, b);
+  snprintf(b, sizeof b, "%.3f", have ? s->r2_f : mediamesh::kDefaultFreq); lv_textarea_set_text(w_freq, b);
+  snprintf(b, sizeof b, "%g", have ? s->r2_bw : mediamesh::kDefaultBw); lv_textarea_set_text(w_bw, b);
   snprintf(b, sizeof b, "%d", have ? s->r2_sf : 7); lv_textarea_set_text(w_sf, b);
   snprintf(b, sizeof b, "%d", have ? s->r2_cr : 5); lv_textarea_set_text(w_cr, b);
   if (s->r2_pre) { snprintf(b, sizeof b, "%d", s->r2_pre); lv_textarea_set_text(w_pre, b); }
