@@ -1073,6 +1073,7 @@ extern "C" const lv_font_t clock_font_40;   // the same face at the screensaver'
 extern "C" const lv_font_t clock_font_96;
 #endif
 #include "ui_icons.h"
+#include "map_icons.h"   // the app's map icons (Material Icons, map_icons_14)
 static lv_font_t g_font_semi_12;
 static lv_font_t g_font_semi_14;
 static lv_font_t g_font_semi_16;
@@ -4393,6 +4394,28 @@ static void glyphDrawCb(lv_event_t* e) {
 // user flags are all the nav's; WIDGET_1 is free on a plain object (only a msgbox
 // uses it, on itself).
 #define AVATAR_SQUARE_FLAG LV_OBJ_FLAG_WIDGET_1
+// The MeshCore Open TAK app's avatar colour for [name] (mesh_ui.dart AvatarCircle):
+// one of its six hues, picked by the same string hash, so a person's initials
+// are the same colour on the device and in the app.
+static uint32_t appAvatarHue(const char* name) {
+  static const uint32_t kHues[6] = {0x0EA5E9, 0xDE7FDB, 0x22C55E, 0xF59E0B, 0x8FA8F0, 0x6FD9CE};
+  uint32_t h = 0;
+  // Dart hashes UTF-16 code units; names are ASCII almost always, and for the rest
+  // the UTF-8 bytes still give a stable (if different) pick.
+  for (const unsigned char* q = (const unsigned char*)(name ? name : ""); *q; ++q) h = (h * 31 + *q) & 0x7FFFFFFFu;
+  return kHues[h % 6];
+}
+
+// The app's avatar look on [av]: [accent] tinted into the background, a ring and
+// the content in [accent] (AvatarCircle: 14 % fill, 40 % border).
+static void appAvatarTint(lv_obj_t* av, uint32_t accent) {
+  lv_obj_set_style_radius(av, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+  lv_obj_set_style_bg_color(av, lv_color_mix(lv_color_hex(accent), lv_color_hex(COLOR_PANEL), 36), LV_PART_MAIN);
+  lv_obj_set_style_border_color(av, lv_color_mix(lv_color_hex(accent), lv_color_hex(COLOR_PANEL), 102), LV_PART_MAIN);
+  lv_obj_set_style_border_width(av, 1, LV_PART_MAIN);
+  lv_obj_set_style_border_opa(av, LV_OPA_COVER, LV_PART_MAIN);
+}
+
 static void avatarApplyLook(lv_obj_t* av, const char* name, bool initials, bool day, bool more,
                             uint8_t style, uint32_t raised, uint32_t glow) {
   if (!av) return;
@@ -4410,9 +4433,9 @@ static void avatarApplyLook(lv_obj_t* av, const char* name, bool initials, bool 
     lv_obj_set_style_border_width(av, 2, LV_PART_MAIN);
     const uint32_t ink = 0x000000;
 #else
-    lv_obj_set_style_bg_color(av, lv_color_hex(hsvRgb(nameHue(name), 55, 42)), LV_PART_MAIN);
-    lv_obj_set_style_border_width(av, 0, LV_PART_MAIN);
-    const uint32_t ink = 0xE6EBED;
+    // The app's look and colour for this name (appAvatarHue).
+    const uint32_t ink = appAvatarHue(name);
+    appAvatarTint(av, ink);
 #endif
     char ini[12];
     int o = 0, glyphs = 0;
@@ -28667,14 +28690,15 @@ static uint32_t    s_discover_last_scan_ms = 0;
 static void closeDiscoverPage();
 static void discoverJumpToMapHere();   // "Show on map" — defined with the map code (uses map statics)
 
-// node_type -> row colour / short label (mirrors the map marker colours).
+// node_type -> row colour / short label: the app's Contacts / Discovery colours
+// (contact_visuals.dart contactTypeColor).
 static uint32_t discTypeColor(uint8_t t) {
   switch (t) {
-    case ADV_TYPE_REPEATER: return 0x4DA8FF;   // blue
-    case ADV_TYPE_CHAT:     return 0x53C06B;   // green
-    case ADV_TYPE_ROOM:     return 0xF0A020;   // amber
-    case ADV_TYPE_SENSOR:   return 0x35C9C9;   // cyan
-    default:                return 0x9AA0A6;   // grey
+    case ADV_TYPE_REPEATER: return 0xF59E0B;   // orange
+    case ADV_TYPE_CHAT:     return 0x0EA5E9;   // blue
+    case ADV_TYPE_ROOM:     return 0xDE7FDB;   // magenta
+    case ADV_TYPE_SENSOR:   return 0x4ACCC4;   // teal
+    default:                return 0x94A3B8;   // grey
   }
 }
 static const char* discTypeName(uint8_t t) {
@@ -36321,31 +36345,28 @@ static void renderMapMarkers() {
       self_sy >= -10 && self_sy < k_map_canvas_h + 10) {
     MapMarker& m = s_map_markers[0];
     m.mesh_idx = -1;
+    // As the app: a white person pin on a dark disc with a white rim.
     m.obj = lv_label_create(parent);
-    lv_label_set_text(m.obj, LV_SYMBOL_GPS);
-    lv_obj_set_style_text_font(m.obj, &g_font_16, LV_PART_MAIN);
+    lv_label_set_text(m.obj, mapicons::kPersonPin);
+    lv_obj_set_style_text_font(m.obj, &map_icons_14, LV_PART_MAIN);
     lv_obj_set_style_text_color(m.obj, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
-    // A bare white glyph disappears on light tiles (#366). The contact markers
-    // below already carry a dark border for exactly this reason; the self
-    // marker never got one. Same treatment: a dark chip behind the glyph, so it
-    // reads on any basemap without needing a colour that means something else.
-    lv_obj_set_style_bg_color(m.obj, lv_color_hex(0x101418), LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(m.obj, LV_OPA_70, LV_PART_MAIN);
+    // The app's dark disc (MapPalette.panelDark) with a white rim, so it reads
+    // on any basemap (#366): 14 px glyph + 3 px pad + 2 px rim = 24 px, centred.
+    lv_obj_set_style_bg_color(m.obj, lv_color_hex(0x0B1220), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(m.obj, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_radius(m.obj, LV_RADIUS_CIRCLE, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(m.obj, 2, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(m.obj, 3, LV_PART_MAIN);
     lv_obj_set_style_border_color(m.obj, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
-    lv_obj_set_style_border_width(m.obj, 1, LV_PART_MAIN);
-    lv_obj_set_style_border_opa(m.obj, LV_OPA_60, LV_PART_MAIN);
-    // The glyph's optical center isn't at its bbox center — fudge the
-    // align slightly so the crosshair lines up with the tile pixel. The 3 px
-    // of chip (2 pad + 1 border) shifts it again, so take that off too.
-    lv_obj_set_pos(m.obj, self_sx - 8 - 3, self_sy - 11 - 3);
+    lv_obj_set_style_border_width(m.obj, 2, LV_PART_MAIN);
+    lv_obj_set_pos(m.obj, self_sx - 12, self_sy - 12);
   }
 
-  // ---- Contact markers — colored circles sized for taps (14×14 with a
-  //      2-px black border so they read on any tile background).
+  // ---- Contact markers — as the app draws them: a disc in the type / age colour
+  //      with a white rim, the type's white icon and a status dot (20×20).
   int slot = 1;   // slot 0 reserved for self
   s_map_markers_wanted = 0;
+  uint32_t map_now_secs = 0;
+  { mesh::RTCClock* rtc = the_mesh.getRTCClock(); if (rtc) map_now_secs = rtc->getCurrentTime(); }
   // Contact markers — skipped entirely when "Contacts on map" is off (self stays).
   const int marker_cap = mapMarkerCap();
   for (uint32_t i = 0; s_map_show_contacts && i < the_mesh.getNumContacts(); ++i) {
@@ -36370,23 +36391,50 @@ static void renderMapMarkers() {
     s_map_markers_wanted++;
     if (slot >= marker_cap + 1) continue;   // +1: slot 0 is self
 
-    // Color by contact type so a glance at the map maps to the chip
-    // colors on the Contacts tab. Defaults to chat-peer orange.
-    uint32_t color = 0xFF6F4D;
-    if (c.type == ADV_TYPE_REPEATER) color = 0x4DA8FF;
-    else if (c.type == ADV_TYPE_ROOM) color = 0xC9A24A;
+    // The app's colours (map_screen.dart _markerColor / _ageColor): repeaters
+    // blue, rooms purple, sensors teal; people by when they were last heard,
+    // green within the hour, amber within the day, grey after.
+    const uint32_t age = (map_now_secs > c.last_advert_timestamp && c.last_advert_timestamp != 0)
+                             ? map_now_secs - c.last_advert_timestamp : 0xFFFFFFFFu;
+    const uint32_t age_rgb = age <= 3600 ? 0x22C55E : age <= 86400 ? 0xF59E0B : 0x94A3B8;
+    uint32_t color = age_rgb;
+    if (c.type == ADV_TYPE_REPEATER) color = 0x2563EB;
+    else if (c.type == ADV_TYPE_ROOM) color = 0x7C3AED;
+    else if (c.type == ADV_TYPE_SENSOR) color = 0x0F766E;
 
     MapMarker& m = s_map_markers[slot];
     m.mesh_idx = (int)i;
     m.obj = lv_obj_create(parent);
     lv_obj_remove_style_all(m.obj);
-    lv_obj_set_size(m.obj, 14, 14);
-    lv_obj_set_pos(m.obj, sx - 7, sy - 7);
+    lv_obj_set_size(m.obj, 20, 20);
+    lv_obj_set_pos(m.obj, sx - 10, sy - 10);
     lv_obj_set_style_bg_color(m.obj, lv_color_hex(color), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(m.obj, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_set_style_border_color(m.obj, lv_color_hex(0x000000), LV_PART_MAIN);
+    lv_obj_set_style_border_color(m.obj, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
     lv_obj_set_style_border_width(m.obj, 2, LV_PART_MAIN);
-    lv_obj_set_style_radius(m.obj, 7, LV_PART_MAIN);
+    lv_obj_set_style_radius(m.obj, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+    lv_obj_set_style_clip_corner(m.obj, false, LV_PART_MAIN);
+    // The app's white icon for the contact's type (person, repeater, room, sensor).
+    lv_obj_t* icon = lv_label_create(m.obj);
+    lv_label_set_text(icon, mapicons::contactType(c.type));
+    lv_obj_set_style_text_font(icon, &map_icons_14, LV_PART_MAIN);
+    lv_obj_set_style_text_color(icon, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
+    lv_obj_clear_flag(icon, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_center(icon);
+    // And its status dot, bottom right: green heard within the hour, amber within
+    // the day, grey after (the app's online / recent / stale).
+    lv_obj_t* st = lv_obj_create(m.obj);
+    lv_obj_remove_style_all(st);
+    lv_obj_set_size(st, 8, 8);
+    lv_obj_align(st, LV_ALIGN_BOTTOM_RIGHT, 3, 3);
+    lv_obj_set_style_bg_color(st, lv_color_hex(age <= 3600 ? 0x22C55E : age <= 86400 ? 0xF59E0B : 0x6B7280),
+                              LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(st, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_radius(st, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+    lv_obj_set_style_border_color(st, lv_color_hex(0x0B1220), LV_PART_MAIN);
+    lv_obj_set_style_border_width(st, 1, LV_PART_MAIN);
+    lv_obj_add_flag(st, LV_OBJ_FLAG_IGNORE_LAYOUT | LV_OBJ_FLAG_FLOATING);
+    lv_obj_clear_flag(st, LV_OBJ_FLAG_CLICKABLE);
     // Markers are NOT clickable themselves — taps go to the canvas, whose
     // RELEASED handler scans all markers within ~16 px of the tap point.
     // This makes overlapping markers selectable (disambiguation sheet) and
@@ -44787,19 +44835,21 @@ static lv_obj_t* makeContactChip(lv_obj_t* parent, const char* text,
   return chip;
 }
 
-// Two-byte chip labels for advert types. Colors echo MCterm's palette.
+// Two-byte chip labels for advert types, in the MeshCore Open TAK app's
+// Contacts colours (contact_visuals.dart contactTypeColor).
 static void contactTypeChipStyle(uint8_t type, const char*& label,
                                  uint32_t& bg, uint32_t& fg) {
+  fg = 0xFFFFFF;
   switch (type) {
     case ADV_TYPE_REPEATER:
-      label = "RPT"; bg = 0xC59F00; fg = 0x171a0e; break;   // yellow
+      label = "RPT"; bg = 0xF59E0B; break;   // orange
     case ADV_TYPE_ROOM:
-      label = "SRV"; bg = 0x6A4FC8; fg = 0xF1ECFF; break;   // purple
+      label = "SRV"; bg = 0xDE7FDB; break;   // magenta
     case ADV_TYPE_SENSOR:
-      label = "SNS"; bg = 0x2A6BD0; fg = 0xE6F2FF; break;   // blue
+      label = "SNS"; bg = 0x4ACCC4; break;   // teal
     case ADV_TYPE_CHAT:
     default:
-      label = "USR"; bg = 0x2A3848; fg = 0xCFE0F4; break;   // muted
+      label = "USR"; bg = 0x0EA5E9; break;   // blue
   }
 }
 
@@ -45197,7 +45247,21 @@ static void refreshContactsList() {
 
     lv_obj_t* av = makeGlyphAvatar(rb, e.name, e.type == ADV_TYPE_CHAT ? GLYPH_CIRCLE : GLYPH_SQUARE, kAv);
     lv_obj_align(av, LV_ALIGN_LEFT_MID, av_x, 0);
-    {
+    if (e.type == ADV_TYPE_REPEATER || e.type == ADV_TYPE_ROOM || e.type == ADV_TYPE_SENSOR) {
+      // As the app's Contacts list: the type's icon in its colour (orange tower,
+      // magenta room, teal sensor) instead of a name avatar.
+      const uint32_t tc = e.type == ADV_TYPE_REPEATER ? 0xF59E0B : e.type == ADV_TYPE_ROOM ? 0xDE7FDB : 0x4ACCC4;
+      lv_obj_remove_event_cb(av, glyphDrawCb);
+      lv_obj_clean(av);
+      lv_obj_set_user_data(av, nullptr);
+      appAvatarTint(av, tc);
+      lv_obj_t* ti = lv_label_create(av);
+      lv_label_set_text(ti, e.type == ADV_TYPE_REPEATER ? mapicons::kCellTower
+                            : e.type == ADV_TYPE_ROOM  ? mapicons::kMeetingRoom : mapicons::kSensors);
+      lv_obj_set_style_text_font(ti, &map_icons_14, LV_PART_MAIN);
+      lv_obj_set_style_text_color(ti, lv_color_hex(tc), LV_PART_MAIN);
+      lv_obj_center(ti);
+    } else {
       // Same icon as the contact's chat (#646): the one picked for the chat, which is
       // keyed on the advertised name, else the first emoji in the shown name (#640).
       char eb[20];
@@ -75860,6 +75924,41 @@ void gpsEnsureBigRxRing() {}
 #endif
 
 void UITask::msgRead(int msgcount) { _msgcount = msgcount; }
+
+int UITask::sharedPins(const sharedpins::Pin** out) {
+  static sharedpins::Pin* s_pins = nullptr;
+  static int s_n = 0;
+  static uint32_t s_key_seq = 0;
+  static int s_key_count = -1, s_key_head = -1;
+  if (out) *out = s_pins;
+  if (s_key_seq == _ui_seq_next && s_key_count == _ui_msg_count && s_key_head == _ui_msg_head) return s_n;
+  if (!s_pins) {
+    const size_t bytes = sizeof(sharedpins::Pin) * sharedpins::kMaxPins;
+#if defined(ESP32)
+    s_pins = (sharedpins::Pin*)heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!s_pins) s_pins = (sharedpins::Pin*)malloc(bytes);
+#else
+    s_pins = (sharedpins::Pin*)malloc(bytes);
+#endif
+    if (!s_pins) return 0;
+    if (out) *out = s_pins;
+  }
+  if (!_ui_msgs) return 0;
+  sharedpins::Collector c(s_pins, sharedpins::kMaxPins);
+  const char* self = the_mesh.getNodePrefs()->node_name;
+  // Newest first (ring order, as threadLastMessage explains), so each key keeps its latest.
+  for (int i = 0; i < _ui_msg_count && c.n < sharedpins::kMaxPins; ++i) {
+    const int slot = (_ui_msg_head - 1 - i + _ui_msg_cap) % _ui_msg_cap;
+    const UIMessage& m = _ui_msgs[slot];
+    if (!m.text[0] || !strstr(m.text, "m:")) continue;
+    c.add(m.text, m.thread, m.channel ? m.sender : m.thread, m.channel, m.outgoing, m.ts, self);
+  }
+  s_n = c.n;
+  s_key_seq = _ui_seq_next;
+  s_key_count = _ui_msg_count;
+  s_key_head = _ui_msg_head;
+  return s_n;
+}
 
 // ---- "At a glance" notification --------------------------------------------
 // New, board-agnostic feature (distinct from the T-Deck's existing opt-in

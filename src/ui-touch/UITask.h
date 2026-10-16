@@ -21,6 +21,7 @@
 
 #include "../AbstractUITask.h"
 #include "../NodePrefs.h"
+#include "SharedPins.h"
 
 struct ContactInfo;
 
@@ -462,6 +463,10 @@ public:
     }
     return false;
   }
+  /** Shared map pins ("m:lat,lon|label|flags", the app's format) in the stored
+   *  chats, newest per conversation/sender/label (SharedPins.h). Rebuilt only when
+   *  the message ring changed. *out stays valid until the next call. */
+  int sharedPins(const sharedpins::Pin** out);
   int  threadScroll() const { return _thread_scroll; }
   void setThreadScroll(int v) { _thread_scroll = v; }
   bool hasDisplay() const { return _display != NULL; }

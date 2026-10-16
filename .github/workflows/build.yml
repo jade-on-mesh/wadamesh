@@ -34,6 +34,11 @@ jobs:
           g++ -std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined -I src \
               -o /tmp/test_vox_fetch test/test_vox_fetch.cpp src/ui-touch/VoxFetch.cpp
           /tmp/test_vox_fetch
+      - name: Shared map pins (m:lat,lon|label|flags), as the app reads them
+        run: |
+          g++ -std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined -I src \
+              -o /tmp/test_shared_pins test/test_shared_pins.cpp
+          /tmp/test_shared_pins
       - name: MediaMesh settings, CLI and scan timing
         run: |
           g++ -std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined -I src \

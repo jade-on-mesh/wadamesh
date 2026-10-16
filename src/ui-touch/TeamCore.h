@@ -113,6 +113,8 @@ class Core {
   // the app; the radio follows them).
   void roleName(int id, char* out, size_t cap) const;
   char roleLetter(int id) const;
+  // The app icon-library id the team chose for role [id]; 0 = the role's own.
+  uint16_t roleIcon(int id) const;
   bool roleAvailable(int id) const;
   int nextRole(int id) const;   // the next role to offer in Setup
 

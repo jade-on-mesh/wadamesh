@@ -210,6 +210,19 @@ static bool myFix(double* lat, double* lon) {
   return true;
 }
 
+// Whether the channel named [name] is the Public channel (its well-known key).
+static bool threadIsPublicChannel(const char* name) {
+  static const uint8_t kPublic[16] = {0x8b, 0x33, 0x87, 0xe9, 0xc5, 0xcd, 0xea, 0x6a,
+                                      0xc9, 0xe5, 0xed, 0xba, 0xa1, 0x15, 0xcd, 0x72};
+  if (!name || !*name) return false;
+  for (int i = 0; i < MAX_GROUP_CHANNELS; i++) {
+    ChannelDetails cd;
+    if (!the_mesh.getChannel(i, cd) || strcmp(cd.name, name) != 0) continue;
+    return memcmp(cd.channel.secret, kPublic, sizeof kPublic) == 0;
+  }
+  return false;
+}
+
 static void rangeTo(double lat, double lon, char* out, size_t cap) {
   double ml, mo;
   if (!myFix(&ml, &mo)) { snprintf(out, cap, "%.5f, %.5f", lat, lon); return; }
@@ -377,10 +390,10 @@ static void houndRefresh() {
 }
 
 // ---- map overlay ---------------------------------------------------------------------------
-constexpr int kMapObjs = 176;
+constexpr int kMapObjs = 256;
 static lv_obj_t* s_map_objs[kMapObjs];
 static int s_map_obj_n = 0;
-struct Hit { int16_t x, y; uint8_t kind; uint8_t idx; };   // kind 0 member, 1 pin, 2 watched report
+struct Hit { int16_t x, y; uint8_t kind; uint8_t idx; };   // kind 0 member, 1 pin, 2 watched report, 3 shared pin
 static Hit s_hits[kMapObjs];
 static int s_hit_n = 0;
 
@@ -405,6 +418,29 @@ static lv_obj_t* mapDot(lv_obj_t* parent, int sx, int sy, int size, uint32_t fil
   lv_obj_clear_flag(d, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
   mapTrack(d);
   return d;
+}
+
+// One of the app's map icons (map_icons.h) centred on a map dot, optionally
+// turned by [deg] (a heading).
+static lv_obj_t* mapIcon(lv_obj_t* dot, const char* glyph, uint32_t color, float deg = 0) {
+  lv_obj_t* l = lv_label_create(dot);
+  lv_label_set_text(l, glyph);
+  lv_obj_set_style_text_font(l, &map_icons_14, LV_PART_MAIN);
+  lv_obj_set_style_text_color(l, lv_color_hex(color), LV_PART_MAIN);
+  lv_obj_clear_flag(l, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_center(l);
+  if (deg != 0) {
+    lv_obj_set_style_transform_pivot_x(l, 7, LV_PART_MAIN);
+    lv_obj_set_style_transform_pivot_y(l, 7, LV_PART_MAIN);
+    lv_obj_set_style_transform_angle(l, (int16_t)((int)(deg * 10) % 3600), LV_PART_MAIN);
+  }
+  return l;
+}
+
+// Black or white, whichever reads on [rgb] (the app's luminance test).
+static uint32_t onColor(uint32_t rgb) {
+  const float r = ((rgb >> 16) & 0xFF) / 255.0f, g = ((rgb >> 8) & 0xFF) / 255.0f, b = (rgb & 0xFF) / 255.0f;
+  return 0.2126f * r + 0.7152f * g + 0.0722f * b > 0.5f ? 0x000000 : 0xFFFFFF;
 }
 
 static void mapLabel(lv_obj_t* parent, int sx, int sy, const char* text, uint32_t color) {
@@ -445,7 +481,10 @@ static void teamDrawMapOverlay(lv_obj_t* parent, double cwx, double cwy) {
       if (!w->live(it, now)) continue;
       const bool drone = it.r.track[0] != 0;
       if (drone && it.r.has2 && toScreen(it.r.lat2, it.r.lon2, cwx, cwy, &sx, &sy)) {
-        mapDot(parent, sx, sy, 10, 0x9AA0A6, 0x101418, LV_RADIUS_CIRCLE, LV_OPA_COVER);
+        // The operator: a white disc with a person, ringed in the report's colour.
+        lv_obj_t* op_dot = mapDot(parent, sx, sy, 18, 0xFFFFFF, watchfeed::levelRgb(it.r.level), LV_RADIUS_CIRCLE,
+                                  LV_OPA_COVER);
+        mapIcon(op_dot, mapicons::kPerson, 0x000000);
         char op[24];
         snprintf(op, sizeof op, "%s %.8s", it.r.label2[0] ? it.r.label2 : "Op", it.r.title + 6);
         if (s_map_zoom >= 12) mapLabel(parent, sx, sy, op, 0xC8CCD0);
@@ -453,7 +492,11 @@ static void teamDrawMapOverlay(lv_obj_t* parent, double cwx, double cwy) {
       }
       if (!toScreen(it.r.lat, it.r.lon, cwx, cwy, &sx, &sy)) continue;
       if (drone) {
-        mapDot(parent, sx, sy, 14, 0xFF9800, 0x101418, 3, LV_OPA_COVER);
+        // A plane in the report's colour, pointing where it is heading when known.
+        lv_obj_t* dd = mapDot(parent, sx, sy, 22, watchfeed::levelRgb(it.r.level), 0x101418, LV_RADIUS_CIRCLE,
+                              LV_OPA_COVER);
+        mapIcon(dd, mapicons::kFlight, 0x000000,
+                it.r.has_bearing ? it.r.bearing : it.has_course ? it.course : 0);
         char lbl[64];
         watchfeed::droneLabel(it.r, it.has_course, it.course, lbl, sizeof lbl);
         mapLabel(parent, sx, sy, lbl, 0xFFCC80);
@@ -463,12 +506,28 @@ static void teamDrawMapOverlay(lv_obj_t* parent, double cwx, double cwy) {
         lv_obj_t* d = mapDot(parent, sx, sy, 12 + m / 4, watchfeed::levelRgb(it.r.level), watchfeed::levelRgb(it.r.level),
                              LV_RADIUS_CIRCLE, LV_OPA_50);
         lv_obj_set_style_border_width(d, 3, LV_PART_MAIN);
+        mapIcon(d, mapicons::kWaves, 0x000000);
         mapLabel(parent, sx, sy, it.r.title, 0xFFFFFF);
       } else {
-        mapDot(parent, sx, sy, 12, watchfeed::levelRgb(it.r.level), 0xFFFFFF, LV_RADIUS_CIRCLE, LV_OPA_COVER);
+        mapDot(parent, sx, sy, 14, watchfeed::levelRgb(it.r.level), 0x101418, LV_RADIUS_CIRCLE, LV_OPA_COVER);
         if (it.r.title[0] && s_map_zoom >= 13) mapLabel(parent, sx, sy, it.r.title, 0xFFFFFF);
       }
       if (s_hit_n < kMapObjs) s_hits[s_hit_n++] = {(int16_t)sx, (int16_t)sy, 2, (uint8_t)i};
+    }
+  }
+  // Pins shared in chats ("m:lat,lon|label|flags", from any DM or channel), as
+  // the app draws them: a flag on a disc, blue for a DM, orange for the Public
+  // channel, purple for other channels.
+  if (g_lv.task) {
+    const sharedpins::Pin* pins = nullptr;
+    const int n = g_lv.task->sharedPins(&pins);
+    for (int i = 0; pins && i < n; i++) {
+      const sharedpins::Pin& p = pins[i];
+      if (!toScreen(p.lat, p.lon, cwx, cwy, &sx, &sy)) continue;
+      const uint32_t fill = !p.channel ? 0x0369A1 : threadIsPublicChannel(p.thread) ? 0xF97316 : 0x7C3AED;
+      lv_obj_t* d = mapDot(parent, sx, sy, 22, fill, 0xFFFFFF, LV_RADIUS_CIRCLE, LV_OPA_COVER);
+      mapIcon(d, mapicons::kFlag, 0xFFFFFF);
+      if (s_hit_n < kMapObjs) s_hits[s_hit_n++] = {(int16_t)sx, (int16_t)sy, 3, (uint8_t)i};
     }
   }
   team::Core* c = s_core;
@@ -476,10 +535,10 @@ static void teamDrawMapOverlay(lv_obj_t* parent, double cwx, double cwy) {
   for (int i = 0; i < team::kMaxMarkers; i++) {
     const TeamWire::Marker* m = c->marker(i);
     if (!m || !toScreen(m->lat, m->lon, cwx, cwy, &sx, &sy)) continue;
-    lv_obj_t* d = mapDot(parent, sx, sy, 12, TeamWire::kindRgb(m->kind), 0x101418, 2, LV_OPA_COVER);
-    lv_obj_set_style_transform_angle(d, 450, LV_PART_MAIN);   // a diamond, not a contact dot
-    lv_obj_set_style_transform_pivot_x(d, 6, LV_PART_MAIN);
-    lv_obj_set_style_transform_pivot_y(d, 6, LV_PART_MAIN);
+    // The kind's icon in its colour on a dark tile with a border in that colour.
+    const uint32_t kc = TeamWire::kindRgb(m->kind);
+    lv_obj_t* d = mapDot(parent, sx, sy, 22, 0x101418, kc, 5, LV_OPA_COVER);
+    mapIcon(d, mapicons::markerKind(m->kind), kc);
     if (m->label[0] && s_map_zoom >= 13) mapLabel(parent, sx, sy, m->label, 0xFFFFFF);
     if (s_hit_n < kMapObjs) s_hits[s_hit_n++] = {(int16_t)sx, (int16_t)sy, 1, (uint8_t)i};
   }
@@ -488,15 +547,30 @@ static void teamDrawMapOverlay(lv_obj_t* parent, double cwx, double cwy) {
     if (!m || !toScreen(m->pos.lat, m->pos.lon, cwx, cwy, &sx, &sy)) continue;
     const team::Fresh fr = c->freshness(*m);
     if (fr == team::Fresh::Lost) continue;
-    if (m->pos.sos) mapDot(parent, sx, sy, 26, 0xE53935, 0xE53935, LV_RADIUS_CIRCLE, LV_OPA_40);
-    lv_obj_t* d = mapDot(parent, sx, sy, 16, TeamWire::colorRgb(m->pos.color), 0x101418, LV_RADIUS_CIRCLE,
+    if (m->pos.sos) mapDot(parent, sx, sy, 30, 0xE53935, 0xE53935, LV_RADIUS_CIRCLE, LV_OPA_40);
+    // Heading: the app's arrow just outside the disc, turned to the direction of travel.
+    if (m->pos.has_motion && m->pos.speed_mps > 0.5f) {
+      const float r = m->pos.heading_deg * 0.0174533f;
+      const int hx = sx + (int)(15 * sinf(r)), hy = sy - (int)(15 * cosf(r));
+      lv_obj_t* h = mapDot(parent, hx, hy, 14, 0x000000, 0x000000, 0, LV_OPA_TRANSP);
+      lv_obj_set_style_border_width(h, 0, LV_PART_MAIN);
+      mapIcon(h, mapicons::kNavigation, 0xFFFFFF, m->pos.heading_deg);
+    }
+    const uint32_t mc = TeamWire::colorRgb(m->pos.color);
+    lv_obj_t* d = mapDot(parent, sx, sy, 24, mc, m->pos.sos ? 0xE53935 : 0x101418, LV_RADIUS_CIRCLE,
                          fr == team::Fresh::Live ? LV_OPA_COVER : LV_OPA_50);
-    char letter[2] = {c->roleLetter(m->pos.role), 0};
-    lv_obj_t* l = lv_label_create(d);
-    lv_label_set_text(l, letter);
-    lv_obj_set_style_text_font(l, &g_font_12, LV_PART_MAIN);
-    lv_obj_set_style_text_color(l, lv_color_hex(0x101418), LV_PART_MAIN);
-    lv_obj_center(l);
+    if (m->pos.sos) lv_obj_set_style_border_width(d, 3, LV_PART_MAIN);
+    // The role's icon, as in the app; a library icon this radio lacks shows the role's letter.
+    if (const char* glyph = mapicons::role(m->pos.role, c->roleIcon(m->pos.role))) {
+      mapIcon(d, glyph, onColor(mc));
+    } else {
+      char letter[2] = {c->roleLetter(m->pos.role), 0};
+      lv_obj_t* l = lv_label_create(d);
+      lv_label_set_text(l, letter);
+      lv_obj_set_style_text_font(l, &g_font_12, LV_PART_MAIN);
+      lv_obj_set_style_text_color(l, lv_color_hex(onColor(mc)), LV_PART_MAIN);
+      lv_obj_center(l);
+    }
     mapLabel(parent, sx, sy, m->pos.callsign[0] ? m->pos.callsign : "?", fr == team::Fresh::Live ? 0xFFFFFF : 0x9AA0A6);
     if (s_hit_n < kMapObjs) s_hits[s_hit_n++] = {(int16_t)sx, (int16_t)sy, 0, (uint8_t)i};
   }
@@ -666,6 +740,26 @@ static void watchSheet(int i) {
   sheetBtn(card, TR("Close"), [](lv_event_t*) { sheetClose(); });
 }
 
+// A pin shared in a chat: who, where, and the conversation it came in.
+static sharedpins::Pin s_sel_pin;
+static void sharedPinSheet(int i) {
+  const sharedpins::Pin* pins = nullptr;
+  const int n = g_lv.task ? g_lv.task->sharedPins(&pins) : 0;
+  if (!pins || i < 0 || i >= n) return;
+  s_sel_pin = pins[i];
+  char body[200], rb[40];
+  rangeTo(s_sel_pin.lat, s_sel_pin.lon, rb, sizeof rb);
+  snprintf(body, sizeof body, "%s %s%s%s\n%.5f, %.5f\n%s", TR("From"), s_sel_pin.from,
+           s_sel_pin.channel ? " · " : "", s_sel_pin.channel ? s_sel_pin.thread : "", s_sel_pin.lat, s_sel_pin.lon, rb);
+  lv_obj_t* card = sheetOpen(s_sel_pin.label[0] ? s_sel_pin.label : TR("Shared pin"), body);
+  sheetBtn(card, TR("Hound"), [](lv_event_t*) {
+    if (core()) s_core->houndPoint(s_sel_pin.lat, s_sel_pin.lon, s_sel_pin.label[0] ? s_sel_pin.label : "Pin");
+    sheetClose();
+    houndRefresh();
+  }, nullptr, 0xF2A33A);
+  sheetBtn(card, TR("Close"), [](lv_event_t*) { sheetClose(); });
+}
+
 // Drop a pin: pick a kind, then an optional label.
 static double s_drop_lat = 0, s_drop_lon = 0;
 static int s_drop_kind = 0;
@@ -710,7 +804,8 @@ static bool teamMapTap(lv_point_t p) {
   if (best < 0) return false;
   if (s_hits[best].kind == 0) memberSheet(s_hits[best].idx);
   else if (s_hits[best].kind == 1) pinSheet(s_hits[best].idx);
-  else watchSheet(s_hits[best].idx);
+  else if (s_hits[best].kind == 2) watchSheet(s_hits[best].idx);
+  else sharedPinSheet(s_hits[best].idx);
   return true;
 }
 
