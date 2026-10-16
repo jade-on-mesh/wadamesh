@@ -8502,11 +8502,20 @@ static void otaStartInstall(int target_n) {
   }
   if (target_n < 1) return;        // no valid release to fetch
   if (s_ota_state == 1) return;    // already running
+  // The download runs on its own 16 KB task, and TLS can't use a PSRAM stack, so it
+  // needs that much internal RAM in one piece. Bluetooth (NimBLE) holds tens of KB of
+  // it: let it go now, on the UI thread, as the radio restarts after the update anyway.
+  bool ble_released = false;
+#if defined(MULTI_TRANSPORT_COMPANION)
+  if (g_lv.task && g_lv.task->serialInterface())
+    ble_released = static_cast<MultiTransportCompanionInterface*>(g_lv.task->serialInterface())->releaseBleForUpdate();
+#endif
   s_ota_msg[0] = 0; s_ota_pct = 0; s_ota_target_n = target_n; s_ota_state = 1; s_ota_request = true;   // hand off to the worker
   if (s_ota_btn) { lv_obj_add_state(s_ota_btn, LV_STATE_DISABLED); lv_obj_clear_flag(s_ota_btn, LV_OBJ_FLAG_CLICKABLE); }
   if (s_ota_status_lbl) {
-    char sb[48];
-    snprintf(sb, sizeof sb, "Installing %s...\nDo not power off.", relName(target_n));
+    char sb[112];
+    snprintf(sb, sizeof sb, "Installing %s...\nDo not power off.%s", relName(target_n),
+             ble_released ? "\nBluetooth is off until the radio restarts." : "");
     otaStatusText(sb);
     lv_obj_set_style_text_color(s_ota_status_lbl, lightSurfaceTextColor(0xE2A23A), LV_PART_MAIN);
   }
@@ -28265,7 +28274,7 @@ static ReaderLocalResult readerReadLocal(const char* url, uint8_t* raw, size_t c
 }
 
 // Worker (core 0): load s_reader_url, strip to s_reader_text, publish via s_reader_dirty.
-static void readerFetchTaskFn(void*) {
+static void readerFetchBody() {
   const uint32_t generation = s_reader_task_generation;
   char url[300]; strncpy(url, s_reader_url, sizeof url - 1); url[sizeof url - 1] = 0;
   bool result_ok = false;
@@ -28374,8 +28383,14 @@ static void readerFetchTaskFn(void*) {
     snprintf(s_reader_msg, sizeof s_reader_msg, "%s", result_msg);
   }
   s_reader_task = nullptr; s_reader_busy = false; s_reader_dirty = true;
+}
+static void readerFetchTaskFn(void*) {
+  readerFetchBody();
   vTaskDelete(nullptr);
 }
+// On the shared audio worker (VoxAudioTask): its 16 KB internal stack is held from
+// boot, so a page load doesn't need a second free 16 KB block (TLS can't use PSRAM).
+static void readerFetchWorkerFn(void*) { readerFetchBody(); }
 // Navigate to a URL. push=true records it in history (a fresh navigation from Go / a
 // link / Enter); push=false is a back / forward / refresh replay that must NOT grow
 // history. readerStart() is the public "new navigation" entry point.
@@ -28403,7 +28418,10 @@ static bool readerNavigate(const char* in, bool push) {
   // Immediate feedback (we're on the UI thread): collapse the URL into the topbar and
   // show a Loading placeholder at once, so a tapped link visibly does something now.
   if (s_reader_root) { readerSetAddrExpanded(false); readerShowLoading(); }
-  if (xTaskCreatePinnedToCore(readerFetchTaskFn, "reader", 16384, nullptr, 4, &s_reader_task, 0) != pdPASS) {
+  // Marked running before the job starts, so a fresh navigation doesn't drop the busy flag.
+  s_reader_task = reinterpret_cast<TaskHandle_t>(&s_reader_task);
+  if (!VoxAudioTask::run(readerFetchWorkerFn, nullptr) &&
+      xTaskCreatePinnedToCore(readerFetchTaskFn, "reader", 16384, nullptr, 4, &s_reader_task, 0) != pdPASS) {
     // Couldn't spawn the fetch worker (low internal RAM) — don't leave it stuck on
     // "Loading…" forever; surface it and drop the busy flag so a retry works.
     s_reader_task = nullptr; s_reader_busy = false;

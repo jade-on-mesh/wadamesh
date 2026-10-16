@@ -50,6 +50,11 @@ public:
   // state. Wi-Fi can then re-associate before enableBle() resumes advertising.
   bool suspendBleForWifiReconnect();
 #endif
+  // Frees NimBLE's internal RAM (tens of KB) for an on-device firmware update,
+  // which restarts the radio. The saved Bluetooth setting is not changed, so
+  // Bluetooth is back after the restart (or the next one, if the update fails).
+  // False when the stack wasn't up.
+  bool releaseBleForUpdate();
   bool isBleEnabled() const override { return _ble_enabled; }
   bool isBleStackBegun() const { return _ble_begun; }
   // Keyboard mode: Bluetooth stays on for an external keyboard, but the phone-app

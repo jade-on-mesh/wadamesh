@@ -293,22 +293,48 @@ static bool fetchImage(Job& j) {
   return true;
 }
 
-static void taskFn(void* arg) {
-  Job& j = *static_cast<Job*>(arg);
+static void jobBody(Job& j) {
   if (j.kind == Kind::Latest) j.result = latest();
   else j.result = fetchImage(j) ? 1 : 0;
+}
+
+static void taskFn(void* arg) {
+  Job& j = *static_cast<Job*>(arg);
+  jobBody(j);
   xSemaphoreGive(j.done);
   vTaskDelete(nullptr);
 }
 
-// Runs `j` on its own 16 KB task (core 0, beside Wi-Fi) and waits for it.
+// On the shared audio worker (VoxAudioTask): its 16 KB internal stack is held
+// from boot, so the update doesn't need a second free 16 KB block. At the
+// worker's priority (3) a long download would starve the UI, so drop to 1.
+static void workerFn(void* arg) {
+  Job& j = *static_cast<Job*>(arg);
+  const UBaseType_t prio = uxTaskPriorityGet(nullptr);
+  vTaskPrioritySet(nullptr, 1);
+  jobBody(j);
+  vTaskPrioritySet(nullptr, prio);
+  xSemaphoreGive(j.done);
+}
+
+// Runs `j` on the audio worker when it is idle, else on its own 16 KB task
+// (core 0, beside Wi-Fi), and waits for it.
 static int run(Job& j) {
   tlsUsePsram();
   j.done = xSemaphoreCreateBinary();
   if (!j.done) { say(j, "out of memory"); return j.kind == Kind::Latest ? -1 : 0; }
+  if (VoxAudioTask::run(workerFn, &j)) {
+    xSemaphoreTake(j.done, portMAX_DELAY);
+    vSemaphoreDelete(j.done);
+    return j.result;
+  }
   if (xTaskCreatePinnedToCore(taskFn, "fork_upd", 16384, &j, 1, nullptr, 0) != pdPASS) {
     vSemaphoreDelete(j.done);
-    say(j, "out of memory");
+    // Its 16 KB stack must be one piece of internal RAM (TLS can't run on a PSRAM stack).
+    char m[64], ram[32];
+    ramNote(ram, sizeof ram);
+    snprintf(m, sizeof m, "out of memory (%s, need 16K)", ram);
+    say(j, m);
     return j.kind == Kind::Latest ? -1 : 0;
   }
   xSemaphoreTake(j.done, portMAX_DELAY);
