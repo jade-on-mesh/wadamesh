@@ -1,7 +1,7 @@
 # wadamesh language file
 # canonical source - translators: edit this file and PR it
 # code: es
-# ver: 26
+# ver: 27
 # name: Español
 # base: es
  (device behind)	 (dispositivo atrasado)
@@ -1987,3 +1987,14 @@ Showing the first %d tracks	Se muestran las primeras %d pistas
 Sound is off: Settings > Sound	El sonido está apagado: Ajustes > Sonido
 Stopped	Detenido
 This device cannot play music.	Este dispositivo no puede reproducir música.
+
+# Settings > Device / keyboard protocol / setup wizard strings
+Hardware	Hardware
+Display & lock	Pantalla y bloqueo
+Keep Bluetooth on to pair the MeshCore app on your phone. Wi-Fi can be set up anytime in Settings.	Deja el Bluetooth activado para emparejar la app MeshCore de tu teléfono. El Wi-Fi se puede configurar en cualquier momento en Ajustes.
+Radio:	Radio:
+Keyboard:	Teclado:
+newer keyboard	teclado nuevo
+older keyboard	teclado antiguo
+older keyboard (set manually)	teclado antiguo (ajustado a mano)
+keyboard not detected yet	teclado aún no detectado
