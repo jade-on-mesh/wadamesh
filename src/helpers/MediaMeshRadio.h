@@ -213,6 +213,17 @@ class MediaMeshRadio : public Base {
   void scanLoop() {
     for (;;) {
       if (!_scan || _paused || !_timing.valid) {
+        // radio2 was switched off while a packet was going out on it: back to
+        // the main profile once that send is done, or the radio would keep
+        // listening on radio2's frequency.
+        if (!_scan && !_paused) {
+          this->radioAcquire();
+          if (!_scan && !_tx && _cur != 0) {
+            applyProfile(0);
+            this->startRecv();
+          }
+          this->radioRelease();
+        }
         ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(500));
         continue;
       }

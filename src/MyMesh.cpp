@@ -4284,8 +4284,8 @@ void MyMesh::begin(bool has_display) {
   applyRadioFromPrefs();   // freq/bw/sf/cr + TX power + RX-boost (shared with the live UI apply)
   s_mm_self = this;
   mediamesh::setContactPolicyResolver(mmResolveContactPolicy);
-  mediamesh::setClientRepeat(_prefs.client_repeat != 0);   // Client Repeat: no radio2
   mediamesh::begin(savedPrimaryParams);   // radio2 profiles, once the main radio settings are known
+  mediamesh::setClientRepeat(_prefs.client_repeat != 0);   // Client Repeat: radio2 off
 #if defined(DISPLAY_CLASS)
   // Boot diag: identity prefix + radio config so we can confirm the touch
   // firmware's pubkey is stable across flashes (replies are addressed to
@@ -6550,7 +6550,7 @@ void MyMesh::checkSerialInterface() {
 
 void MyMesh::loop() {
   BaseChatMesh::loop();
-  mediamesh::setClientRepeat(_prefs.client_repeat != 0);   // radio2 off while Client Repeat is on
+  mediamesh::setClientRepeat(_prefs.client_repeat != 0);   // radio2 off while Client Repeat is on, back after
   mediamesh::loop();           // temporary radio profiles ending, schedules starting
   companionRetryService();
   drainPendingBlobDeletes();   // evicted contacts' blobs, off the packet path (#222)

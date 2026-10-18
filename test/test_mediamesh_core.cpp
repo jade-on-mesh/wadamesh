@@ -106,7 +106,10 @@ static void testBlob() {
   memcpy(v2, b, sizeof v2);
   v2[2] = 2;
   assert(decode(v2, sizeof v2, d) && d.share == 0 && d.media == TX_BOTH);
-  assert(!decode(b, kBlobSizeV2, d));   // v3 cut short
+  assert(!decode(b, kBlobSizeV3, d));   // v4 cut short
+  b[2] = 3;
+  assert(decode(b, kBlobSizeV3, d) && d.share == 1 && d.held == kNotHeld);   // v3: nothing held
+  b[2] = kBlobVersion;
 }
 
 // mediamesh.share: strict MediaMesh unless sharing with main-mesh nodes.
@@ -166,17 +169,38 @@ static void testShare() {
   run("set radio2.cross off", r, e, out);
   assert(forwardMask(r, 1, kNoMark) == 0);   // listen-only radio2 relays nothing
 
-  // Client Repeat: radio2 paused, saved settings kept and reported.
+  // Client Repeat: radio2 forced Off, its mode remembered and put back.
   run("set radio2 916.0,250,7,5,rxtx", r, e, out);
-  r.paused = true;
-  assert(!r.enabled() && !canTransmit(r, 1) && transmitMask(r, 0) == 1 && forwardMask(r, 1, kNoMark) == 0);
-  assert(policyMask(r, TX_RADIO2) == 0 && policyMask(r, TX_BOTH) == 1);
+  assert(holdForClientRepeat(r, true));
+  assert(r.saved.mode == MODE_OFF && r.saved.held == MODE_RXTX && !r.enabled() && !canTransmit(r, 1));
+  assert(transmitMask(r, 0) == 1 && policyMask(r, TX_RADIO2) == 0 && policyMask(r, TX_BOTH) == 1);
+  assert(!holdForClientRepeat(r, true));   // steady: nothing to save
   run("get radio2", r, e, out);
-  assert(!strncmp(out, "> 916.000,250.000,7,5,rxtx", 26) && strstr(out, "paused: client repeat is on"));
+  assert(!strcmp(out, "> off; client repeat is on (radio2 back to rxtx when it is off)"));
   run("get mediamesh", r, e, out);
-  assert(strstr(out, "paused: client repeat is on"));
-  r.paused = false;
-  assert(r.enabled() && canTransmit(r, 1));
+  assert(strstr(out, "radio2 off for client repeat"));
+  // Turned on meanwhile (app, Terminal): off again, and that choice remembered.
+  run("set radio2 916.0,250,7,5,rx", r, e, out);
+  assert(holdForClientRepeat(r, true) && r.saved.mode == MODE_OFF && r.saved.held == MODE_RX);
+  // A running tempradio2 ends.
+  r.temp2 = true;
+  assert(holdForClientRepeat(r, true) && !r.temp2);
+  // Client Repeat off: radio2 as it was.
+  assert(holdForClientRepeat(r, false) && r.saved.mode == MODE_RX && r.saved.held == kNotHeld);
+  assert(!holdForClientRepeat(r, false));
+  // Off before Client Repeat: stays off after.
+  run("set radio2 off", r, e, out);
+  holdForClientRepeat(r, true);
+  assert(r.saved.held == MODE_OFF);
+  holdForClientRepeat(r, false);
+  assert(r.saved.mode == MODE_OFF && r.saved.held == kNotHeld);
+  // The held mode survives a restart (blob v4).
+  run("set radio2 916.0,250,7,5,rxtx", r, e, out);
+  holdForClientRepeat(r, true);
+  uint8_t blob[kBlobSize];
+  encode(r.saved, blob);
+  Config back;
+  assert(decode(blob, sizeof blob, back) && back.held == MODE_RXTX && back.mode == MODE_OFF);
 }
 
 // radio_profiles.md: | primary | secondary | auto | on | off |
