@@ -36,6 +36,11 @@ void begin(SavedPrimaryFn saved_primary);
 /** Timers: temporary sessions ending, schedules starting. Call every loop. */
 void loop();
 
+/** Client Repeat on or off: while on, radio2 (saved, temporary or scheduled)
+ *  stays off and everything uses the main radio; the saved settings come back
+ *  when it is off. Call every loop with the current setting. */
+void setClientRepeat(bool on);
+
 /** Replace the saved settings: saves and applies. Returns false if invalid. */
 bool set(const Config& c);
 

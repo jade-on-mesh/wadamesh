@@ -336,8 +336,11 @@ struct Runtime {
   Params temp1_p;
   uint32_t temp1_end_ms = 0;
   Schedule sched[8];             // 0-3 radioat2, 4-7 tempradioat2
+  // Client Repeat is on: radio2 (saved, temporary or scheduled) stays off and
+  // everything uses the main radio. The saved settings are kept for later.
+  bool paused = false;
 
-  Profile2 active2() const { return temp2 ? temp2_prof : savedProfile(saved); }
+  Profile2 active2() const { return paused ? Profile2() : temp2 ? temp2_prof : savedProfile(saved); }
   bool enabled() const { return scanning(active2()); }
   bool hasTempSchedule() const {
     for (int i = 4; i < 8; ++i) if (sched[i].active) return true;
@@ -945,6 +948,7 @@ inline CliResult handleCli(const char* cmd, Runtime& r, const Env& env, char* re
       snprintf(reply, cap, "> radio2=%s; tx.media=%s; cross=%s; share=%s%s; %s", p, policyName(r.saved.media),
                crossName(r.saved.cross), r.saved.share ? "on" : "off", r.temp2 ? "; tempradio2 on" : "",
                !env.supported ? "unsupported on this radio"
+               : r.paused ? "paused: client repeat is on"
                : (policyMask(r, r.saved.media) & 2) ? "media on radio2" : "media on radio");
       return res;
     }
@@ -1092,6 +1096,11 @@ inline CliResult handleCli(const char* cmd, Runtime& r, const Env& env, char* re
     const Profile2 s = temp ? r.temp2_prof : savedProfile(r.saved);
     formatProfileGet(env, s, reply, cap);
     if (temp) appendLeft(msLeft(env.now_ms, r.temp2_end_ms), reply, cap);
+    if (r.paused && s.mode != MODE_OFF) {
+      const size_t used = strlen(reply);
+      if (used < cap) snprintf(reply + used, cap - used, "; paused: client repeat is on");
+      return res;
+    }
     if (s.mode != MODE_OFF) appendWarnings(previewTiming(env, s.p), s.p, reply, cap);
     return res;
   }

@@ -165,6 +165,18 @@ static void testShare() {
   run("set radio2 916.0,250,7,5,rx", r, e, out);
   run("set radio2.cross off", r, e, out);
   assert(forwardMask(r, 1, kNoMark) == 0);   // listen-only radio2 relays nothing
+
+  // Client Repeat: radio2 paused, saved settings kept and reported.
+  run("set radio2 916.0,250,7,5,rxtx", r, e, out);
+  r.paused = true;
+  assert(!r.enabled() && !canTransmit(r, 1) && transmitMask(r, 0) == 1 && forwardMask(r, 1, kNoMark) == 0);
+  assert(policyMask(r, TX_RADIO2) == 0 && policyMask(r, TX_BOTH) == 1);
+  run("get radio2", r, e, out);
+  assert(!strncmp(out, "> 916.000,250.000,7,5,rxtx", 26) && strstr(out, "paused: client repeat is on"));
+  run("get mediamesh", r, e, out);
+  assert(strstr(out, "paused: client repeat is on"));
+  r.paused = false;
+  assert(r.enabled() && canTransmit(r, 1));
 }
 
 // radio_profiles.md: | primary | secondary | auto | on | off |

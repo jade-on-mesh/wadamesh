@@ -209,6 +209,13 @@ void loop() {
   if (t.apply_primary || s_temp1_applied != s_rt.temp1) applyPrimary();
 }
 
+void setClientRepeat(bool on) {
+  ensureLoaded();
+  if (s_rt.paused == on) return;
+  s_rt.paused = on;
+  applySecondary();
+}
+
 bool set(const Config& c) {
   ensureLoaded();
   if (c.mode != MODE_OFF && !validParams(c.p)) return false;

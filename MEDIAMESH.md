@@ -163,10 +163,12 @@ Crossing never sends on an `rx`-only radio2.
     5 minutes) is answered there: on the main radio for a direct reply, on both
     for a channel. Asked for on radio2, or not asked for, it stays on
     `tx.media`'s route.
-- **Client Repeat** sends this node's own photos and voice, and its requests
-  for them, on the main radio with everything else: `tx.media` and
-  `mediamesh.share` apply again when it is off. It relays each packet on the
-  radio it arrived on, following
+- **Client Repeat** turns radio2 off while it is on (saved, `tempradio2` and
+  schedules alike): everything, photos and voice too, goes out on the main
+  radio (918 MHz for a client-repeat group). The radio2 settings are kept;
+  `get radio2` and `get mediamesh` add `paused: client repeat is on`, and they
+  apply again when Client Repeat is off. In general, a repeating node relays
+  each packet on the radio it arrived on, following
   `radio2.cross` from that radio. With MediaMesh's `cross off`, radio2 traffic
   is relayed on radio2 and main-mesh traffic on the main radio, so others'
   radio2 photos and voice aren't relayed onto the main mesh. A packet its sender put on both radios (a

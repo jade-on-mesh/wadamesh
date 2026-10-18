@@ -15285,8 +15285,8 @@ static void buildMediaMeshCard() {
   {
     NodePrefs* np = the_mesh.getNodePrefs();
     if (np && np->client_repeat) {
-      setNote(c, "Client repeat is on: this radio's photos and voice go out on the main radio with everything "
-                 "else. The two settings above apply again when it is off.");
+      setNote(c, "Client repeat is on, so radio2 is off: everything, photos and voice too, goes out on the "
+                 "main radio. These settings come back when Client repeat is off.");
     }
   }
   lv_obj_t* r1 = setFieldRow(c);
