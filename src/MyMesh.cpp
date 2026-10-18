@@ -12,7 +12,7 @@
 #endif
 #ifdef ESP32
 #include <esp_system.h>          // esp_restart for the "bootloader" CLI command
-#if !defined(HAS_TANMATSU) && !defined(HAS_TDISPLAY_P4)
+#if !defined(HAS_TANMATSU) && !defined(HAS_TDISPLAY_P4) && !defined(HAS_CROWPANEL_P4_101)
 #include <soc/rtc_cntl_reg.h>    // RTC_CNTL_OPTION1_REG / FORCE_DOWNLOAD_BOOT (S3-only; both P4 boards lack it)
 #endif
 #endif
@@ -740,7 +740,7 @@ bool MyMesh::handleMeshcomodCommand(const char* text, int text_len) {
     // rest of RTC_CNTL_OPTION1 and wedges the RTC so esp_restart() hangs instead
     // of resetting (that was the earlier "freeze"). board.reboot() == esp_restart,
     // the proven reset path on this board; the RTC bit survives it.
-#if !defined(HAS_TANMATSU) && !defined(HAS_TDISPLAY_P4)
+#if !defined(HAS_TANMATSU) && !defined(HAS_TDISPLAY_P4) && !defined(HAS_CROWPANEL_P4_101)
     uint32_t opt1 = REG_READ(RTC_CNTL_OPTION1_REG);
     REG_WRITE(RTC_CNTL_OPTION1_REG, opt1 | RTC_CNTL_FORCE_DOWNLOAD_BOOT);
 #endif
@@ -3656,11 +3656,14 @@ void MyMesh::onContactResponse(const ContactInfo &contact, const uint8_t *data, 
     _ui_pending_status = 0;
     _ui_pending_kind = UiReqKind::None;
     _ui_pending_tag = 0;
+    cancelUIDeferredLogin();   // answered: no login fallback, no late deferred REQ
     if (kind == UiReqKind::Telemetry) {
       // CayenneLPP payload — let the UI decode the LPP channels.
       _ui->onTelemetryReply(contact, &data[4], (size_t)(len - 4));
     } else if (kind == UiReqKind::Regions) {
       _ui->onRegionListReply(contact, data, len);
+    } else if (kind == UiReqKind::Binary) {
+      _ui->onBinaryReply(contact, &data[4], (size_t)(len - 4));
     } else {
       // STATUS or unknown — let the UI fall through its RepeaterStats /
       // JSON parser path.
@@ -3697,9 +3700,12 @@ void MyMesh::onContactResponse(const ContactInfo &contact, const uint8_t *data, 
       const UiReqKind k = _ui_login_then_kind;
       cancelUIDeferredLogin();
       if (login_ok) {
-        ContactInfo& rc = const_cast<ContactInfo&>(contact);
-        if (k == UiReqKind::Telemetry) sendTelemetryRequestForUI(rc);
-        else                           sendStatusPingForUI(rc);
+        // Not from inside this callback: the login reply is still being re-flooded
+        // by the neighbours, and a REQ sent now mostly collided with it (#683).
+        memcpy(_ui_deferred_key, contact.id.pub_key, PUB_KEY_SIZE);
+        _ui_deferred_kind = k;
+        _ui_deferred_at = millis() + 2000;
+        if (!_ui_deferred_at) _ui_deferred_at = 1;
       }
       return;   // login frame consumed (OK fired the REQ; fail disarmed)
     }
@@ -3744,6 +3750,12 @@ void MyMesh::onContactResponse(const ContactInfo &contact, const uint8_t *data, 
       out_frame[i++] = data[12]; // FIRMWARE_VER_LEVEL
       ok = true;
       perms = data[6];
+#ifdef DISPLAY_CLASS
+      memcpy(_ui_last_login.pub4, contact.id.pub_key, 4);
+      _ui_last_login.acl      = data[7];
+      _ui_last_login.fw_level = data[12];
+      _ui_last_login.valid    = true;
+#endif
     } else {
       out_frame[i++] = PUSH_CODE_LOGIN_FAIL;
       out_frame[i++] = 0; // reserved
@@ -6509,6 +6521,9 @@ void MyMesh::loop() {
   // Connections stuff"); the on-device room UI needs it. Cheap: scans 16 slots,
   // transmits only when a connection is armed and due (see the room login branch).
   checkConnections();
+#ifdef DISPLAY_CLASS
+  uiRequestTick();   // direct-first UI requests: login fallback + delayed REQ (#683)
+#endif
 
   if (g_usb_files_owns_serial) {
     // USB Files owns the USB serial port (ui-touch/UsbFilesSession.h): no console
