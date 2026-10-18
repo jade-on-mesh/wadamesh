@@ -314,6 +314,7 @@ protected:
   uint8_t getAutoAddMaxHops() const override;
   bool filterRecvFloodPacket(mesh::Packet* packet) override;
   bool allowPacketForward(const mesh::Packet* packet) override;
+  mesh::DispatcherAction forwardSecondCopy(mesh::Packet* pkt);   // Client Repeat on both radios
   // The profile the packet being processed arrived on (radio2 channel lookups),
   // and each contact's TX choice around the core's ACKs and replies.
   mesh::DispatcherAction onRecvPacket(mesh::Packet* pkt) override;

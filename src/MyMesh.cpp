@@ -5808,10 +5808,36 @@ mesh::DispatcherAction MyMesh::onRecvPacket(mesh::Packet* pkt) {
     mediamesh::endRx(prev);
     return ACTION_RELEASE;
   }
-  const mesh::DispatcherAction a = BaseChatMesh::onRecvPacket(pkt);
+  // Client Repeat with radio2: a packet its sender put on both radios (a
+  // photo request with mediamesh.share, anything with radio2.cross on) is
+  // forwarded on each radio it arrives on. The core keeps one seen-table for
+  // both, so the second copy would be dropped and listeners on that radio
+  // only would miss it; it is forwarded here instead, without being handled
+  // a second time (no duplicate message to the app or the screen).
+  const mesh::DispatcherAction a = _prefs.client_repeat && mediamesh::forwardedOnOtherRadioOnly(pkt)
+                                       ? forwardSecondCopy(pkt)
+                                       : BaseChatMesh::onRecvPacket(pkt);
+  // Forwards are queued after we return: keep the radio they arrived on.
+  if (a != ACTION_RELEASE && a != ACTION_MANUAL_HOLD) mediamesh::noteForward(pkt);
   _rx_origin = prev_origin;
   mediamesh::endRx(prev);
   return a;
+}
+
+// The forward the core gave the first copy of `pkt`, for its copy on the other
+// radio: a flood gets our hash added, a direct packet whose next hop is us
+// loses it. Traces and multipart packets are left to the first copy.
+mesh::DispatcherAction MyMesh::forwardSecondCopy(mesh::Packet* pkt) {
+  if (pkt->isRouteFlood()) return routeRecvPacket(pkt);
+  const uint8_t t = pkt->getPayloadType();
+  if (!pkt->isRouteDirect() || t == PAYLOAD_TYPE_TRACE || t == PAYLOAD_TYPE_MULTIPART) return ACTION_RELEASE;
+  const uint8_t sz = pkt->getPathHashSize();
+  if (pkt->getPathHashCount() == 0 || !self_id.isHashMatch(pkt->path, sz) || !allowPacketForward(pkt)) {
+    return ACTION_RELEASE;
+  }
+  pkt->setPathHashCount(pkt->getPathHashCount() - 1);
+  for (int k = 0; k < pkt->getPathHashCount() * sz; k += sz) memcpy(&pkt->path[k], &pkt->path[k + sz], sz);
+  return ACTION_RETRANSMIT_DELAYED(0, getDirectRetransmitDelay(pkt));
 }
 
 // A channel packet heard on the main profile that only an `#r2-` channel could

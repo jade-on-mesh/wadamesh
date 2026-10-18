@@ -152,6 +152,19 @@ static void testShare() {
   assert(!strncmp(out, "Error", 5) && r.saved.share == 1);
   run("set mediamesh.share off", r, e, out);
   assert(r.saved.share == 0);
+
+  // Client Repeat forwards: from the profile a packet arrived on, less the
+  // profiles its other copy was already forwarded on.
+  run("set radio2 916.0,250,7,5,rxtx", r, e, out);
+  run("set radio2.cross off", r, e, out);
+  assert(forwardMask(r, 1, kNoMark) == 2 && forwardMask(r, 0, kNoMark) == 1);   // stays on its radio
+  assert(forwardMask(r, 1, 1) == 2);    // first copy went out on main: this one on radio2
+  assert(forwardMask(r, 1, 2) == 0);    // already relayed on radio2
+  run("set radio2.cross on", r, e, out);
+  assert(forwardMask(r, 1, kNoMark) == 3 && forwardMask(r, 0, 3) == 0);
+  run("set radio2 916.0,250,7,5,rx", r, e, out);
+  run("set radio2.cross off", r, e, out);
+  assert(forwardMask(r, 1, kNoMark) == 0);   // listen-only radio2 relays nothing
 }
 
 // radio_profiles.md: | primary | secondary | auto | on | off |

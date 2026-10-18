@@ -428,6 +428,16 @@ inline uint8_t transferPolicy(bool share, bool request, uint8_t asked, bool chan
 static constexpr int kHashSize = 8;   // MAX_HASH_SIZE
 static constexpr uint8_t kNoMark = 0xFF;
 
+/** Client Repeat: the profiles a forward of a packet that arrived on `origin`
+ *  goes out on: radio2.cross's rules from that profile (with MediaMesh's
+ *  cross off, the same one), less those it was already forwarded on (`done`,
+ *  kNoMark for none) when its sender put it on both radios. */
+inline uint8_t forwardMask(const Runtime& r, uint8_t origin, uint8_t done) {
+  uint8_t m = transmitMask(r, origin);
+  if (done != kNoMark) m &= (uint8_t)~done;
+  return m;
+}
+
 struct MarkRing {
   static constexpr int kSlots = 128;   // more than a full outbound queue of photo packets
   uint8_t hash[kSlots][kHashSize] = {};

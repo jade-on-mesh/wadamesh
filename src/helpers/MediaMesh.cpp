@@ -27,6 +27,12 @@ SavedPrimaryFn s_saved_primary = nullptr;
 ContactPolicyResolver s_resolver = nullptr;
 volatile uint8_t s_ctx = kNoContext;
 uint8_t s_rx_origin = kNoMark;   // while a received packet is being processed
+// A forward (Client Repeat): the dispatcher queues it after onRecvPacket has
+// returned, outside the receive context, so the profile it arrived on is
+// carried here from noteForward() to queueOutbound().
+const mesh::Packet* s_fwd_pkt = nullptr;
+uint8_t s_fwd_origin = 0;
+MarkRing s_forwarded;            // the profiles each forwarded packet went out on, by hash
 bool s_temp1_applied = false;
 
 // Profile generations: bumped whenever a profile in use changes, so queued
@@ -281,6 +287,20 @@ uint8_t beginRx(const mesh::Packet* pkt) {
 
 void endRx(uint8_t prev) { s_rx_origin = prev; }
 
+void noteForward(const mesh::Packet* pkt) {
+  s_fwd_pkt = pkt;
+  s_fwd_origin = rxOrigin();
+}
+
+bool forwardedOnOtherRadioOnly(const mesh::Packet* pkt) {
+  if (!pkt) return false;
+  ensureLoaded();
+  uint8_t hash[MAX_HASH_SIZE];
+  pkt->calculatePacketHash(hash);
+  const uint8_t done = s_forwarded.find(hash, millis());
+  return done != kNoMark && forwardMask(s_rt, rxOrigin(), done) != 0;
+}
+
 uint8_t rxOrigin() { return s_rx_origin == kNoMark ? 0 : s_rx_origin; }
 
 // A packet's profiles, decided as it is queued (mikecarper/MeshCore fixes them
@@ -303,7 +323,16 @@ void MarkingPacketManager::queueOutbound(mesh::Packet* packet, uint8_t priority,
   uint8_t hash[MAX_HASH_SIZE];
   packet->calculatePacketHash(hash);
   const uint32_t now = millis();
-  uint8_t mask = s_marks.find(hash, now);
+  uint8_t mask = kNoMark;
+  if (packet == s_fwd_pkt) {
+    // A forward: the rules from the profile it arrived on, less any profile
+    // the same packet was already forwarded on (it came in on both).
+    s_fwd_pkt = nullptr;
+    const uint8_t done = s_forwarded.find(hash, now);
+    mask = forwardMask(s_rt, s_fwd_origin, done);
+    s_forwarded.add(hash, now, (uint8_t)((done == kNoMark ? 0 : done) | mask));
+  }
+  if (mask == kNoMark) mask = s_marks.find(hash, now);
   if (mask == kNoMark && s_ctx != kNoContext && s_ctx != TX_AUTO) mask = policyMask(s_rt, s_ctx);
   if (mask == kNoMark && s_ctx == kNoContext && s_rx_origin == kNoMark && s_resolver &&
       s_routes.count(Routes::USER) > 0) {

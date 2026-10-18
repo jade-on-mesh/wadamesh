@@ -100,6 +100,18 @@ void endRx(uint8_t prev);
 /** The profile the packet being processed arrived on (0 outside one). */
 uint8_t rxOrigin();
 
+/** onRecvPacket is forwarding `pkt` (Client Repeat): the dispatcher queues
+ *  it after the receive context has ended, so this carries the profile it
+ *  arrived on to the queue. It then goes out by the radio2.cross rules from
+ *  that profile (with MediaMesh's cross off: the same one), not the main
+ *  profile's. Call it when onRecvPacket returns a retransmit. */
+void noteForward(const mesh::Packet* pkt);
+
+/** Client Repeat: this packet was already forwarded, but not on the profile
+ *  it has just arrived on (its sender put it on both radios). The core would
+ *  drop it as seen; it still needs forwarding on this one. */
+bool forwardedOnOtherRadioOnly(const mesh::Packet* pkt);
+
 /** Whether a second profile is configured now (rx or rxtx): `#r2-` channels
  *  are bound to it. */
 bool radio2Defined();
