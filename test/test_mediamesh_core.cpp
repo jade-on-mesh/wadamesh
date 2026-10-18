@@ -145,19 +145,22 @@ static void testCli() {
   CliResult res = run("get radio2", r, e, out);
   assert(res.handled && !res.save && !strcmp(out, "> off"));
   run("get tx.media", r, e, out);
-  assert(!strcmp(out, "> auto; active=radio"));
+  // Worded as keymindCascade answers.
+  assert(!strcmp(out, "> tx.media auto; active=channel/global"));
 
   res = run("set radio2 916.0,250,7,5,rxtx", r, e, out);
   assert(res.handled && res.save && res.apply && !strncmp(out, "OK - radio2 rxtx; preamble=", 27));
   assert(r.saved.mode == MODE_RXTX && r.saved.p.sf == 7 && r.saved.p.bw == 250.0f);
   run("get radio2", r, e, out);
   assert(!strncmp(out, "> 916.000,250.000,7,5,rxtx,", 27) && strstr(out, "(auto)"));
-  // auto + two permanent profiles: crossing, as mikecarper/MeshCore.
+  // auto follows each channel's choice (and radio2.cross), as keymindCascade.
   run("get tx.media", r, e, out);
-  assert(!strcmp(out, "> auto; active=both"));
+  assert(!strcmp(out, "> tx.media auto; active=channel/global"));
 
   res = run("set tx.media radio2", r, e, out);
-  assert(res.save && mediaOnRadio2(r.saved) && !strcmp(out, "OK - tx.media radio2"));
+  assert(res.save && mediaOnRadio2(r.saved) && !strcmp(out, "OK - tx.media radio2; active=radio2"));
+  run("get tx.media", r, e, out);
+  assert(!strcmp(out, "> tx.media radio2; active=radio2"));
   res = run("set tx.media radio2", r, e, out);
   assert(!res.save);
   for (const char* p : {"auto", "radio", "both", "off"}) {
@@ -173,8 +176,11 @@ static void testCli() {
   run("get radio2", r, e, out);
   assert(!strncmp(out, "> 916.000,250.000,7,5,rx,64", 27) && !strstr(out, "(auto)"));
   run("set tx.media both", r, e, out);
-  assert(strstr(out, "radio2 must be rxtx to send"));
+  assert(!strcmp(out, "OK - tx.media both; active=radio (radio2 unavailable for TX)"));
   run("set tx.media radio2", r, e, out);
+  assert(!strcmp(out, "OK - tx.media radio2; active=off (radio2 unavailable for TX)"));
+  run("get tx.media", r, e, out);
+  assert(!strcmp(out, "> tx.media radio2; active=off (radio2 unavailable for TX)"));
 
   // Rejected: same channel as the main radio, bad bandwidth, bad mode, short input.
   const Config before = r.saved;
@@ -187,7 +193,7 @@ static void testCli() {
   run("set radio2 916.0,250", r, e, out);
   assert(!strncmp(out, "Error", 5));
   run("set tx.media maybe", r, e, out);
-  assert(!strncmp(out, "Error", 5));
+  assert(!strcmp(out, "Error: use get tx.media or set tx.media auto|radio|radio2|both|off"));
 
   res = run("set radio2.cross off", r, e, out);
   assert(res.handled && res.save && !strcmp(out, "OK"));

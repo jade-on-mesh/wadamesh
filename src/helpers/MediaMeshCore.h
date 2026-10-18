@@ -926,14 +926,23 @@ inline CliResult handleCli(const char* cmd, Runtime& r, const Env& env, char* re
 
   // ---- tx.media ----
   if (media) {
+    // Worded as mikecarper's keymindCascade answers, so apps and scripts read
+    // both firmwares alike: `> tx.media radio2; active=radio2`,
+    // `OK - tx.media auto; active=channel/global`, and
+    // ` (radio2 unavailable for TX)` when radio2 can't send.
+    auto describe = [&](const char* lead, uint8_t policy) {
+      const uint8_t m = policyMask(r, policy);
+      snprintf(reply, cap, "%s tx.media %s; active=%s%s", lead, policyName(policy),
+               policy == TX_AUTO ? "channel/global" : maskName(m),
+               (policy == TX_RADIO2 || policy == TX_BOTH) && !(m & 2) ? " (radio2 unavailable for TX)" : "");
+    };
     if (verb == GET && !*arg) {
-      const uint8_t m = policyMask(r, r.saved.media);
-      snprintf(reply, cap, "> %s; active=%s", policyName(r.saved.media), maskName(m));
+      describe(">", r.saved.media);
       return res;
     }
     uint8_t p;
     if (verb != SET || !parsePolicy(arg, p)) {
-      snprintf(reply, cap, "Error: use set tx.media auto|radio|radio2|both|off");
+      snprintf(reply, cap, "Error: use get tx.media or set tx.media auto|radio|radio2|both|off");
       return res;
     }
     if (!env.supported && (p == TX_RADIO2 || p == TX_BOTH)) {
@@ -942,8 +951,7 @@ inline CliResult handleCli(const char* cmd, Runtime& r, const Env& env, char* re
     }
     res.save = p != r.saved.media;
     r.saved.media = p;
-    snprintf(reply, cap, "OK - tx.media %s%s", policyName(p),
-             (p == TX_RADIO2 || p == TX_BOTH) && !canTransmit(r, 1) ? "; radio2 must be rxtx to send" : "");
+    describe("OK -", p);
     return res;
   }
 
