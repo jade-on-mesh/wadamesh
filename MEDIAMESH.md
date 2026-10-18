@@ -24,6 +24,8 @@ The **radio2 (MediaMesh)** card:
 - **Sent on radio2**: *Photos & voice* (`tx.media radio2`, `radio2.cross off`) or
   *Everything* (`tx.media auto`, `radio2.cross on`). Any other mix shows *Custom*;
   set that in the Terminal.
+- **Main-mesh nodes**: *MediaMesh only* (default, `mediamesh.share off`) or
+  *Share with them* (`mediamesh.share on`). See below.
 - **Frequency, Bandwidth, SF, CR**: the radio2 profile. A field applies when you
   leave it. It must differ from the main radio.
 - Live figures, refreshed every second: listen time per profile, radio2
@@ -121,6 +123,7 @@ the millisecond clock, so setting the clock cannot stretch them.
 ```text
 get radio2.cross | set radio2.cross auto|on|off
 get tx.media | set tx.media auto|radio|radio2|both|off
+get mediamesh.share | set mediamesh.share on|off
 get tx.user | get tx.user "Alice" | set tx.user key:0123456789AB radio2
 get tx.channel | get tx.channel 0 | set tx.channel #wardriving both
 ```
@@ -147,7 +150,31 @@ Crossing never sends on an `rx`-only radio2.
 
 - **tx.media** is for MeshCore Open TAK photos and voice: raw data from the app
   (`CMD_SEND_RAW_DATA`) and channel data type `0x5643`. An explicit choice wins
-  over the contact's or channel's own; `auto` leaves it to them.
+  over the contact's or channel's own; `auto` leaves it to them. The fetch
+  requests asking for a photo or clip (binary `0x72`) follow it too.
+- **mediamesh.share** decides whether nodes only on the main mesh can still swap
+  photos and voice with this one:
+  - `off` (default, as mikecarper's keymindCascade): requests and answers both
+    follow `tx.media`. With MediaMesh that is radio2 only, so nothing of a
+    transfer touches the main mesh, and a node without radio2 can't fetch from
+    you or be fetched from.
+  - `on`: requests go out on both radios, so a sender on either one hears them.
+    A photo or clip asked for only on the main radio (remembered by session for
+    5 minutes) is answered there: on the main radio for a direct reply, on both
+    for a channel. Asked for on radio2, or not asked for, it stays on
+    `tx.media`'s route.
+- **Client Repeat** turns radio2 off while it is on (saved, `tempradio2` and
+  schedules alike): everything, photos and voice too, goes out on the main
+  radio (918 MHz for a client-repeat group). The radio2 settings are kept;
+  `get radio2` and `get mediamesh` add `paused: client repeat is on`, and they
+  apply again when Client Repeat is off. In general, a repeating node relays
+  each packet on the radio it arrived on, following
+  `radio2.cross` from that radio. With MediaMesh's `cross off`, radio2 traffic
+  is relayed on radio2 and main-mesh traffic on the main radio, so others'
+  radio2 photos and voice aren't relayed onto the main mesh. A packet its sender put on both radios (a
+  request with `mediamesh.share on`, anything with `cross on`) is relayed on
+  each radio it is heard on, once per radio, and handled (shown, passed to the
+  app) only once. radio2 must be *Listen + send* (`rxtx`) to relay there.
 - **tx.user** covers everything addressed to a contact: messages, logins,
   requests, path-return retries, every flood to them, and the ACKs and replies
   we send them. Direct packets the core sends by itself (room keep-alives) are
@@ -187,7 +214,7 @@ still taken. `#r2-` alone, or nested prefixes, are refused.
 get radio2.status    > rxtx; RX=12,40 TX=3,9 switches=5120 errors=0 max=1203us preamble=32,64; test=4/4 ready budget=1324us
 get radio2.scan      > slow=radio; listen_us=9421,21667; preamble=32,64
 get radio2.timing    > chirps=4.60,43.33; need=32,64; switch=1324us; loop=0us; test=4/4 ready; preamble=32,64
-get mediamesh        > radio2=...; tx.media=radio2; cross=off; media on radio2
+get mediamesh        > radio2=...; tx.media=radio2; cross=off; share=off; media on radio2
 ```
 
 `get radio.timing` is the same as `get radio2.timing`. Warnings follow the

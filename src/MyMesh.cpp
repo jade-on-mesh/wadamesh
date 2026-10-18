@@ -3245,6 +3245,10 @@ void MyMesh::queueMessage(const ContactInfo &from, uint8_t txt_type, mesh::Packe
       getRTCClock()->getCurrentTime() < 1700000000UL) {
     getRTCClock()->setCurrentTime(sender_timestamp);
   }
+  if (VoxWire::isControlText(text)) {   // a VR3 fetch request: which radio asked (mediamesh.share)
+    VoxWire::FetchRequest fr;
+    if (VoxWire::parseTextFetch(text, &fr)) mediamesh::noteFetch(fr.sid);
+  }
   int i = 0;
   out_frame[i++] = RESP_CODE_CONTACT_MSG_RECV_V3;
   out_frame[i++] = (int8_t)(pkt->getSNR() * 4);
@@ -3585,6 +3589,7 @@ void MyMesh::onChannelDataRecv(const mesh::GroupChannel &channel, mesh::Packet *
                                const uint8_t *data, size_t data_len) {
   const int resolved_idx = findConfiguredChannelIdx(channel);
   if (resolved_idx < 0 || resolved_idx >= MAX_GROUP_CHANNELS) return;   // not one of our channels
+  if (data_type == VoxWire::kChannelDataType) noteFetchRequest(data, data_len);   // mediamesh.share
 
 #ifdef DISPLAY_CLASS
   if (data_type == VoxWire::kChannelDataType) VoxPhotos::onPayload(data, data_len, resolved_idx, rxVia());
@@ -3973,6 +3978,7 @@ void MyMesh::discoverUpsert(const uint8_t* pk, uint8_t pklen, uint8_t node_type,
 }
 
 void MyMesh::onRawDataRecv(mesh::Packet *packet) {
+  noteFetchRequest(packet->payload, packet->payload_len);   // which radio asked (mediamesh.share)
 #ifdef DISPLAY_CLASS
   VoxPhotos::onPayload(packet->payload, packet->payload_len, -1, rxVia());   // photo packets for this radio
 #endif
@@ -4278,6 +4284,7 @@ void MyMesh::begin(bool has_display) {
   applyRadioFromPrefs();   // freq/bw/sf/cr + TX power + RX-boost (shared with the live UI apply)
   s_mm_self = this;
   mediamesh::setContactPolicyResolver(mmResolveContactPolicy);
+  mediamesh::setClientRepeat(_prefs.client_repeat != 0);   // Client Repeat: no radio2
   mediamesh::begin(savedPrimaryParams);   // radio2 profiles, once the main radio settings are known
 #if defined(DISPLAY_CLASS)
   // Boot diag: identity prefix + radio config so we can confirm the touch
@@ -5713,7 +5720,7 @@ bool MyMesh::sendGroupDataMedia(mesh::GroupChannel& channel, uint8_t* path, uint
   // An explicit tx.media wins over the channel's choice, except on a #r2-
   // channel, whose receivers only listen on radio2.
   if (data_type == VoxWire::kChannelDataType && !(slot >= 0 && channelBoundToRadio2(slot))) {
-    markTransfer(pkt, data, data_len > 0 ? (size_t)data_len : 0, chan_policy);
+    markTransfer(pkt, data, data_len > 0 ? (size_t)data_len : 0, chan_policy, true);
   } else {
     mediamesh::markPacket(pkt, chan_policy);
   }
@@ -5802,10 +5809,36 @@ mesh::DispatcherAction MyMesh::onRecvPacket(mesh::Packet* pkt) {
     mediamesh::endRx(prev);
     return ACTION_RELEASE;
   }
-  const mesh::DispatcherAction a = BaseChatMesh::onRecvPacket(pkt);
+  // Client Repeat with radio2: a packet its sender put on both radios (a
+  // photo request with mediamesh.share, anything with radio2.cross on) is
+  // forwarded on each radio it arrives on. The core keeps one seen-table for
+  // both, so the second copy would be dropped and listeners on that radio
+  // only would miss it; it is forwarded here instead, without being handled
+  // a second time (no duplicate message to the app or the screen).
+  const mesh::DispatcherAction a = _prefs.client_repeat && mediamesh::forwardedOnOtherRadioOnly(pkt)
+                                       ? forwardSecondCopy(pkt)
+                                       : BaseChatMesh::onRecvPacket(pkt);
+  // Forwards are queued after we return: keep the radio they arrived on.
+  if (a != ACTION_RELEASE && a != ACTION_MANUAL_HOLD) mediamesh::noteForward(pkt);
   _rx_origin = prev_origin;
   mediamesh::endRx(prev);
   return a;
+}
+
+// The forward the core gave the first copy of `pkt`, for its copy on the other
+// radio: a flood gets our hash added, a direct packet whose next hop is us
+// loses it. Traces and multipart packets are left to the first copy.
+mesh::DispatcherAction MyMesh::forwardSecondCopy(mesh::Packet* pkt) {
+  if (pkt->isRouteFlood()) return routeRecvPacket(pkt);
+  const uint8_t t = pkt->getPayloadType();
+  if (!pkt->isRouteDirect() || t == PAYLOAD_TYPE_TRACE || t == PAYLOAD_TYPE_MULTIPART) return ACTION_RELEASE;
+  const uint8_t sz = pkt->getPathHashSize();
+  if (pkt->getPathHashCount() == 0 || !self_id.isHashMatch(pkt->path, sz) || !allowPacketForward(pkt)) {
+    return ACTION_RELEASE;
+  }
+  pkt->setPathHashCount(pkt->getPathHashCount() - 1);
+  for (int k = 0; k < pkt->getPathHashCount() * sz; k += sz) memcpy(&pkt->path[k], &pkt->path[k + sz], sz);
+  return ACTION_RETRANSMIT_DELAYED(0, getDirectRetransmitDelay(pkt));
 }
 
 // A channel packet heard on the main profile that only an `#r2-` channel could
@@ -6517,6 +6550,7 @@ void MyMesh::checkSerialInterface() {
 
 void MyMesh::loop() {
   BaseChatMesh::loop();
+  mediamesh::setClientRepeat(_prefs.client_repeat != 0);   // radio2 off while Client Repeat is on
   mediamesh::loop();           // temporary radio profiles ending, schedules starting
   companionRetryService();
   drainPendingBlobDeletes();   // evicted contacts' blobs, off the packet path (#222)

@@ -97,6 +97,86 @@ static void testBlob() {
   assert(decode(v1, sizeof v1, d) && d.media == TX_RADIO2 && d.cross == CROSS_OFF && mediaOnRadio2(d));
   v1[4] = 0;
   assert(decode(v1, sizeof v1, d) && d.media == TX_RADIO && d.cross == CROSS_OFF && !mediaOnRadio2(d));
+
+  // v3 keeps mediamesh.share; a v2 blob (18 bytes, saved before it) reads as off.
+  c.share = 1;
+  encode(c, b);
+  assert(decode(b, sizeof b, d) && d.share == 1);
+  uint8_t v2[kBlobSizeV2];
+  memcpy(v2, b, sizeof v2);
+  v2[2] = 2;
+  assert(decode(v2, sizeof v2, d) && d.share == 0 && d.media == TX_BOTH);
+  assert(!decode(b, kBlobSizeV2, d));   // v3 cut short
+}
+
+// mediamesh.share: strict MediaMesh unless sharing with main-mesh nodes.
+static void testShare() {
+  // Off: requests and answers follow tx.media's route, as keymindCascade.
+  assert(transferPolicy(false, true, 0, false, TX_RADIO2) == TX_RADIO2);
+  assert(transferPolicy(false, false, 1, false, TX_RADIO2) == TX_RADIO2);
+  assert(transferPolicy(false, false, 1, true, TX_RADIO2) == TX_RADIO2);
+  // On: requests on both radios ...
+  assert(transferPolicy(true, true, 0, false, TX_RADIO2) == TX_BOTH);
+  // ... a transfer asked for on the main radio only is answered there (and on
+  // both when it floods a channel, whose other listeners may be on radio2) ...
+  assert(transferPolicy(true, false, 1, false, TX_RADIO2) == TX_RADIO);
+  assert(transferPolicy(true, false, 1, true, TX_RADIO2) == TX_BOTH);
+  // ... and one asked for on radio2, or not asked for, stays on tx.media's route.
+  assert(transferPolicy(true, false, 2, false, TX_RADIO2) == TX_RADIO2);
+  assert(transferPolicy(true, false, 3, false, TX_RADIO2) == TX_RADIO2);
+  assert(transferPolicy(true, false, 0, true, TX_RADIO2) == TX_RADIO2);
+
+  FetchLog log;
+  assert(log.mask(7, 0) == 0);
+  log.note(7, 0, 1000);
+  assert(log.mask(7, 1000) == 1);
+  log.note(7, 1, 2000);
+  assert(log.mask(7, 2000) == 3);
+  assert(log.mask(7, 2000 + FetchLog::kTtlMs) == 0);   // forgotten after 5 min
+  for (uint32_t sid = 100; sid < 100 + FetchLog::kSize; ++sid) log.note(sid, 1, 3000);
+  assert(log.mask(7, 3000) == 0 && log.mask(100, 3000) == 2);   // oldest replaced
+
+  Runtime r;
+  defaults(r.saved);
+  Env e = E();
+  char out[200];
+  CliResult res = run("get mediamesh.share", r, e, out);
+  assert(res.handled && !strcmp(out, "> off"));
+  res = run("set mediamesh.share on", r, e, out);
+  assert(res.handled && res.save && r.saved.share == 1 && !strcmp(out, "OK - mediamesh.share on"));
+  res = run("set mediamesh.share on", r, e, out);
+  assert(!res.save);
+  run("get mediamesh", r, e, out);
+  assert(strstr(out, "share=on"));
+  run("set mediamesh.share maybe", r, e, out);
+  assert(!strncmp(out, "Error", 5) && r.saved.share == 1);
+  run("set mediamesh.share off", r, e, out);
+  assert(r.saved.share == 0);
+
+  // Client Repeat forwards: from the profile a packet arrived on, less the
+  // profiles its other copy was already forwarded on.
+  run("set radio2 916.0,250,7,5,rxtx", r, e, out);
+  run("set radio2.cross off", r, e, out);
+  assert(forwardMask(r, 1, kNoMark) == 2 && forwardMask(r, 0, kNoMark) == 1);   // stays on its radio
+  assert(forwardMask(r, 1, 1) == 2);    // first copy went out on main: this one on radio2
+  assert(forwardMask(r, 1, 2) == 0);    // already relayed on radio2
+  run("set radio2.cross on", r, e, out);
+  assert(forwardMask(r, 1, kNoMark) == 3 && forwardMask(r, 0, 3) == 0);
+  run("set radio2 916.0,250,7,5,rx", r, e, out);
+  run("set radio2.cross off", r, e, out);
+  assert(forwardMask(r, 1, kNoMark) == 0);   // listen-only radio2 relays nothing
+
+  // Client Repeat: radio2 paused, saved settings kept and reported.
+  run("set radio2 916.0,250,7,5,rxtx", r, e, out);
+  r.paused = true;
+  assert(!r.enabled() && !canTransmit(r, 1) && transmitMask(r, 0) == 1 && forwardMask(r, 1, kNoMark) == 0);
+  assert(policyMask(r, TX_RADIO2) == 0 && policyMask(r, TX_BOTH) == 1);
+  run("get radio2", r, e, out);
+  assert(!strncmp(out, "> 916.000,250.000,7,5,rxtx", 26) && strstr(out, "paused: client repeat is on"));
+  run("get mediamesh", r, e, out);
+  assert(strstr(out, "paused: client repeat is on"));
+  r.paused = false;
+  assert(r.enabled() && canTransmit(r, 1));
 }
 
 // radio_profiles.md: | primary | secondary | auto | on | off |
@@ -500,6 +580,7 @@ int main() {
   testTiming();
   testAirtime();
   testBlob();
+  testShare();
   testCrossTable();
   testCli();
   testTemp2();

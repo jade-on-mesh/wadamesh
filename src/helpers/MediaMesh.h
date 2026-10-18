@@ -36,6 +36,11 @@ void begin(SavedPrimaryFn saved_primary);
 /** Timers: temporary sessions ending, schedules starting. Call every loop. */
 void loop();
 
+/** Client Repeat on or off: while on, radio2 (saved, temporary or scheduled)
+ *  stays off and everything uses the main radio; the saved settings come back
+ *  when it is off. Call every loop with the current setting. */
+void setClientRepeat(bool on);
+
 /** Replace the saved settings: saves and applies. Returns false if invalid. */
 bool set(const Config& c);
 
@@ -51,6 +56,18 @@ bool isMarked(const mesh::Packet* pkt);
 /** Mark a photo or voice packet: tx.media, or `channel_policy` when tx.media
  *  is auto and the packet belongs to a channel. */
 void markMedia(const mesh::Packet* pkt, uint8_t channel_policy = TX_AUTO);
+
+/** An Open TAK fetch request for session `sid` was received: remembers the
+ *  profile it arrived on (rxOrigin()), for markTransfer with mediamesh.share. */
+void noteFetch(uint32_t sid);
+
+/** Mark an Open TAK transfer packet (photo/voice data or a fetch request):
+ *  tx.media's route (or `channel_policy` when tx.media is auto), widened by
+ *  mediamesh.share for nodes only on the main mesh (MediaMeshCore.h
+ *  transferPolicy). `sid` is the packet's session when known (has_sid);
+ *  `channel` that it floods on a channel. */
+void markTransfer(const mesh::Packet* pkt, bool request, bool has_sid, uint32_t sid, bool channel,
+                  uint8_t channel_policy = TX_AUTO);
 
 /** Packets queued while a context is set get its choice (contact or channel
  *  traffic, including ACKs and replies). Returns the previous context. */
@@ -87,6 +104,18 @@ uint8_t beginRx(const mesh::Packet* pkt);
 void endRx(uint8_t prev);
 /** The profile the packet being processed arrived on (0 outside one). */
 uint8_t rxOrigin();
+
+/** onRecvPacket is forwarding `pkt` (Client Repeat): the dispatcher queues
+ *  it after the receive context has ended, so this carries the profile it
+ *  arrived on to the queue. It then goes out by the radio2.cross rules from
+ *  that profile (with MediaMesh's cross off: the same one), not the main
+ *  profile's. Call it when onRecvPacket returns a retransmit. */
+void noteForward(const mesh::Packet* pkt);
+
+/** Client Repeat: this packet was already forwarded, but not on the profile
+ *  it has just arrived on (its sender put it on both radios). The core would
+ *  drop it as seen; it still needs forwarding on this one. */
+bool forwardedOnOtherRadioOnly(const mesh::Packet* pkt);
 
 /** Whether a second profile is configured now (rx or rxtx): `#r2-` channels
  *  are bound to it. */
