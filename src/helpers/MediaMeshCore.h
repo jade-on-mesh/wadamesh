@@ -10,6 +10,7 @@
 //   tempradio / normalradio                         a temporary primary profile
 //   radio2.cross                                    copying traffic between them
 //   tx.media / tx.user / tx.channel                 per-traffic TX choices
+//   mediamesh.share                                 also serve main-mesh nodes
 //   radio2.status / radio2.scan / radio2.timing     diagnostics
 //   #r2- channel names                              channels bound to radio2
 //
@@ -67,6 +68,11 @@ struct Config {
   uint8_t mode = MODE_OFF;       // radio2: off, rx (listen only) or rxtx
   uint8_t media = TX_AUTO;       // tx.media: where photos and voice are sent
   uint8_t cross = CROSS_AUTO;    // radio2.cross
+  // mediamesh.share: 0 keeps photo/voice transfers on tx.media's route (with
+  // MediaMesh, radio2 only: requests and answers, as keymindCascade does). 1
+  // also serves nodes only on the main mesh: requests go out on both radios,
+  // and a transfer asked for only on the main radio is answered there.
+  uint8_t share = 0;
   Params p;
 };
 
@@ -94,6 +100,7 @@ inline void defaults(Config& c) {
   c.mode = MODE_OFF;
   c.media = TX_AUTO;
   c.cross = CROSS_AUTO;
+  c.share = 0;
   c.p.freq = kDefaultFreq;
   c.p.bw = kDefaultBw;
   c.p.sf = kDefaultSf;
@@ -165,10 +172,12 @@ inline const char* maskName(uint8_t mask) {
 // ---- persisted form -------------------------------------------------------
 // v1 (the first MediaMesh): byte 4 was the media route, 0 radio / 1 radio2, and
 // nothing ever crossed. v2: byte 4 is a Policy and byte 7 the cross mode. A v1
-// blob keeps its behaviour: media where it was, crossing off.
+// blob keeps its behaviour: media where it was, crossing off. v3 adds byte 18,
+// mediamesh.share; older blobs read as share off.
 
-static constexpr uint8_t kBlobVersion = 2;
-static constexpr size_t kBlobSize = 18;
+static constexpr uint8_t kBlobVersion = 3;
+static constexpr size_t kBlobSize = 19;
+static constexpr size_t kBlobSizeV2 = 18;
 
 inline size_t encode(const Config& c, uint8_t out[kBlobSize]) {
   out[0] = 'M'; out[1] = 'M'; out[2] = kBlobVersion;
@@ -177,11 +186,13 @@ inline size_t encode(const Config& c, uint8_t out[kBlobSize]) {
   memcpy(&out[12], &c.p.bw, 4);
   out[16] = (uint8_t)(c.p.preamble & 0xFF);
   out[17] = (uint8_t)(c.p.preamble >> 8);
+  out[18] = c.share ? 1 : 0;
   return kBlobSize;
 }
 
 inline bool decode(const uint8_t* in, size_t len, Config& c) {
-  if (!in || len < kBlobSize || in[0] != 'M' || in[1] != 'M' || (in[2] != 1 && in[2] != 2)) return false;
+  if (!in || len < kBlobSizeV2 || in[0] != 'M' || in[1] != 'M' || in[2] < 1 || in[2] > 3) return false;
+  if (in[2] == 3 && len < kBlobSize) return false;
   Config d;
   d.mode = in[3] <= MODE_RXTX ? in[3] : (uint8_t)MODE_OFF;
   if (in[2] == 1) {
@@ -195,6 +206,7 @@ inline bool decode(const uint8_t* in, size_t len, Config& c) {
   memcpy(&d.p.freq, &in[8], 4);
   memcpy(&d.p.bw, &in[12], 4);
   d.p.preamble = (uint16_t)(in[16] | (in[17] << 8));
+  d.share = in[2] >= 3 && in[18] == 1 ? 1 : 0;
   if (!validParams(d.p)) return false;
   c = d;
   return true;
@@ -366,6 +378,46 @@ inline uint8_t policyMask(const Runtime& r, uint8_t policy, uint8_t origin = 0) 
   if (policy == TX_AUTO) return transmitMask(r, origin);
   if (policy == TX_OFF || policy > TX_OFF) return 0;
   return (uint8_t)(policy & (canTransmit(r, 1) ? 3 : 1));
+}
+
+// ---- Open TAK transfers (mediamesh.share) -------------------------------------
+// Which profiles each transfer was asked for on, by session id: a request
+// heard only on the main radio came from a node that may have no radio2.
+
+struct FetchLog {
+  static constexpr int kSize = 8;
+  static constexpr uint32_t kTtlMs = 5UL * 60UL * 1000UL;
+  struct Entry { uint32_t sid = 0; uint8_t mask = 0; uint32_t at_ms = 0; };
+  Entry e[kSize];
+  uint8_t next = 0;
+
+  void note(uint32_t sid, uint8_t origin, uint32_t now_ms) {
+    const uint8_t bit = (uint8_t)(1U << (origin ? 1 : 0));
+    for (Entry& x : e) {
+      if (x.mask && x.sid == sid && now_ms - x.at_ms < kTtlMs) { x.mask |= bit; x.at_ms = now_ms; return; }
+    }
+    Entry& x = e[next];
+    next = (uint8_t)((next + 1) % kSize);
+    x.sid = sid; x.mask = bit; x.at_ms = now_ms;
+  }
+  /** Bit 0 main, bit 1 radio2; 0 when nobody asked (recently). */
+  uint8_t mask(uint32_t sid, uint32_t now_ms) const {
+    for (const Entry& x : e) {
+      if (x.mask && x.sid == sid && now_ms - x.at_ms < kTtlMs) return x.mask;
+    }
+    return 0;
+  }
+};
+
+/** The TX choice for an Open TAK transfer packet. `media` is where photos and
+ *  voice go (tx.media, or the channel's choice when that is auto); `asked` is
+ *  the FetchLog mask for the packet's session; `channel` that it floods on a
+ *  channel (other listeners there may be on either radio). */
+inline uint8_t transferPolicy(bool share, bool request, uint8_t asked, bool channel, uint8_t media) {
+  if (!share) return media;                  // MediaMesh only: requests and answers alike
+  if (request) return TX_BOTH;               // a sender on either radio hears it
+  if (asked == 1) return channel ? TX_BOTH : TX_RADIO;   // asked for on the main radio only
+  return media;
 }
 
 // ---- packet markers ---------------------------------------------------------
@@ -859,12 +911,13 @@ inline CliResult handleCli(const char* cmd, Runtime& r, const Env& env, char* re
   const bool scan_key = !strcmp(key, "radio2.scan");
   const bool status_key = !strcmp(key, "radio2.status");
   const bool summary = !strcmp(key, "mediamesh");
+  const bool share = !strcmp(key, "mediamesh.share");
   const bool temp1 = !strcmp(key, "tempradio");
   const bool normal = !strcmp(key, "normalradio");
   if (verb == BARE && !temp1 && !normal) return res;
   if (verb != BARE && (normal || (temp1 && verb == DEL))) return res;
   if (!base && !temp && !sched && !media && !cross && !timing_key && !scan_key && !status_key && !summary
-      && !temp1 && !normal) {
+      && !share && !temp1 && !normal) {
     return res;
   }
   if (verb == DEL && !sched) return res;
@@ -879,8 +932,8 @@ inline CliResult handleCli(const char* cmd, Runtime& r, const Env& env, char* re
       char p[64];
       if (r.saved.mode == MODE_OFF) snprintf(p, sizeof p, "off");
       else formatTuple(savedProfile(r.saved), t.valid ? t.preamble[1] : 0, p, sizeof p);
-      snprintf(reply, cap, "> radio2=%s; tx.media=%s; cross=%s%s; %s", p, policyName(r.saved.media),
-               crossName(r.saved.cross), r.temp2 ? "; tempradio2 on" : "",
+      snprintf(reply, cap, "> radio2=%s; tx.media=%s; cross=%s; share=%s%s; %s", p, policyName(r.saved.media),
+               crossName(r.saved.cross), r.saved.share ? "on" : "off", r.temp2 ? "; tempradio2 on" : "",
                !env.supported ? "unsupported on this radio"
                : (policyMask(r, r.saved.media) & 2) ? "media on radio2" : "media on radio");
       return res;
@@ -944,6 +997,20 @@ inline CliResult handleCli(const char* cmd, Runtime& r, const Env& env, char* re
     r.saved.media = p;
     snprintf(reply, cap, "OK - tx.media %s%s", policyName(p),
              (p == TX_RADIO2 || p == TX_BOTH) && !canTransmit(r, 1) ? "; radio2 must be rxtx to send" : "");
+    return res;
+  }
+
+  // ---- mediamesh.share ----
+  if (share) {
+    if (verb == GET && !*arg) { snprintf(reply, cap, "> %s", r.saved.share ? "on" : "off"); return res; }
+    if (verb != SET || (strcmp(arg, "on") && strcmp(arg, "off"))) {
+      snprintf(reply, cap, "Error: use get mediamesh.share or set mediamesh.share on|off");
+      return res;
+    }
+    const uint8_t v = !strcmp(arg, "on") ? 1 : 0;
+    res.save = v != r.saved.share;
+    r.saved.share = v;
+    snprintf(reply, cap, "OK - mediamesh.share %s", v ? "on" : "off");
     return res;
   }
 

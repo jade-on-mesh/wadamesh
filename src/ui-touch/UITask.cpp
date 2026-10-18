@@ -15094,6 +15094,7 @@ static void mediaMeshInfoRefresh() {
 // ---- radio2 card: the second profile (MEDIAMESH.md) ----------------------------
 static lv_obj_t* s_mm_mode_row = nullptr;   // Off / Listen / Listen + send
 static lv_obj_t* s_mm_use_row = nullptr;    // Photos & voice / Everything / Custom
+static lv_obj_t* s_mm_share_row = nullptr;  // main-mesh nodes: MediaMesh only / Share with them
 static lv_obj_t* s_mm_t_freq_ta = nullptr;
 static lv_obj_t* s_mm_t_bw_ta = nullptr;
 static lv_obj_t* s_mm_t_sf_ta = nullptr;
@@ -15115,6 +15116,25 @@ static void mediaMeshRefreshChoices() {
   const mediamesh::Config& c = mediamesh::config();
   if (s_mm_mode_row && lv_obj_is_valid(s_mm_mode_row)) setChoicePick(s_mm_mode_row, mmModeIndex(c));
   if (s_mm_use_row && lv_obj_is_valid(s_mm_use_row)) setChoicePick(s_mm_use_row, mmUseIndex(c), c.mode != mediamesh::MODE_OFF);
+  if (s_mm_share_row && lv_obj_is_valid(s_mm_share_row)) {
+    setChoicePick(s_mm_share_row, c.share ? 1 : 0, c.mode != mediamesh::MODE_OFF);
+  }
+}
+
+// mediamesh.share: whether nodes only on the main mesh can still swap photos
+// and voice with this one (requests on both radios, answers where asked).
+static void mmShareCb(lv_event_t* e) {
+  if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+  const int i = setChoiceIndex(e);
+  if (i < 0 || i > 1) return;
+  mediamesh::Config c = mediamesh::config();
+  c.share = (uint8_t)i;
+  mediamesh::set(c);
+  mediaMeshRefreshChoices();
+  if (g_lv.task) {
+    g_lv.task->showAlert(i ? TR("Sharing photos and voice with main-mesh nodes") : TR("Photos and voice on MediaMesh only"),
+                         1600);
+  }
 }
 
 static void mmModeCb(lv_event_t* e) {
@@ -15233,7 +15253,7 @@ static void buildMediaMeshCard() {
   if (!mediamesh::supported()) {
     s_mm_freq_ta = s_mm_bw_ta = s_mm_sf_ta = s_mm_cr_ta = nullptr;
     s_mm_scan_val = s_mm_pre_val = s_mm_toa_val = s_mm_temp_val = nullptr;
-    s_mm_mode_row = s_mm_use_row = s_mm_sw_val = s_mm_pkt_val = s_mm_warn_val = nullptr;
+    s_mm_mode_row = s_mm_use_row = s_mm_share_row = s_mm_sw_val = s_mm_pkt_val = s_mm_warn_val = nullptr;
     s_mm_t_freq_ta = s_mm_t_bw_ta = s_mm_t_sf_ta = s_mm_t_cr_ta = nullptr;
     setNote(c, "This radio can't run a second frequency. It needs an SX1262 board such as the T-Deck or Heltec V4. "
                "The Terminal still takes tempradio.");
@@ -15252,6 +15272,15 @@ static void buildMediaMeshCard() {
                                 "every message goes out on both. Per contact or channel: their Radio setting.",
                                 opts, 3, mmUseIndex(cfg), mmUseCb);
     setChoicePick(s_mm_use_row, mmUseIndex(cfg), cfg.mode != mediamesh::MODE_OFF);
+  }
+  {
+    const char* opts[2] = { TR("MediaMesh only"), TR("Share with them") };
+    s_mm_share_row = setChoiceRow(c, "Main-mesh nodes",
+                                  "MediaMesh only: photo and voice requests and answers stay on radio2, so nodes "
+                                  "without it can't swap them with you. Share: requests go out on both, and a "
+                                  "photo or clip asked for on the main mesh is answered there.",
+                                  opts, 2, cfg.share ? 1 : 0, mmShareCb);
+    setChoicePick(s_mm_share_row, cfg.share ? 1 : 0, cfg.mode != mediamesh::MODE_OFF);
   }
   lv_obj_t* r1 = setFieldRow(c);
   s_mm_freq_ta = setField(r1, "Frequency (MHz)", "MHz", 15, setFieldW(2));

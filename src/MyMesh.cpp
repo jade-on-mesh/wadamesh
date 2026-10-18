@@ -3245,6 +3245,10 @@ void MyMesh::queueMessage(const ContactInfo &from, uint8_t txt_type, mesh::Packe
       getRTCClock()->getCurrentTime() < 1700000000UL) {
     getRTCClock()->setCurrentTime(sender_timestamp);
   }
+  if (VoxWire::isControlText(text)) {   // a VR3 fetch request: which radio asked (mediamesh.share)
+    VoxWire::FetchRequest fr;
+    if (VoxWire::parseTextFetch(text, &fr)) mediamesh::noteFetch(fr.sid);
+  }
   int i = 0;
   out_frame[i++] = RESP_CODE_CONTACT_MSG_RECV_V3;
   out_frame[i++] = (int8_t)(pkt->getSNR() * 4);
@@ -3585,6 +3589,7 @@ void MyMesh::onChannelDataRecv(const mesh::GroupChannel &channel, mesh::Packet *
                                const uint8_t *data, size_t data_len) {
   const int resolved_idx = findConfiguredChannelIdx(channel);
   if (resolved_idx < 0 || resolved_idx >= MAX_GROUP_CHANNELS) return;   // not one of our channels
+  if (data_type == VoxWire::kChannelDataType) noteFetchRequest(data, data_len);   // mediamesh.share
 
 #ifdef DISPLAY_CLASS
   if (data_type == VoxWire::kChannelDataType) VoxPhotos::onPayload(data, data_len, resolved_idx, rxVia());
@@ -3973,6 +3978,7 @@ void MyMesh::discoverUpsert(const uint8_t* pk, uint8_t pklen, uint8_t node_type,
 }
 
 void MyMesh::onRawDataRecv(mesh::Packet *packet) {
+  noteFetchRequest(packet->payload, packet->payload_len);   // which radio asked (mediamesh.share)
 #ifdef DISPLAY_CLASS
   VoxPhotos::onPayload(packet->payload, packet->payload_len, -1, rxVia());   // photo packets for this radio
 #endif
@@ -5713,7 +5719,7 @@ bool MyMesh::sendGroupDataMedia(mesh::GroupChannel& channel, uint8_t* path, uint
   // An explicit tx.media wins over the channel's choice, except on a #r2-
   // channel, whose receivers only listen on radio2.
   if (data_type == VoxWire::kChannelDataType && !(slot >= 0 && channelBoundToRadio2(slot))) {
-    markTransfer(pkt, data, data_len > 0 ? (size_t)data_len : 0, chan_policy);
+    markTransfer(pkt, data, data_len > 0 ? (size_t)data_len : 0, chan_policy, true);
   } else {
     mediamesh::markPacket(pkt, chan_policy);
   }

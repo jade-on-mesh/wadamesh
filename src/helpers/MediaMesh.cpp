@@ -241,6 +241,18 @@ void markMedia(const mesh::Packet* pkt, uint8_t channel_policy) {
   markPacket(pkt, s_rt.saved.media != TX_AUTO ? s_rt.saved.media : channel_policy);
 }
 
+static FetchLog s_fetch;
+
+void noteFetch(uint32_t sid) { s_fetch.note(sid, rxOrigin(), millis()); }
+
+void markTransfer(const mesh::Packet* pkt, bool request, bool has_sid, uint32_t sid, bool channel,
+                  uint8_t channel_policy) {
+  ensureLoaded();
+  const uint8_t media = s_rt.saved.media != TX_AUTO ? s_rt.saved.media : channel_policy;
+  const uint8_t asked = has_sid ? s_fetch.mask(sid, millis()) : 0;
+  markPacket(pkt, transferPolicy(s_rt.saved.share != 0, request, asked, channel, media));
+}
+
 uint8_t setTxContext(uint8_t policy) {
   const uint8_t prev = s_ctx;
   s_ctx = policy;

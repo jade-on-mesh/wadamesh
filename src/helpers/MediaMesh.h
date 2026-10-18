@@ -52,6 +52,18 @@ bool isMarked(const mesh::Packet* pkt);
  *  is auto and the packet belongs to a channel. */
 void markMedia(const mesh::Packet* pkt, uint8_t channel_policy = TX_AUTO);
 
+/** An Open TAK fetch request for session `sid` was received: remembers the
+ *  profile it arrived on (rxOrigin()), for markTransfer with mediamesh.share. */
+void noteFetch(uint32_t sid);
+
+/** Mark an Open TAK transfer packet (photo/voice data or a fetch request):
+ *  tx.media's route (or `channel_policy` when tx.media is auto), widened by
+ *  mediamesh.share for nodes only on the main mesh (MediaMeshCore.h
+ *  transferPolicy). `sid` is the packet's session when known (has_sid);
+ *  `channel` that it floods on a channel. */
+void markTransfer(const mesh::Packet* pkt, bool request, bool has_sid, uint32_t sid, bool channel,
+                  uint8_t channel_policy = TX_AUTO);
+
 /** Packets queued while a context is set get its choice (contact or channel
  *  traffic, including ACKs and replies). Returns the previous context. */
 uint8_t setTxContext(uint8_t policy);

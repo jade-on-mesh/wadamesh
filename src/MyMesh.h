@@ -1140,14 +1140,25 @@ public:
     return sendGroupDataMedia(cd.channel, nullptr, OUT_PATH_UNKNOWN, type, data, (int)len, idx);
   }
   /** Mark an Open TAK transfer packet for MediaMesh. Photo and voice packets
-   *  follow tx.media (or `channel_policy`); a fetch request is a few bytes
-   *  asking someone for them, and goes out on both radios (the main one alone
-   *  when radio2 can't send), so a sender on either one hears it. On radio2
-   *  only, a sender that is only on the main mesh never did. */
+   *  and the fetch requests asking for them follow tx.media (or
+   *  `channel_policy`): with MediaMesh, radio2 only. mediamesh.share on also
+   *  serves nodes only on the main mesh: requests go out on both radios, and
+   *  a transfer asked for only on the main radio is answered there. */
   void markTransfer(const mesh::Packet* pkt, const uint8_t* data, size_t len,
-                    uint8_t channel_policy = mediamesh::TX_AUTO) {
-    if (VoxWire::isFetchRequest(data, len)) mediamesh::markPacket(pkt, mediamesh::TX_BOTH);
-    else mediamesh::markMedia(pkt, channel_policy);
+                    uint8_t channel_policy = mediamesh::TX_AUTO, bool channel = false) {
+    VoxWire::Packet vp;
+    VoxWire::FetchRequest fr;
+    const bool request = VoxWire::isFetchRequest(data, len);
+    bool has_sid = false;
+    uint32_t sid = 0;
+    if (request && VoxWire::parseFetch(data, len, &fr)) { has_sid = true; sid = fr.sid; }
+    else if (!request && VoxWire::parsePacket(data, len, &vp)) { has_sid = true; sid = vp.sid; }
+    mediamesh::markTransfer(pkt, request, has_sid, sid, channel, channel_policy);
+  }
+  /** Remember which radio an Open TAK fetch request (binary) arrived on. */
+  void noteFetchRequest(const uint8_t* data, size_t len) {
+    VoxWire::FetchRequest fr;
+    if (VoxWire::isFetchRequest(data, len) && VoxWire::parseFetch(data, len, &fr)) mediamesh::noteFetch(fr.sid);
   }
   /** sendGroupData that marks Open TAK photo/voice datagrams for MediaMesh. */
   bool sendGroupDataMedia(mesh::GroupChannel& channel, uint8_t* path, uint8_t path_len, uint16_t data_type,
