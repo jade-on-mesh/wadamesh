@@ -1144,9 +1144,15 @@ public:
    *  and the fetch requests asking for them follow tx.media (or
    *  `channel_policy`): with MediaMesh, radio2 only. mediamesh.share on also
    *  serves nodes only on the main mesh: requests go out on both radios, and
-   *  a transfer asked for only on the main radio is answered there. */
+   *  a transfer asked for only on the main radio is answered there. With
+   *  Client Repeat on, this node's photos and voice (and its requests for
+   *  them) go out on the main radio with everything else. */
   void markTransfer(const mesh::Packet* pkt, const uint8_t* data, size_t len,
                     uint8_t channel_policy = mediamesh::TX_AUTO, bool channel = false) {
+    if (_prefs.client_repeat) {
+      mediamesh::markPacket(pkt, mediamesh::TX_RADIO);
+      return;
+    }
     VoxWire::Packet vp;
     VoxWire::FetchRequest fr;
     const bool request = VoxWire::isFetchRequest(data, len);

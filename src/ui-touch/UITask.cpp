@@ -15282,6 +15282,13 @@ static void buildMediaMeshCard() {
                                   opts, 2, cfg.share ? 1 : 0, mmShareCb);
     setChoicePick(s_mm_share_row, cfg.share ? 1 : 0, cfg.mode != mediamesh::MODE_OFF);
   }
+  {
+    NodePrefs* np = the_mesh.getNodePrefs();
+    if (np && np->client_repeat) {
+      setNote(c, "Client repeat is on: this radio's photos and voice go out on the main radio with everything "
+                 "else. The two settings above apply again when it is off.");
+    }
+  }
   lv_obj_t* r1 = setFieldRow(c);
   s_mm_freq_ta = setField(r1, "Frequency (MHz)", "MHz", 15, setFieldW(2));
   s_mm_bw_ta   = setField(r1, "Bandwidth (kHz)", "kHz", 10, setFieldW(2));

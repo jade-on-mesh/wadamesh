@@ -163,10 +163,13 @@ Crossing never sends on an `rx`-only radio2.
     5 minutes) is answered there: on the main radio for a direct reply, on both
     for a channel. Asked for on radio2, or not asked for, it stays on
     `tx.media`'s route.
-- **Client Repeat** relays each packet on the radio it arrived on, following
+- **Client Repeat** sends this node's own photos and voice, and its requests
+  for them, on the main radio with everything else: `tx.media` and
+  `mediamesh.share` apply again when it is off. It relays each packet on the
+  radio it arrived on, following
   `radio2.cross` from that radio. With MediaMesh's `cross off`, radio2 traffic
-  is relayed on radio2 and main-mesh traffic on the main radio, so photos and
-  voice never leak onto the main mesh. A packet its sender put on both radios (a
+  is relayed on radio2 and main-mesh traffic on the main radio, so others'
+  radio2 photos and voice aren't relayed onto the main mesh. A packet its sender put on both radios (a
   request with `mediamesh.share on`, anything with `cross on`) is relayed on
   each radio it is heard on, once per radio, and handled (shown, passed to the
   app) only once. radio2 must be *Listen + send* (`rxtx`) to relay there.
