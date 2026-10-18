@@ -15141,9 +15141,17 @@ static void mmModeCb(lv_event_t* e) {
   if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
   const int i = setChoiceIndex(e);
   if (i < 0 || i > 2) return;
+  NodePrefs* np = the_mesh.getNodePrefs();
+  if (i != 0 && np && np->client_repeat) {
+    // Client repeat keeps radio2 off; it comes back when Client repeat is off.
+    if (g_lv.task) g_lv.task->showAlert(TR("Turn Client repeat off to use radio2"), 1800);
+    mediaMeshRefreshChoices();
+    return;
+  }
   mediamesh::Config c = mediamesh::config();
   const bool was_off = c.mode == mediamesh::MODE_OFF;
   c.mode = i == 2 ? mediamesh::MODE_RXTX : i == 1 ? mediamesh::MODE_RX : mediamesh::MODE_OFF;
+  if (np && np->client_repeat) c.held = c.mode;   // Off chosen now: stays Off afterwards too
   if (was_off && c.mode != mediamesh::MODE_OFF && c.media == mediamesh::TX_AUTO && c.cross == mediamesh::CROSS_AUTO) {
     c.media = mediamesh::TX_RADIO2;   // never set up: start as MediaMesh (photos and voice)
     c.cross = mediamesh::CROSS_OFF;
@@ -15285,8 +15293,8 @@ static void buildMediaMeshCard() {
   {
     NodePrefs* np = the_mesh.getNodePrefs();
     if (np && np->client_repeat) {
-      setNote(c, "Client repeat is on, so radio2 is off: everything, photos and voice too, goes out on the "
-                 "main radio. These settings come back when Client repeat is off.");
+      setNote(c, "Client repeat is on, so radio2 is Off: everything, photos and voice too, goes out on the "
+                 "main radio. radio2 goes back to how it was when Client repeat is turned off.");
     }
   }
   lv_obj_t* r1 = setFieldRow(c);

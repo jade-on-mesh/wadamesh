@@ -211,8 +211,8 @@ void loop() {
 
 void setClientRepeat(bool on) {
   ensureLoaded();
-  if (s_rt.paused == on) return;
-  s_rt.paused = on;
+  if (!holdForClientRepeat(s_rt, on)) return;
+  save();
   applySecondary();
 }
 
