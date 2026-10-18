@@ -70,6 +70,7 @@ class MediaMeshRadio : public Base {
   uint8_t _switch_samples = 0;
   uint32_t _switches = 0;
   uint32_t _switch_errors = 0;
+  uint32_t _switch_stalls = 0;      // retunes held up past kStallUs (not used for the timing)
   uint32_t _tx_count[2] = {};
   uint32_t _rx_count[2] = {};
   TaskHandle_t _task = nullptr;
@@ -179,8 +180,20 @@ class MediaMeshRadio : public Base {
     _cur = profile;
   }
 
+  // A retune slower than this was held up waiting for the SPI bus (on the
+  // T-Deck the screen shares it with the radio and a redraw can hold it for
+  // tens of ms), not a measure of the radio. Taking it as the per-switch
+  // budget would make every cycle assume it: the radio2 visit shrinks to its
+  // minimum, radio2's preamble goes to its cap and main gets the warning, for
+  // good. It is counted (stalls) and left out of the timing instead.
+  static constexpr uint32_t kStallUs = 8000;
+
   void sampleSwitch(uint32_t us) {
     if (us > _switch_life_max_us) _switch_life_max_us = us;
+    if (us >= kStallUs) {
+      ++_switch_stalls;
+      return;
+    }
     if (_switch_samples < 255) ++_switch_samples;
     if (us > _switch_max_us) {
       _switch_max_us = us;
@@ -341,6 +354,7 @@ class MediaMeshRadio : public Base {
   uint8_t mediaMeshProfile() const { return _cur; }
   uint32_t mediaMeshSwitches() const { return _switches; }
   uint32_t mediaMeshSwitchErrors() const { return _switch_errors; }
+  uint32_t mediaMeshSwitchStalls() const { return _switch_stalls; }
   uint32_t mediaMeshSwitchUs() const { return _switch_samples ? _switch_max_us : 0; }
   uint32_t mediaMeshSwitchMaxUs() const { return _switch_life_max_us; }
   uint32_t mediaMeshSwitchBudgetUs() const { return switchBudgetUs(); }
