@@ -842,6 +842,7 @@ struct Stats {
   uint32_t switches = 0;
   uint32_t errors = 0;
   uint32_t max_us = 0;            // longest retune seen (lifetime diagnostic)
+  uint32_t stalls = 0;            // retunes held up waiting for the SPI bus (left out of the timing)
   uint8_t samples = 0;            // retunes measured since the last profile change
 };
 
@@ -958,6 +959,10 @@ inline CliResult handleCli(const char* cmd, Runtime& r, const Env& env, char* re
                (unsigned long)env.stats.tx[0], (unsigned long)env.stats.tx[1], (unsigned long)env.stats.switches,
                (unsigned long)env.stats.errors, (unsigned long)env.stats.max_us, env.main_preamble,
                t.valid ? t.preamble[1] : 0);
+      if (env.stats.stalls) {
+        const size_t used = strlen(reply);
+        if (used < cap) snprintf(reply + used, cap - used, " stalls=%lu", (unsigned long)env.stats.stalls);
+      }
       if (t.valid) {
         const size_t used = strlen(reply);
         const uint8_t s = env.stats.samples > kSwitchSamples ? kSwitchSamples : env.stats.samples;
