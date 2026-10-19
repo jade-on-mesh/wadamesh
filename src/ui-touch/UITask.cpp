@@ -2346,6 +2346,7 @@ struct GlobalStatusBar {
   lv_obj_t* sleep_icon;      // idle light-sleep readiness indicator (T-Deck only)
   lv_obj_t* dnd_icon;        // Do Not Disturb active glyph (moon, all boards)
   lv_obj_t* gps_icon;        // GPS: a crosshair while it looks, a pin once it has a position
+  lv_obj_t* mm_icon;         // MediaMesh: dim while radio2 listens, lit for 2 h after a radio2 packet
   lv_obj_t* sd_icon;         // microSD read/write activity LED (left of Wi-Fi)
   lv_obj_t* async_icon;      // async mesh-request spinner glyph (centre, transient)
   lv_obj_t* clock;
@@ -58351,6 +58352,16 @@ static void buildGlobalStatusBar() {
   lv_obj_add_flag(g_statusbar.gps_icon, NAV_SKIP_FLAG);
 #endif
 
+  // MediaMesh, left of the GPS glyph while radio2 is listening: a dim antenna, lit
+  // for two hours after a valid packet is heard on radio2 (a MediaMesh nearby).
+  g_statusbar.mm_icon = lv_label_create(g_statusbar.root);
+  lv_label_set_text(g_statusbar.mm_icon, UI_ICON_ANTENNA);
+  lv_obj_set_style_text_font(g_statusbar.mm_icon, &ui_icons_16, LV_PART_MAIN);
+  lv_obj_set_style_text_color(g_statusbar.mm_icon, lv_color_hex(COLOR_SUB), LV_PART_MAIN);
+  lv_obj_align(g_statusbar.mm_icon, LV_ALIGN_RIGHT_MID, -SBX(160), 0);
+  lv_obj_add_flag(g_statusbar.mm_icon, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(g_statusbar.mm_icon, NAV_SKIP_FLAG);
+
 #if defined(HAS_TDECK_GT911)
   // Idle power-save readiness indicator — moon glyph, left of the SD LED. T-Deck only,
   // visible only when the feature is enabled; accent colour = ready, grey = blocked.
@@ -58550,6 +58561,7 @@ static lv_coord_t statusBarPackRound(bool links, bool dnd, lv_coord_t& x) {
     { g_statusbar.conn_icon, SBX(7), links },
     { g_statusbar.ble_icon,  SBX(7), links },
     { g_statusbar.gps_icon,  SBX(6), links },
+    { g_statusbar.mm_icon,   SBX(6), links },
     { g_statusbar.dnd_icon,  SBX(7), dnd },
   };
   auto shown = [](const Slot& sl) {
@@ -58959,6 +58971,7 @@ static void statusBarPackRight() {
     { g_statusbar.conn_icon,    SBX(7) },
     { g_statusbar.ble_icon,     SBX(7) },
     { g_statusbar.gps_icon,     SBX(6) },
+    { g_statusbar.mm_icon,      SBX(6) },
     { g_statusbar.dnd_icon,     SBX(7) },
     { g_statusbar.layout_label, SBX(10) },
   };
@@ -59475,6 +59488,24 @@ static void updateGlobalStatusBar() {
   }
 #endif
 
+  // ---- MediaMesh ---- hidden with radio2 off or not listening; dim while it listens;
+  // lit for two hours after a valid packet on radio2 (a MediaMesh is on the air here).
+  if (g_statusbar.mm_icon) {
+    static constexpr uint32_t kHeardMs = 2UL * 60UL * 60UL * 1000UL;
+    const int st = mediamesh::radio2HeardWithin(kHeardMs) ? 2 : mediamesh::status().scanning ? 1 : 0;
+    static int s_mm_st = -1;
+    if (st != s_mm_st) {
+      s_mm_st = st;
+      if (!st) {
+        lv_obj_add_flag(g_statusbar.mm_icon, LV_OBJ_FLAG_HIDDEN);
+      } else {
+        lv_obj_set_style_text_color(g_statusbar.mm_icon,
+            lv_color_hex(st == 1 ? COLOR_SUB : s_theme_high_contrast ? COLOR_TEXT : COLOR_GLOW), LV_PART_MAIN);
+        lv_obj_clear_flag(g_statusbar.mm_icon, LV_OBJ_FLAG_HIDDEN);
+      }
+    }
+  }
+
 #if CAP_GPS
   // ---- GPS ---- (while it is switched on: looking, or a position; a resting GPS keeps
   // the position it found)
@@ -59655,7 +59686,7 @@ static void updateGlobalStatusBar() {
     auto pmix = [&ps](uint32_t v) { ps = (ps ^ v) * 16777619u; };
     lv_obj_t* const packed[] = { g_statusbar.batt_icon, g_statusbar.batt_pct, g_statusbar.sig_box,
                                  g_statusbar.conn_icon, g_statusbar.ble_icon, g_statusbar.gps_icon,
-                                 g_statusbar.dnd_icon, g_statusbar.layout_label };
+                                 g_statusbar.mm_icon, g_statusbar.dnd_icon, g_statusbar.layout_label };
     for (lv_obj_t* o : packed) {
       pmix(o && !lv_obj_has_flag(o, LV_OBJ_FLAG_HIDDEN) ? 1u : 0u);
       if (o && lv_obj_check_type(o, &lv_label_class))
@@ -59683,7 +59714,7 @@ static void updateGlobalStatusBar() {
   // leftmost one. All of this runs only when something that moves or resizes
   // the clock or those icons changes, not every tick.
   {
-    lv_obj_t* const sb_icons[] = { g_statusbar.ble_icon, g_statusbar.gps_icon, g_statusbar.dnd_icon, g_statusbar.sleep_icon,
+    lv_obj_t* const sb_icons[] = { g_statusbar.ble_icon, g_statusbar.gps_icon, g_statusbar.mm_icon, g_statusbar.dnd_icon, g_statusbar.sleep_icon,
                                    g_statusbar.conn_icon, g_statusbar.sig_box,
                                    g_statusbar.batt_pct, g_statusbar.batt_icon };
     auto visible = [](lv_obj_t* o) { return o && !lv_obj_has_flag(o, LV_OBJ_FLAG_HIDDEN); };
