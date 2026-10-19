@@ -121,10 +121,6 @@ void noteOrigin(const uint8_t* raw, int len, uint8_t origin) {
 }
 #endif
 
-bool radio2HeardWithin(uint32_t window_ms) {
-  return s_r2_heard && (uint32_t)(millis() - s_r2_heard_ms) < window_ms;
-}
-
 Params savedPrimary() {
   if (s_saved_primary) return s_saved_primary();
 #if defined(MEDIAMESH_RADIO)
@@ -192,6 +188,10 @@ Env makeEnv() {
 }
 
 }  // namespace
+
+bool radio2HeardWithin(uint32_t window_ms) {
+  return s_r2_heard && (uint32_t)(millis() - s_r2_heard_ms) < window_ms;
+}
 
 bool supported() {
 #if defined(MEDIAMESH_RADIO)
