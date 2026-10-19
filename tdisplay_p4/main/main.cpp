@@ -71,9 +71,8 @@
 // in sdkconfigs/tdisplay_p4. Measured on an ESP-AT unit before the second one was set: five resets
 // in a 45 s capture, each rst:0x9 HP_SYS_LP_WDT_RESET. Do not re-enable either.
 #define TDP4_C6_READY TDP4_C6_HOSTED
-// BLE over the C6 uses arduino-esp32's hostedInitBLE(), which only exists in arduino-esp32 >=3.3.10.
-// We pin 3.3.0 (so esp_hosted can be the C6-compatible 2.0.17), which predates hostedInitBLE — so BLE
-// needs its own bring-up. Keep BLE gated OFF until that's provided; Wi-Fi (esp_wifi_remote) works now.
+// BLE over the C6 runs on the esp-hosted build: app_main brings it up through hostedInitBLE()
+// when Bluetooth is switched on (see below). The legacy ESP-AT build has no BLE.
 #define TDP4_BLE_READY TDP4_C6_HOSTED
 
 #if TDP4_C6_HOSTED && defined(CONFIG_BT_NIMBLE_TRANSPORT_UART)
@@ -518,7 +517,10 @@ extern "C" void app_main(void) {
   #if TDP4_C6_HOSTED
     const bool c6_up = s_hosted_c6_up;
   #else
-    const bool c6_up = c6at_is_up();
+    // A runtime C6 reset (#685) still counts as "up" here: the worker is bringing the link
+    // back and rejoins by itself. Treating it as down would run the radio-off branch below
+    // (disconnect + WIFI_OFF), which cancels that rejoin and forgets the station was wanted.
+    const bool c6_up = c6at_is_up() || c6at_is_recovering();
   #endif
     bool wifi_radio_en = c6_up && wifiConfigWantsWifi();
     // The C6 runs its own AT firmware with auto-connect enabled, so after a power
@@ -559,6 +561,12 @@ extern "C" void app_main(void) {
       }
       if (wifiConfigHasRuntime() && WiFi.status() != WL_CONNECTED) {
         uint32_t now = millis();
+#if !TDP4_C6_HOSTED
+        // A join already pending or running on the C6 (or a C6 reset in progress, which rejoins
+        // on its own) owns the association. Retrying now would only stack a second CWJAP behind
+        // it, so restart the 10 s window instead.
+        if (c6at_join_busy() || c6at_is_recovering()) last_wifi_retry_ms = now;
+#endif
         if ((uint32_t)(now - last_wifi_retry_ms) >= WIFI_RETRY_INTERVAL_MS) {
           last_wifi_retry_ms = now;
           char ssid[WIFI_CONFIG_SSID_MAX], pwd[WIFI_CONFIG_PWD_MAX];
