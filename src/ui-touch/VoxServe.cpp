@@ -55,6 +55,7 @@ uint32_t VoxServe::listenerKey(uint32_t sid, const uint8_t key6[6], int channel)
 
 uint32_t VoxServe::signature(const Job& j) const {
   uint32_t h = listenerKey(j.sid, j.key6, j.channel);
+  h = fnv(h, j.key6, 6);   // on a channel too: another listener is not a repeat
   const uint8_t all = j.all ? 1 : 0;
   h = fnv(h, &all, 1);
   return fnv(h, j.want, (size_t)j.n_want);
@@ -74,7 +75,7 @@ uint32_t VoxServe::currentGen(uint32_t key) const {
   return 0;
 }
 
-void VoxServe::onPayload(const uint8_t* data, size_t len, int channel) {
+void VoxServe::onPayload(const uint8_t* data, size_t len, int channel, int hops) {
   VoxWire::FetchRequest r;
   if (!VoxWire::parseFetch(data, len, &r)) return;
   uint8_t self[6];
@@ -84,7 +85,43 @@ void VoxServe::onPayload(const uint8_t* data, size_t len, int channel) {
   // 5-8 s stand-in) is left to the apps, so a radio and the phone connected to
   // it never both answer.
   if (channel >= 0 && !isOwn(r.sid)) return;
-  enqueue(r, channel, false);
+  enqueue(r, channel, false, hops);
+}
+
+int VoxServe::nextPending(const Job& j) {
+  for (int i = 0; i < j.total && i < 256; i++)
+    if (j.pend[i >> 3] & (1u << (i & 7))) return i;
+  return -1;
+}
+
+// A channel request for a clip already queued or being sent on that channel:
+// add what it lacks to that job rather than starting over (each listener's
+// request used to replace the burst and begin again from packet 1).
+bool VoxServe::mergeChannel(const VoxWire::FetchRequest& r, int channel, int hops) {
+  for (int i = 0; i < kMaxQueued; i++) {
+    Job& q = jobs_[i];
+    if (!q.used || q.sid != r.sid || q.channel != channel) continue;
+    const int h = hops < 0 ? 3 : hops;
+    if (h > q.max_hops) q.max_hops = h;
+    if (q.bits) {   // started: mark the packets it lacks
+      for (int k = 0; k < q.total; k++) {
+        bool want = r.all;
+        for (int m = 0; !want && m < r.n_missing; m++) want = r.missing[m] == k;
+        if (want) q.pend[k >> 3] |= (uint8_t)(1u << (k & 7));
+      }
+    } else if (r.all) {
+      q.all = true;
+    } else if (!q.all) {
+      for (int m = 0; m < r.n_missing; m++) {
+        bool have = false;
+        for (int k = 0; k < q.n_want && !have; k++) have = q.want[k] == r.missing[m];
+        if (!have && q.n_want < VoxWire::kMaxPackets) q.want[q.n_want++] = r.missing[m];
+      }
+    }
+    logf("[VOX] serve %08lx: another listener (%d hops) added to the burst", (unsigned long)r.sid, h);
+    return true;
+  }
+  return false;
 }
 
 bool VoxServe::onDirectText(const char* text) {
@@ -100,7 +137,7 @@ bool VoxServe::onDirectText(const char* text) {
   return true;
 }
 
-void VoxServe::enqueue(const VoxWire::FetchRequest& r, int channel, bool from_dm) {
+void VoxServe::enqueue(const VoxWire::FetchRequest& r, int channel, bool from_dm, int hops) {
   const uint32_t now = io_.nowMs();
   Job t;
   t.used = true;
@@ -130,6 +167,10 @@ void VoxServe::enqueue(const VoxWire::FetchRequest& r, int channel, bool from_dm
   }
   recent_[recent_next_] = Recent{sig, now ? now : 1};
   recent_next_ = (recent_next_ + 1) % (int)(sizeof recent_ / sizeof recent_[0]);
+  if (channel >= 0) {
+    t.max_hops = hops < 0 ? 3 : hops;
+    if (mergeChannel(r, channel, hops)) return;
+  }
 
   // A newer request from the same listener replaces anything still queued or
   // in progress for it, so we never keep sending stale packets.
@@ -162,6 +203,11 @@ void VoxServe::enqueue(const VoxWire::FetchRequest& r, int channel, bool from_dm
 }
 
 int VoxServe::packetCount(const Job& j) const {
+  if (j.channel >= 0 && j.bits) {
+    int n = 0;
+    for (int i = 0; i < j.total && i < 256; i++) n += (j.pend[i >> 3] >> (i & 7)) & 1;
+    return n;
+  }
   if (j.all) return j.total;
   int n = 0;
   for (int i = 0; i < j.n_want; i++) if (j.want[i] < j.total) n++;
@@ -182,6 +228,13 @@ int VoxServe::packetIndex(const Job& j, int k) const {
 // Pause between packets so we don't talk over our own relays: a stock repeater
 // waits a random 0..1.5 airtimes before relaying, then a full airtime relaying,
 // maybe at a slower coding rate (the 1.15). Same as VoxVoiceService._packetGap.
+// Zero-hop: nobody relays, so the next packet follows its own airtime, plus a
+// little for the radio to turn round and the listeners to read it out.
+uint32_t VoxServe::zeroHopGap() {
+  const uint32_t g = io_.packetAirMs() + 60;
+  return g > 150 ? g : 150;
+}
+
 uint32_t VoxServe::packetGap(bool flood, int hops) {
   const uint32_t air = io_.packetAirMs();
   if (flood) return air * 4 + 150 > 800 ? air * 4 + 150 : 800;
@@ -203,6 +256,14 @@ bool VoxServe::start(Job& j) {
   }
   j.total = (int)((j.len + (size_t)pb - 1) / (size_t)pb);
   if (j.total > VoxWire::kMaxPackets) j.total = VoxWire::kMaxPackets;
+  if (j.channel >= 0) {
+    memset(j.pend, 0, sizeof j.pend);
+    for (int k = 0; k < j.total; k++) {
+      bool want = j.all;
+      for (int m = 0; !want && m < j.n_want; m++) want = j.want[m] == k;
+      if (want) j.pend[k >> 3] |= (uint8_t)(1u << (k & 7));
+    }
+  }
   if (packetCount(j) == 0) {
     finish(j, "nothing it asked for exists");
     return false;
@@ -251,14 +312,17 @@ void VoxServe::tick() {
     }
   }
   if (!j.gap) {
-    j.gap = packetGap(j.channel >= 0, j.channel >= 0 ? 0 : j.route_len);
+    j.gap = j.channel >= 0 ? (j.max_hops == 0 ? zeroHopGap() : packetGap(true, 0)) : packetGap(false, j.route_len);
     j.next_at = now;
     logf("[VOX] serve %08lx: sending %d packets %s, %lu ms apart", (unsigned long)j.sid, packetCount(j),
-         j.channel >= 0 ? "on the channel" : "direct", (unsigned long)j.gap);
+         j.channel < 0 ? "direct" : j.max_hops == 0 ? "zero-hop on the channel" : "on the channel",
+         (unsigned long)j.gap);
   }
   if (!after(now, j.next_at)) return;
 
-  const int idx = packetIndex(j, j.next);
+  const int idx = j.channel >= 0 ? nextPending(j) : packetIndex(j, j.next);
+  if (idx < 0) { finish(j, "served"); return; }
+  const bool zero_hop = j.channel >= 0 && j.max_hops == 0;
   const int pb = VoxWire::packetBytes(j.mode);
   const size_t off = (size_t)idx * (size_t)pb;
   const int n = (int)(j.len - off < (size_t)pb ? j.len - off : (size_t)pb);
@@ -268,7 +332,7 @@ void VoxServe::tick() {
   const bool salt = j.salt_ok && (j.channel < 0 || VoxWire::kPacketHeaderLen + n + 1 <= 163);
   const int plen = VoxWire::encodePacket(j.sid, (uint8_t)idx, j.bits + off, n,
                                          salt ? (int)(io_.random32() & 0xFF) : -1, pkt, sizeof pkt);
-  const bool ok = plen > 0 && (j.channel >= 0 ? io_.sendChannelData(j.channel, VoxWire::kChannelDataType, pkt, (size_t)plen)
+  const bool ok = plen > 0 && (j.channel >= 0 ? io_.sendChannelData(j.channel, VoxWire::kChannelDataType, pkt, (size_t)plen, zero_hop)
                                               : io_.sendRaw(j.route, j.route_len, pkt, (size_t)plen));
   if (!ok) {
     // The mesh's packet pool can be momentarily full; try again shortly.
@@ -278,6 +342,14 @@ void VoxServe::tick() {
   }
   sent_total_++;
   j.next++;
+  if (j.channel >= 0) {
+    j.pend[idx >> 3] &= (uint8_t)~(1u << (idx & 7));
+    // A farther listener may have joined: flood from here on, spaced for relays.
+    j.gap = j.max_hops == 0 ? zeroHopGap() : packetGap(true, 0);
+    j.next_at = now + j.gap;
+    if (nextPending(j) < 0) finish(j, "served");
+    return;
+  }
   j.next_at = now + j.gap;
   if (j.next >= packetCount(j)) finish(j, "served");
 }

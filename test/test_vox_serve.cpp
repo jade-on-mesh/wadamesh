@@ -9,6 +9,7 @@
 //
 // Build: g++ -std=c++17 -Wall -Wextra -I src test/test_vox_serve.cpp src/ui-touch/VoxServe.cpp
 
+#include <algorithm>
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -77,8 +78,10 @@ struct Sim : VoxServeIo {
     sent.push_back(Sent{now, -1, std::vector<uint8_t>(path, path + len), std::vector<uint8_t>(data, data + n)});
     return true;
   }
-  bool sendChannelData(int ch, uint16_t type, const uint8_t* data, size_t n) override {
+  int zero_hop_sends = 0;
+  bool sendChannelData(int ch, uint16_t type, const uint8_t* data, size_t n, bool zero_hop) override {
     if (type != VoxWire::kChannelDataType) return false;
+    if (zero_hop) zero_hop_sends++;
     sent.push_back(Sent{now, ch, {}, std::vector<uint8_t>(data, data + n)});
     return true;
   }
@@ -307,6 +310,59 @@ void testQueuedListeners() {
         "one listener at a time, in arrival order");
 }
 
+// Several listeners on a channel: one burst, each request adding what it
+// lacks, never starting over; zero-hop while everyone asking is in range.
+void testChannelMergeAndZeroHop() {
+  Sim sim;
+  VoxServe s(sim);
+  sim.air = 150;
+  sim.clips[kSid] = {1, clip1200()};   // 10 packets
+  s.markOwn(kSid);
+  const auto ra = dartFetch(kSid, kKeyA, nullptr, true, nullptr);
+  s.onPayload(ra.data(), ra.size(), 2, 0);   // heard directly
+  sim.run(s, 300 + 3 * 210 + 50);            // 300 ms, then a few packets
+  const size_t first = sim.sent.size();
+  CHECK(first >= 2 && first < 10, "%zu sent before the second listener", first);
+  CHECK(sim.zero_hop_sends == (int)first, "in range: zero-hop");
+  if (first >= 2) {
+    const uint32_t gap = sim.sent[1].at - sim.sent[0].at;
+    CHECK(gap >= 210 && gap <= 220, "zero-hop gap %u (air + 60)", gap);
+  }
+  // A second listener in range asks for everything: added, not restarted.
+  const auto rb = dartFetch(kSid, kKeyB, nullptr, true, nullptr);
+  s.onPayload(rb.data(), rb.size(), 2, 0);
+  sim.run(s, 20000);
+  std::vector<int> idx;
+  for (auto& p : sim.sent) idx.push_back(p.data[5]);
+  CHECK(sim.sent.size() == 10 + first, "sent %zu (10 + the %zu B missed)", sim.sent.size(), first);
+  // Each packet once for A, plus once more for each one B missed: 0..9 and
+  // 0..first-1, nothing else.
+  std::vector<int> want;
+  for (int i = 0; i < 10; i++) want.push_back(i);
+  for (int i = 0; i < (int)first; i++) want.push_back(i);
+  std::sort(idx.begin(), idx.end());
+  std::sort(want.begin(), want.end());
+  CHECK(idx == want, "each packet once per listener that lacked it");
+  CHECK(!reassemble(sim, kSid, 10).empty(), "complete");
+  CHECK(sim.allocs == 0, "leak");
+
+  // A listener two hops away joins: the rest goes out as spaced floods.
+  Sim sim2;
+  VoxServe s2(sim2);
+  sim2.air = 150;
+  sim2.clips[kSid] = {1, clip1200()};
+  s2.markOwn(kSid);
+  s2.onPayload(ra.data(), ra.size(), 2, 0);
+  sim2.run(s2, 300 + 2 * 210 + 50);
+  const int zh = sim2.zero_hop_sends;
+  s2.onPayload(rb.data(), rb.size(), 2, 2);
+  sim2.run(s2, 40000);
+  CHECK(sim2.zero_hop_sends == zh, "no zero-hop once someone is out of range");
+  const size_t n = sim2.sent.size();
+  CHECK(n >= 2 && sim2.sent[n - 1].at - sim2.sent[n - 2].at >= 790, "flood gap %u",
+        n >= 2 ? sim2.sent[n - 1].at - sim2.sent[n - 2].at : 0);
+}
+
 void testIgnores() {
   Sim sim;
   VoxServe s(sim);
@@ -392,6 +448,7 @@ int main(int argc, char** argv) {
   testNoRouteGivesUp();
   testVr3WaitsForRoute();
   testVr3TimesOut();
+  testChannelMergeAndZeroHop();
   testChannelOwnOnly();
   testDuplicateIgnored();
   testNewerRequestReplaces();

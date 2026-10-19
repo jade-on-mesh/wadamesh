@@ -3615,7 +3615,8 @@ void MyMesh::onChannelDataRecv(const mesh::GroupChannel &channel, mesh::Packet *
   if (data_type == VoxWire::kChannelDataType) noteFetchRequest(data, data_len);   // mediamesh.share
 
 #ifdef DISPLAY_CLASS
-  if (data_type == VoxWire::kChannelDataType) VoxPhotos::onPayload(data, data_len, resolved_idx, rxVia());
+  if (data_type == VoxWire::kChannelDataType)
+    VoxPhotos::onPayload(data, data_len, resolved_idx, rxVia(), pkt->isRouteFlood() ? (int)pkt->getPathHashCount() : 0);
   if (data_type == TeamWire::kDataType) teamOnChannelData(resolved_idx, data, data_len);   // Open TAK team
   if (_ui) _ui->onChannelData((uint8_t)resolved_idx, data_type, data, data_len, pkt->isRouteFlood());
 #endif

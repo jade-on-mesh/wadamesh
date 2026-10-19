@@ -1212,11 +1212,15 @@ public:
     sendDirect(pkt, path, path_len);
     return true;
   }
-  /** GRP_DATA datagram flooded on configured channel slot `idx`. */
-  bool voxSendChannelData(int idx, uint16_t type, const uint8_t* data, size_t len) {
+  /** GRP_DATA datagram on configured channel slot `idx`: flooded, or with
+   *  `zero_hop` sent direct with an empty path (every radio in range hears it,
+   *  no repeater relays it). */
+  bool voxSendChannelData(int idx, uint16_t type, const uint8_t* data, size_t len, bool zero_hop = false) {
     ChannelDetails cd;
     if (idx < 0 || idx >= MAX_GROUP_CHANNELS || !getChannel(idx, cd) || !channelSlotConfigured(cd)) return false;
-    return sendGroupDataMedia(cd.channel, nullptr, OUT_PATH_UNKNOWN, type, data, (int)len, idx);
+    uint8_t no_path[1] = {0};
+    return sendGroupDataMedia(cd.channel, zero_hop ? no_path : nullptr, zero_hop ? 0 : OUT_PATH_UNKNOWN, type, data,
+                              (int)len, idx);
   }
   /** Mark an Open TAK transfer packet for MediaMesh. Photo and voice packets
    *  and the fetch requests asking for them follow tx.media (or
