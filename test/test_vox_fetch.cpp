@@ -450,6 +450,17 @@ int main() {
   assert(VoxFetch::shouldFinishPassive(18, 36) && !VoxFetch::shouldFinishPassive(17, 36));
   assert(!VoxFetch::shouldFinishPassive(36, 36) && !VoxFetch::shouldFinishPassive(0, 0));
 
+  // 17. A "Sharp" Mesh photo: 11 KB, 71 packets, over a lossy channel.
+  {
+    Sim sim; setup(sim, 11000); sim.loss = 0.1; sim.rng = 5;
+    VoxFetch f(sim); sim.fetch = &f;
+    assert(envFor(sim).total == 71);
+    f.onEnvelope(envFor(sim), sim.sender_pub, nullptr, -1, true);
+    sim.run(600000);
+    assert(gotIt(sim, f));
+    printf("sharp: %d requests, %d packets served for 71\n", sim.raw_requests, sim.served_packets);
+  }
+
   printf("all VoxFetch scenarios pass\n");
   return 0;
 }

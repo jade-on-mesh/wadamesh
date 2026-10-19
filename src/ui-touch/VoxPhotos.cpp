@@ -302,7 +302,7 @@ bool loadFile(uint32_t sid, bool voice, uint8_t** data, size_t* len) {
   File f = g_fs->open(path, "r");
   if (!f) return false;
   const size_t n = f.size();
-  if (n < 2 || n > 64 * 1024) { f.close(); return false; }   // largest clip: 64 x 156 B
+  if (n < 2 || n > 64 * 1024) { f.close(); return false; }   // largest clip: 96 x 156 B
   uint8_t* b = (uint8_t*)malloc(n);
   if (!b) { f.close(); return false; }
   const size_t r = f.read(b, n);

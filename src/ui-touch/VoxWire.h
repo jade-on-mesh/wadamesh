@@ -57,10 +57,10 @@ constexpr uint8_t  kImagePayloadVersion = 0x01;
 
 constexpr int      kMimiModeId        = 32;
 
-// Largest clip Open TAK sends today is a "More detail" photo (36 packets) or 20 s
-// of Codec2 3200 (54 packets). Allow some growth without letting a hostile
-// envelope make us reserve 40 KB.
-constexpr int      kMaxClipPackets    = 64;
+// Largest clip Open TAK sends today is a "Sharp" Mesh photo (11 KB: 71 packets)
+// or 20 s of Codec2 3200 (54 packets). Allow some growth without letting a
+// hostile envelope make us reserve 40 KB (96 x 156 B = 15 KB, in PSRAM).
+constexpr int      kMaxClipPackets    = 96;
 constexpr int      kMaxImagePackets   = kMaxClipPackets;
 
 enum Kind : uint8_t { kImage = 0, kCodec2, kMimi };
