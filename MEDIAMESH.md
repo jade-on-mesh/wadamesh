@@ -24,10 +24,12 @@ The **radio2 (MediaMesh)** card:
 - **Sent on radio2**: *Photos & voice* (`tx.media radio2`, `radio2.cross off`) or
   *Everything* (`tx.media auto`, `radio2.cross on`). Any other mix shows *Custom*;
   set that in the Terminal.
-- **Main-mesh nodes**: *MediaMesh only* (default, `mediamesh.share off`) or
-  *Share with them* (`mediamesh.share on`). See below.
+- **Preset**: *250 kHz fast* (the default) or *125 kHz range*. Picking one
+  fills in bandwidth, SF7 and CR 4/5 and leaves the frequency alone; it shows
+  as picked whenever the fields match one.
 - **Frequency, Bandwidth, SF, CR**: the radio2 profile. A field applies when you
-  leave it. It must differ from the main radio.
+  leave it. It must differ from the main radio and stay clear of every listed
+  community mesh (see *Presets and community meshes*).
 - Live figures, refreshed every second: listen time per profile, radio2
   preamble, time on air, switch time (measured on the first four hops), packets
   received and sent per profile, and any timing warnings in red.
@@ -43,9 +45,11 @@ Both → Off (`tx.user`). Per channel: **Send on** in the channel's settings
 Everything else (schedules, `tempradio`, diagnostics) works from
 **Terminal**: type the commands below, or `help`.
 
-Default settings: 911.150 MHz, 125 kHz, SF7, CR 4/5. That is about 2× faster than
-SF7/62.5 for roughly 3 dB less range, so in a city it keeps most of the main
-mesh's reach. 911.150 is a quiet spot found on site, inside a BayMesh 3 cavity
+Default settings: 911.150 MHz, 250 kHz, SF7, CR 4/5 (the *250 kHz fast* preset).
+That is about 4× faster than SF7/62.5 for roughly 6 dB less range. Where that
+falls short of the main mesh's reach, the *125 kHz range* preset is about half
+the speed and roughly 40% farther (about 2× faster than SF7/62.5 for ~3 dB less
+range). 911.150 is a quiet spot found on site, inside a BayMesh 3 cavity
 filter tuned for 910.525 (flat about 908.6–912.8 MHz) and 625 kHz above the main
 channel (the channels' edges about 530 kHz apart). Everyone exchanging
 media has to use the same settings. Radios already set up keep their own.
