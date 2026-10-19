@@ -5,6 +5,15 @@ drawer > **Flock You**. On every board with Wi-Fi and NimBLE (T-Deck, ThinkNode
 M9, the CrowPanels...); not on the Pager yet (`CAP_FLOCK_YOU` in
 `src/ui-touch/device_caps.h`).
 
+**T-Deck (Plus): one USB install.** With Flock You the image outgrew the
+T-Deck's 3.875 MB app slots, so its env now uses
+`variants/lilygo_tdeck/partitions_tdeck_touch_big_app.csv`: 4.375 MB slots, the
+map tile partition down from 4.75 to 3.75 MB, user data (spiffs) untouched.
+Install the full merged image once over USB (the web flasher does this); after
+that, updates over Wi-Fi work as before. Until then an update over Wi-Fi stops
+with "too big for this radio's slots". Cached map tiles are cleared by the
+move and download again. The T-Deck Pro and Max keep the old table.
+
 It does three things:
 
 1. **Listens.** Wi-Fi probe requests (promiscuous mode, hopping channels 1-13)

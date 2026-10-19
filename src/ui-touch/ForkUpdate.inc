@@ -203,7 +203,13 @@ static bool fetchImage(Job& j) {
 #if CAP_OTA
     if (!Update.begin((size_t)len)) {
       char m[64];
-      snprintf(m, sizeof m, "won't fit: %s", Update.errorString());
+      // The T-Deck's app slots grew (partitions_tdeck_touch_big_app.csv): a radio
+      // still on the old table can only take the new image over USB.
+      const esp_partition_t* spare = esp_ota_get_next_update_partition(NULL);
+      if (spare && (size_t)len > spare->size)
+        snprintf(m, sizeof m, "too big for this radio's slots: install once over USB");
+      else
+        snprintf(m, sizeof m, "won't fit: %s", Update.errorString());
       say(j, m);
       h.end();
       return false;
