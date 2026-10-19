@@ -190,7 +190,12 @@ class ServeIo : public VoxServeIo {
     return the_mesh.voxSendChannelData(ch, type, data, n);
   }
 
-  uint32_t packetAirMs() override { return g_io.packetAirMs(); }
+  // Clips go out on radio2 alone (tx.media radio2): space them by its airtime,
+  // not the main channel's, or a faster radio2 sends them no faster.
+  uint32_t packetAirMs() override {
+    const uint32_t r2 = mediamesh::mediaRadio2AirMs(2 + VoxWire::kPacketHeaderLen + VoxWire::kBytesPerPacket);
+    return r2 ? r2 : g_io.packetAirMs();
+  }
 
   bool loadClip(uint32_t sid, uint8_t* mode, uint8_t** bits, size_t* len) override {
     int m = 0;

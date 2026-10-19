@@ -125,6 +125,11 @@ bool radio2Defined();
 /** Whether photos and voice are currently sent on radio2. */
 bool mediaActive();
 
+/** Airtime in ms of a `payload_len`-byte packet on radio2 when photos and voice
+ *  go out on radio2 alone (tx.media radio2, share off), for pacing a transfer;
+ *  0 when they (also) use the main radio, which then sets the pace. */
+uint32_t mediaRadio2AirMs(int payload_len);
+
 // ---- per-contact / per-channel choices ---------------------------------------
 
 /** The saved choice for a contact (first 8 bytes of its public key) or a
