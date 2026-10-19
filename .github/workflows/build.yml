@@ -229,6 +229,9 @@ jobs:
             git -c user.name=ci -c user.email=ci@users.noreply.github.com commit -qm "RAM report ${GITHUB_SHA::7} ${{ matrix.env }}"
             git push -qf "https://x-access-token:${{ github.token }}@github.com/${GITHUB_REPOSITORY}.git" "ram-report:ram-report/${{ matrix.env }}" || true
           fi
+      - name: Merged image (bootloader + partition table + app) for a first USB install
+        shell: bash
+        run: pio run -t mergebin -e ${{ matrix.env }} || echo "::notice::no merged image for ${{ matrix.env }}"
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.env }}
