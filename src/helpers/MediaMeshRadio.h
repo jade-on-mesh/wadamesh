@@ -203,6 +203,34 @@ class MediaMeshRadio : public Base {
     }
   }
 
+  // Receive, with the preamble-detected flag latched while scanning. RadioLib's
+  // default receive IRQ set (what RadioLibWrapper::startRecv asks for) leaves
+  // it out, so isReceivingPacket() only turned true at HEADER_VALID: after the
+  // whole preamble and the header, ~12 symbols past its end. A visit lasts
+  // ~4.6 symbols, so the scan almost always moved on in the middle of a
+  // preamble and the packet was lost: T-Decks with radio2 on received
+  // nothing, on either profile. (Core's CustomLLCC68 asks for it the same
+  // way.) Without radio2 the stock receive is kept: a latched preamble flag
+  // nothing clears would read as "receiving" for good.
+  void startRecvScan() {
+    this->startRecv();   // the wrapper's state (receiving) and the stock arm
+    if (!_scan) return;
+    chip()->startReceive(RADIOLIB_SX126X_RX_TIMEOUT_INF,
+                         RADIOLIB_IRQ_RX_DEFAULT_FLAGS | (1UL << RADIOLIB_IRQ_PREAMBLE_DETECTED),
+                         RADIOLIB_IRQ_RX_DEFAULT_MASK, 0);
+  }
+
+  // How long a preamble with no header yet may keep the receiver on a profile:
+  // the longest preamble its senders use, plus the header, plus a margin. Past
+  // that it was noise (or a packet we joined too late) and the scan moves on.
+  uint32_t preambleHoldMs(uint8_t profile) const {
+    const Params& p = profile ? _cfg.p : _main;
+    const uint16_t pre = profile ? (_timing.valid ? _timing.preamble[1] : mediamesh::kMaxAutoPreamble)
+                                 : mainPreamble();
+    const double sym_us = mediamesh::symbolUs(p.bw, p.sf);
+    return (uint32_t)(((double)pre + 4.25 + 12.0) * sym_us / 1000.0) + 30;
+  }
+
   // The longest a profile may hold the receiver for one packet before a stuck
   // preamble/header flag is treated as noise.
   uint32_t maxHoldMs(uint8_t profile) const {
@@ -233,7 +261,7 @@ class MediaMeshRadio : public Base {
           this->radioAcquire();
           if (!_scan && !_tx && _cur != 0) {
             applyProfile(0);
-            this->startRecv();
+            startRecvScan();
           }
           this->radioRelease();
         }
@@ -246,11 +274,17 @@ class MediaMeshRadio : public Base {
         // Stay while a packet is arriving, and while a finished one waits for
         // the drain task (~1 ms), so every packet is read out on the profile it
         // came in on and credited to it.
-        const bool receiving = this->isReceivingPacket();
-        if (receiving || rxWaiting()) {
+        const uint32_t irq = chip()->getIrqFlags();
+        const bool header = (irq & RADIOLIB_SX126X_IRQ_HEADER_VALID) != 0;
+        const bool preamble = (irq & RADIOLIB_SX126X_IRQ_PREAMBLE_DETECTED) != 0;
+        const bool waiting = (irq & RADIOLIB_SX126X_IRQ_RX_DONE) != 0;
+        if (header || preamble || waiting) {
           const uint32_t now = millis();
           if (!_hold_start) _hold_start = now;
-          if (now - _hold_start < (receiving ? maxHoldMs(_cur) : 50)) {
+          // A header: the whole packet. A preamble alone: until a header
+          // could have followed. A finished packet: the drain task (~1 ms).
+          const uint32_t limit = header ? maxHoldMs(_cur) : preamble ? preambleHoldMs(_cur) : 50;
+          if (now - _hold_start < limit) {
             this->radioRelease();
             vTaskDelay(1);
             continue;
@@ -259,7 +293,7 @@ class MediaMeshRadio : public Base {
         _hold_start = 0;
         const uint32_t t0 = micros();
         applyProfile(_cur ^ 1);
-        this->startRecv();
+        startRecvScan();
         sampleSwitch(micros() - t0);
         ++_switches;
       } else {
@@ -305,16 +339,16 @@ class MediaMeshRadio : public Base {
     setWarmStandby(scan);
     if (!scan && _cur != 0 && !_tx) {
       applyProfile(0);
-      this->startRecv();
+      startRecvScan();
     } else if (scan && params_changed && _cur == 1 && !_tx) {
       applyProfile(1);   // retune to the new radio2 settings
-      this->startRecv();
+      startRecvScan();
     }
     if (!scan && _cur == 0 && !_tx && params_changed) {
       // Back to one profile: let the stock path set the cold standby policy.
       Base::setParams(_main.freq, _main.bw, _main.sf, _main.cr);
       if (_main.preamble) chip()->setPreambleLength(_main.preamble);
-      this->startRecv();
+      startRecvScan();
     }
     _scan = scan;
     this->radioRelease();
@@ -342,7 +376,7 @@ class MediaMeshRadio : public Base {
       chip()->setMaxPayloadMillis(pm.payloadMillis);
       _cur = 0;
         this->idle();
-      this->startRecv();
+      startRecvScan();
     }
     this->radioRelease();
     wake();
