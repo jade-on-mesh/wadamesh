@@ -5,8 +5,10 @@
 TDeckBoard board;
 
 #if defined(P_LORA_SCLK)
+  #include "TDeckRadioHal.h"
   static SPIClass spi;
-  RADIO_CLASS radio = new Module(P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY, spi);
+  static TDeckRadioHal radio_hal(spi);   // buffered radio SPI at 8.89 MHz (TDeckRadioHal.h)
+  RADIO_CLASS radio = new Module(&radio_hal, P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY);
 #else
   RADIO_CLASS radio = new Module(P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY);
 #endif

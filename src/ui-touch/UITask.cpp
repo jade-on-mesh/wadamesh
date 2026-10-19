@@ -5517,11 +5517,13 @@ static void lvglFlushImpl(lv_disp_drv_t* disp_drv, const lv_area_t* area, lv_col
   // The T-Deck's screen and LoRa radio share one SPI bus, and a write holds it
   // to the end: a whole 320x40 band (25 KB from PSRAM) kept the radio waiting
   // several ms, mid-retune when MediaMesh scans (radio2.status budget ~8.7 ms
-  // where a repeater measures ~0.9). Pieces of ~5 KB let a radio command in
-  // between, so it waits ~1 ms at most; the extra address windows cost a few
-  // us per band.
+  // where a repeater measures ~0.9). Pieces of at most 960 px (3 rows) let a
+  // radio command in between, so it waits a fraction of a ms. 960 is what
+  // keymindCascade measured on the T-Deck (mikecarper/MeshCore a46158708:
+  // the longest gap between radio commands during redraws fell from 76 ms to
+  // 1.2 ms); the extra address windows cost a few us per piece.
   {
-    const int32_t rows = w > 0 ? (2560 / w > 0 ? 2560 / w : 1) : h;
+    const int32_t rows = w > 0 ? (960 / w > 0 ? 960 / w : 1) : h;
     const uint16_t* px = reinterpret_cast<const uint16_t*>(color_p);
     for (int32_t r = 0; r < h; r += rows) {
       const int32_t n = h - r < rows ? h - r : rows;
