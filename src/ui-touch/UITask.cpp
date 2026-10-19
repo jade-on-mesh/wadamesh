@@ -5170,6 +5170,21 @@ static void lvglFlushImpl(lv_disp_drv_t* disp_drv, const lv_area_t* area, lv_col
                           lv_disp_flush_is_last(disp_drv));
 #elif defined(DOC_CAPTURE) && defined(DOC_VIRT_W)
   // A virtual size the panel does not have: only the capture buffer below.
+#elif defined(LILYGO_TDECK)
+  // The T-Deck's screen and LoRa radio share one SPI bus, and a write holds it
+  // to the end: a whole 320x40 band (25 KB from PSRAM) kept the radio waiting
+  // several ms, mid-retune when MediaMesh scans (radio2.status budget ~8.7 ms
+  // where a repeater measures ~0.9). Pieces of ~5 KB let a radio command in
+  // between, so it waits ~1 ms at most; the extra address windows cost a few
+  // us per band.
+  {
+    const int32_t rows = w > 0 ? (2560 / w > 0 ? 2560 / w : 1) : h;
+    const uint16_t* px = reinterpret_cast<const uint16_t*>(color_p);
+    for (int32_t r = 0; r < h; r += rows) {
+      const int32_t n = h - r < rows ? h - r : rows;
+      display.writePixelsRGB565(area->x1, area->y1 + r, w, n, px + (size_t)r * w);
+    }
+  }
 #else
   display.writePixelsRGB565(area->x1, area->y1, w, h, reinterpret_cast<uint16_t*>(color_p));
 #endif

@@ -600,7 +600,49 @@ static void testAlias() {
   assert(aliasReceivePriority("#r2-x", 0, false) == 0);
 }
 
+static void testSwitchTimes() {
+  SwitchTimes st;
+  assert(st.baseUs() == 0 && st.typicalUs() == 0);
+  // Until 32 retunes are in, the longest is the base, as before.
+  for (int i = 0; i < 10; ++i) st.add(900);
+  st.add(6000);
+  assert(st.baseUs() == 6000);
+  // A T-Deck: most retunes ~0.9-1.1 ms, one in fifty waits for the screen.
+  st.reset();
+  for (int i = 0; i < 1000; ++i) st.add(i % 50 == 0 ? 7500 : (i % 3 ? 900 : 1100));
+  assert(st.max_us == 7500);
+  assert(st.typicalUs() == 1000);           // the 875-1000 us bin
+  assert(st.baseUs() == 1125);              // p95: the 1000-1125 bin, not the 7.5 ms tail
+  // A radio alone, all alike: never above the longest seen.
+  st.reset();
+  for (int i = 0; i < 100; ++i) st.add(880);
+  assert(st.baseUs() == 880);
+  // When the slow retunes are the common case, they become the budget.
+  st.reset();
+  for (int i = 0; i < 1000; ++i) st.add(i % 10 ? 4000 : 900);
+  assert(st.baseUs() == 4000);
+  // Ageing keeps it bounded and following recent load.
+  st.reset();
+  for (int i = 0; i < 20000; ++i) st.add(5000);
+  for (int i = 0; i < 20000; ++i) st.add(1000);
+  assert(st.total < SwitchTimes::kAgeAt);
+  assert(st.baseUs() == 1125);              // the 1000-1125 bin; the old 5 ms load has aged out
+  // Past the last bin still counts in it.
+  st.reset();
+  for (int i = 0; i < 40; ++i) st.add(20000);
+  assert(st.baseUs() == 8000);
+  // The budget it gives: radio2 at 125/SF7 next to main 62.5/SF7.
+  const Params main = P(910.525f, 62.5f, 7, 5);
+  const Timing slow = calcTiming(main, 32, P(911.15f, 125, 7, 5), 8685);
+  const Timing quick = calcTiming(main, 32, P(911.15f, 125, 7, 5), (1125 * 11 + 9) / 10);
+  assert(quick.dwell_us[1] > slow.dwell_us[1] * 3);
+  assert(quick.need[1] < slow.need[1]);
+  printf("radio2 listen %u -> %u us, preamble needed %u -> %u\n", slow.dwell_us[1], quick.dwell_us[1],
+         slow.need[1], quick.need[1]);
+}
+
 int main() {
+  testSwitchTimes();
   testTiming();
   testAirtime();
   testBlob();

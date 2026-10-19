@@ -222,6 +222,13 @@ get radio2.timing    > chirps=4.60,43.33; need=32,64; switch=1324us; loop=0us; t
 get mediamesh        > radio2=...; tx.media=radio2; cross=off; share=off; media on radio2
 ```
 
+`max=` is the longest retune ever seen and `typ=` the typical (median) one
+since the last profile change; `stalls=` counts retunes over 8 ms, held up
+waiting for the SPI bus and left out of the timing. `budget=` is built on the
+95th percentile of the recent retunes (the longest, until 32 are measured),
+plus 10%: a T-Deck, whose screen shares the bus with the radio, measures
+~1 ms like a repeater instead of the ~8 ms a rare slow retune used to set.
+
 `get radio.timing` is the same as `get radio2.timing`. Warnings follow the
 figures: `WARN recommended preamble: radio2=64` when a profile's preamble is
 shorter than a scanning receiver needs, `short override: radio2` when that is an
