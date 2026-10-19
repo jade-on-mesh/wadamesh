@@ -130,6 +130,11 @@ bool mediaActive();
  *  transmit on, they don't go out, so the UI shouldn't offer to send them. */
 bool mediaSendable();
 
+/** Whether a valid packet (passed the radio's CRC, parses as MeshCore) was
+ *  heard on radio2 in the last `window_ms`: a MediaMesh is on the air nearby.
+ *  RAM only, so a reboot starts dark. */
+bool radio2HeardWithin(uint32_t window_ms);
+
 /** Airtime in ms of a `payload_len`-byte packet on radio2 when photos and voice
  *  go out on radio2 alone (tx.media radio2, share off), for pacing a transfer;
  *  0 when they (also) use the main radio, which then sets the pace. */

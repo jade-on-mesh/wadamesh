@@ -923,6 +923,7 @@ struct Stats {
   uint32_t max_us = 0;            // longest retune seen (lifetime diagnostic)
   uint32_t stalls = 0;            // retunes held up waiting for the SPI bus (left out of the timing)
   uint32_t typ_us = 0;            // typical (median) retune since the last profile change
+  uint32_t heard_s = 0xFFFFFFFF;  // seconds since a valid radio2 packet; none since boot: 0xFFFFFFFF
   uint8_t samples = 0;            // retunes measured since the last profile change
 };
 
@@ -1068,6 +1069,10 @@ inline CliResult handleCli(const char* cmd, Runtime& r, const Env& env, char* re
       if (env.stats.typ_us) {
         const size_t used = strlen(reply);
         if (used < cap) snprintf(reply + used, cap - used, " typ=%luus", (unsigned long)env.stats.typ_us);
+      }
+      if (env.stats.heard_s != 0xFFFFFFFF) {   // the app's "MediaMesh nearby" indicator reads it
+        const size_t used = strlen(reply);
+        if (used < cap) snprintf(reply + used, cap - used, " heard=%lus", (unsigned long)env.stats.heard_s);
       }
       if (env.stats.stalls) {
         const size_t used = strlen(reply);

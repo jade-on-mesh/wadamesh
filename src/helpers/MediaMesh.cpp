@@ -72,6 +72,10 @@ bool saveRoutes() {
   return touchPrefsSetBlob(kRoutesKey, blob, n);
 }
 
+// When a valid packet was last heard on radio2 (radio2HeardWithin).
+static volatile uint32_t s_r2_heard_ms = 0;
+static volatile bool s_r2_heard = false;
+
 #if defined(MEDIAMESH_RADIO)
 void packetHash(const uint8_t* raw, int len, uint8_t out[kHashSize], bool* ok) {
   *ok = false;
@@ -108,6 +112,12 @@ void noteOrigin(const uint8_t* raw, int len, uint8_t origin) {
   uint8_t hash[kHashSize];
   packetHash(raw, len, hash, &ok);
   if (ok) s_origins.add(hash, millis(), origin);
+  // A whole MeshCore packet (it passed the radio's CRC and parses) on radio2:
+  // a MediaMesh is on the air here.
+  if (ok && origin == 1) {
+    s_r2_heard_ms = millis();
+    s_r2_heard = true;
+  }
 }
 #endif
 
@@ -168,6 +178,7 @@ Env makeEnv() {
   e.stats.max_us = radio_driver.mediaMeshSwitchMaxUs();
   e.stats.stalls = radio_driver.mediaMeshSwitchStalls();
   e.stats.typ_us = radio_driver.mediaMeshSwitchTypUs();
+  if (s_r2_heard) e.stats.heard_s = (uint32_t)(millis() - s_r2_heard_ms) / 1000;
   e.stats.samples = radio_driver.mediaMeshSwitchSamples();
 #else
   e.main_saved = savedPrimary();
@@ -177,6 +188,10 @@ Env makeEnv() {
 }
 
 }  // namespace
+
+bool radio2HeardWithin(uint32_t window_ms) {
+  return s_r2_heard && (uint32_t)(millis() - s_r2_heard_ms) < window_ms;
+}
 
 bool supported() {
 #if defined(MEDIAMESH_RADIO)

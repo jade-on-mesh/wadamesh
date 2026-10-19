@@ -217,6 +217,13 @@ A packet heard on the main profile that only an `#r2-` channel could open is
 dropped before it is marked as seen, so the same packet arriving on radio2 is
 still taken. `#r2-` alone, or nested prefixes, are refused.
 
+### MediaMesh nearby
+
+The status bar shows an antenna while radio2 is listening: dim, and lit for two
+hours after a valid packet (it passes the radio's CRC and parses as MeshCore)
+is heard on radio2, meaning a MediaMesh is on the air here. A reboot starts it
+dark.
+
 ### Presets and community meshes
 
 MediaMesh Settings offers two presets, each SF7, CR 4/5 at 911.150 MHz:
