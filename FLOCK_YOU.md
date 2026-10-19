@@ -9,8 +9,11 @@ M9, the CrowPanels...); not on the Pager yet (`CAP_FLOCK_YOU` in
 T-Deck's 3.875 MB app slots, so its env now uses
 `variants/lilygo_tdeck/partitions_tdeck_touch_big_app.csv`: 4.375 MB slots, the
 map tile partition down from 4.75 to 3.75 MB, user data (spiffs) untouched.
-Install the full merged image once over USB (the web flasher does this); after
-that, updates over Wi-Fi work as before. Until then an update over Wi-Fi stops
+Install `firmware-merged.bin` once over USB at address `0x0` (e.g. with
+Espressif's ESP Tool in the browser; don't erase the chip, that wipes your
+data); after that, updates over Wi-Fi work as before. The plain `firmware.bin`
+cannot carry the new partition table: flashed alone it leaves the radio on a
+black screen. Branch builds publish both files as the board's CI artifact. Until then an update over Wi-Fi stops
 with "too big for this radio's slots". Cached map tiles are cleared by the
 move and download again. The T-Deck Pro and Max keep the old table.
 
