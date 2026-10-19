@@ -16,6 +16,10 @@
 #include "BleKeyboard.h"
 #include "helpers/esp32/WifiRuntimeStore.h"
 
+// The WifiRuntimeStore.h this resolves to in board builds does not declare it
+// (defined in src/helpers/esp32/WifiRuntimeStore.cpp; FlockYou 1.2 declared it too).
+extern bool wifiScanIsActive();
+
 namespace FlockRadio {
 namespace {
 
