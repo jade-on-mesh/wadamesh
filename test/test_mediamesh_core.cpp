@@ -110,6 +110,41 @@ static void testBlob() {
   b[2] = 3;
   assert(decode(b, kBlobSizeV3, d) && d.share == 1 && d.held == kNotHeld);   // v3: nothing held
   b[2] = kBlobVersion;
+
+  // v5 keeps the developer switch; a v4 blob (20 bytes) reads as off.
+  c.main_ok = 1;
+  encode(c, b);
+  assert(decode(b, sizeof b, d) && d.main_ok == 1);
+  assert(!decode(b, kBlobSizeV4, d));   // v5 cut short
+  b[2] = 4;
+  assert(decode(b, kBlobSizeV4, d) && d.main_ok == 0 && d.share == 1);
+  b[2] = kBlobVersion;
+}
+
+// Photos and voice stay off the main mesh unless the developer switch is on.
+static void testMainLockdown() {
+  Config c; defaults(c);
+  for (uint8_t m : {(uint8_t)TX_AUTO, (uint8_t)TX_RADIO, (uint8_t)TX_BOTH, (uint8_t)TX_RADIO2})
+    { c.media = m; assert(effectiveMedia(c) == TX_RADIO2); }
+  c.media = TX_OFF;
+  assert(effectiveMedia(c) == TX_OFF);
+  c.share = 1;
+  assert(!effectiveShare(c));
+  c.main_ok = 1;
+  c.media = TX_BOTH;
+  assert(effectiveMedia(c) == TX_BOTH && effectiveShare(c));
+
+  Runtime r; defaults(r.saved);
+  Env e = E();
+  char out[200];
+  CliResult res = run("get mediamesh.main", r, e, out);
+  assert(res.handled && !strcmp(out, "> off"));
+  res = run("set mediamesh.main on", r, e, out);
+  assert(res.handled && res.save && r.saved.main_ok == 1 && !strncmp(out, "OK - mediamesh.main on", 22));
+  res = run("set mediamesh.main maybe", r, e, out);
+  assert(res.handled && !res.save && !strncmp(out, "Error", 5));
+  res = run("set mediamesh.main off", r, e, out);
+  assert(res.save && r.saved.main_ok == 0);
 }
 
 // mediamesh.share: strict MediaMesh unless sharing with main-mesh nodes.
@@ -647,6 +682,7 @@ int main() {
   testAirtime();
   testBlob();
   testShare();
+  testMainLockdown();
   testCrossTable();
   testCli();
   testTemp2();

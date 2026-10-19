@@ -15705,6 +15705,24 @@ static void mediaMeshInfoRefresh() {
 // ---- radio2 card: the second profile (MEDIAMESH.md) ----------------------------
 static lv_obj_t* s_mm_mode_row = nullptr;   // Off / Listen / Listen + send
 static lv_obj_t* s_mm_use_row = nullptr;    // Photos & voice / Everything / Custom
+static lv_obj_t* s_mm_preset_row = nullptr; // 250 kHz fast / 125 kHz range
+
+// The listed community mesh (k_mesh_radio_presets) whose channel radio2's would
+// overlap, or nullptr: radio2 must never sit on a community mesh.
+static const char* mmConflictingMesh(const mediamesh::Params& p) {
+  for (size_t i = 0; i < k_mesh_radio_preset_count; ++i) {
+    const MeshRadioPreset& m = k_mesh_radio_presets[i];
+    if (std::fabs(p.freq - m.freq_mhz) * 1000.0f < (p.bw + m.bw_khz) / 2.0f) return m.label;
+  }
+  return nullptr;
+}
+
+static int mmPresetIndex(const mediamesh::Config& c) {
+  if (c.p.sf != 7 || c.p.cr != 5) return -1;
+  if (std::fabs(c.p.bw - mediamesh::kDefaultBw) < 0.01f) return 0;
+  if (std::fabs(c.p.bw - mediamesh::kRangeBw) < 0.01f) return 1;
+  return -1;
+}
 static lv_obj_t* s_mm_share_row = nullptr;  // main-mesh nodes: MediaMesh only / Share with them
 static lv_obj_t* s_mm_t_freq_ta = nullptr;
 static lv_obj_t* s_mm_t_bw_ta = nullptr;
@@ -15773,6 +15791,33 @@ static void mmModeCb(lv_event_t* e) {
   if (g_lv.task) {
     g_lv.task->showAlert(i == 0 ? TR("radio2 off") : i == 1 ? TR("radio2 listening") : TR("radio2 listening and sending"), 1300);
   }
+}
+
+// A preset: bandwidth, SF7, CR 4/5 (the frequency stays).
+static void mmPresetCb(lv_event_t* e) {
+  if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+  const int i = setChoiceIndex(e);
+  mediamesh::Config c = mediamesh::config();
+  mediamesh::Params p = c.p;
+  p.bw = i == 1 ? mediamesh::kRangeBw : mediamesh::kDefaultBw;
+  p.sf = 7;
+  p.cr = 5;
+  if (const char* mesh = mmConflictingMesh(p)) {
+    char msg[96];
+    snprintf(msg, sizeof msg, "%s %s", TR("Conflicts with"), mesh);
+    if (g_lv.task) g_lv.task->showAlert(msg, 2200);
+    setChoicePick(s_mm_preset_row, mmPresetIndex(c));
+    return;
+  }
+  c.p = p;
+  mediamesh::set(c);
+  char buf[24];
+  if (s_mm_bw_ta && lv_obj_is_valid(s_mm_bw_ta)) { snprintf(buf, sizeof buf, "%g", p.bw); lv_textarea_set_text(s_mm_bw_ta, buf); }
+  if (s_mm_sf_ta && lv_obj_is_valid(s_mm_sf_ta)) lv_textarea_set_text(s_mm_sf_ta, "7");
+  if (s_mm_cr_ta && lv_obj_is_valid(s_mm_cr_ta)) lv_textarea_set_text(s_mm_cr_ta, "5");
+  setChoicePick(s_mm_preset_row, mmPresetIndex(c));
+  mediaMeshInfoRefresh();
+  if (g_lv.task) g_lv.task->showAlert(i == 1 ? TR("radio2: 125 kHz range") : TR("radio2: 250 kHz fast"), 1300);
 }
 
 static void mmUseCb(lv_event_t* e) {
@@ -15852,6 +15897,12 @@ static void mediaMeshSaveCb(lv_event_t* e) {
   p.freq = freq; p.bw = bw; p.sf = (uint8_t)sf; p.cr = (uint8_t)cr;
   if (mediamesh::sameParams(p, c.p)) return;   // focus moved without an edit
   if (!mediamesh::validParams(p)) { g_lv.task->showAlert(TR("Invalid MediaMesh values"), 1400); return; }
+  if (const char* mesh = mmConflictingMesh(p)) {
+    char msg[96];
+    snprintf(msg, sizeof msg, "%s %s", TR("Conflicts with"), mesh);
+    g_lv.task->showAlert(msg, 2200);
+    return;
+  }
   NodePrefs* prefs = the_mesh.getNodePrefs();
   if (prefs) {
     mediamesh::Params main;
@@ -15863,6 +15914,7 @@ static void mediaMeshSaveCb(lv_event_t* e) {
   }
   c.p = p;
   mediamesh::set(c);
+  if (s_mm_preset_row && lv_obj_is_valid(s_mm_preset_row)) setChoicePick(s_mm_preset_row, mmPresetIndex(c));
   mediaMeshInfoRefresh();
   g_lv.task->showAlert(TR("MediaMesh radio saved"), 1100);
 }
@@ -15892,7 +15944,8 @@ static void buildMediaMeshCard() {
                                 opts, 3, mmUseIndex(cfg), mmUseCb);
     setChoicePick(s_mm_use_row, mmUseIndex(cfg), cfg.mode != mediamesh::MODE_OFF);
   }
-  {
+  s_mm_share_row = nullptr;
+  if (cfg.main_ok) {   // developer switch on (mediamesh.main): photos and voice may use the main mesh
     const char* opts[2] = { TR("MediaMesh only"), TR("Share with them") };
     s_mm_share_row = setChoiceRow(c, "Main-mesh nodes",
                                   "MediaMesh only: photo and voice requests and answers stay on radio2, so nodes "
@@ -15907,6 +15960,13 @@ static void buildMediaMeshCard() {
       setNote(c, "Client repeat is on, so radio2 is Off: everything, photos and voice too, goes out on the "
                  "main radio. radio2 goes back to how it was when Client repeat is turned off.");
     }
+  }
+  {
+    const char* opts[2] = { TR("250 kHz fast"), TR("125 kHz range") };
+    s_mm_preset_row = setChoiceRow(c, "Preset",
+                                   "250 kHz sends photos and voice about twice as fast; 125 kHz reaches about 40% "
+                                   "farther. Both SF7, CR 4/5. Everyone on radio2 must use the same.",
+                                   opts, 2, mmPresetIndex(cfg), mmPresetCb);
   }
   lv_obj_t* r1 = setFieldRow(c);
   s_mm_freq_ta = setField(r1, "Frequency (MHz)", "MHz", 15, setFieldW(2));
@@ -71956,6 +72016,11 @@ static void voxMicButtonCb(lv_event_t* e) {
     if (s_mic_pill || g_lv.task->activeThreadIdx() < 0) return;
     if (luaAudioActive() || s_notify_playing || s_vox_voice_sid) {
       g_lv.task->showAlert(TR("Audio is busy"), 1500);
+      return;
+    }
+    // Voice goes on MediaMesh (radio2) only, never the main mesh.
+    if (!mediamesh::mediaSendable()) {
+      g_lv.task->showAlert(TR("Voice needs MediaMesh: radio2 on rx+tx"), 2500);
       return;
     }
     // Keep notification chimes off while the mic is open (they'd be recorded).

@@ -253,6 +253,7 @@ bool isMarked(const mesh::Packet* pkt) {
 
 void markMedia(const mesh::Packet* pkt, uint8_t channel_policy) {
   ensureLoaded();
+  if (!s_rt.saved.main_ok) { markPacket(pkt, effectiveMedia(s_rt.saved)); return; }
   markPacket(pkt, s_rt.saved.media != TX_AUTO ? s_rt.saved.media : channel_policy);
 }
 
@@ -263,9 +264,11 @@ void noteFetch(uint32_t sid) { s_fetch.note(sid, rxOrigin(), millis()); }
 void markTransfer(const mesh::Packet* pkt, bool request, bool has_sid, uint32_t sid, bool channel,
                   uint8_t channel_policy) {
   ensureLoaded();
-  const uint8_t media = s_rt.saved.media != TX_AUTO ? s_rt.saved.media : channel_policy;
+  // Without the developer switch: radio2 alone (effectiveMedia), share off.
+  const uint8_t media = !s_rt.saved.main_ok ? effectiveMedia(s_rt.saved)
+                        : s_rt.saved.media != TX_AUTO ? s_rt.saved.media : channel_policy;
   const uint8_t asked = has_sid ? s_fetch.mask(sid, millis()) : 0;
-  markPacket(pkt, transferPolicy(s_rt.saved.share != 0, request, asked, channel, media));
+  markPacket(pkt, transferPolicy(effectiveShare(s_rt.saved), request, asked, channel, media));
 }
 
 uint8_t setTxContext(uint8_t policy) {
@@ -399,13 +402,20 @@ bool radio2Defined() {
 
 bool mediaActive() {
   ensureLoaded();
-  return supported() && (policyMask(s_rt, s_rt.saved.media) & 2);
+  return supported() && (policyMask(s_rt, effectiveMedia(s_rt.saved)) & 2);
+}
+
+bool mediaSendable() {
+  ensureLoaded();
+  if (s_rt.saved.main_ok) return true;
+  return supported() && policyMask(s_rt, effectiveMedia(s_rt.saved)) == 2;
 }
 
 uint32_t mediaRadio2AirMs(int payload_len) {
   ensureLoaded();
-  if (!supported() || s_rt.saved.share || s_rt.saved.media == TX_AUTO) return 0;
-  if (policyMask(s_rt, s_rt.saved.media) != 2) return 0;
+  const uint8_t media = effectiveMedia(s_rt.saved);
+  if (!supported() || effectiveShare(s_rt.saved) || media == TX_AUTO) return 0;
+  if (policyMask(s_rt, media) != 2) return 0;
   const Profile2 a = s_rt.active2();
   uint16_t pre = a.p.preamble;
 #if defined(MEDIAMESH_RADIO)

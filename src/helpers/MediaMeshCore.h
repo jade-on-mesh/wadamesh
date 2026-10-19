@@ -76,18 +76,32 @@ struct Config {
   // Client Repeat switched radio2 off: the mode it had (off, rx or rxtx), put
   // back when Client Repeat is turned off. kNotHeld when Client Repeat is off.
   uint8_t held = 0xFF;
+  // Developer switch (hidden `mediamesh.main`): photos and voice may use the
+  // main mesh. Off, they go on radio2 alone, whatever tx.media and
+  // mediamesh.share say, and nowhere without radio2: a photo burst on the
+  // main mesh is minutes of everyone's airtime.
+  uint8_t main_ok = 0;
   Params p;
 };
 
+// Where photos and voice go: tx.media, or radio2 alone unless the developer
+// switch allows the main mesh (off stays off).
+inline uint8_t effectiveMedia(const Config& c) {
+  if (c.main_ok || c.media == TX_OFF) return c.media;
+  return TX_RADIO2;
+}
+inline bool effectiveShare(const Config& c) { return c.main_ok && c.share; }
+
 static constexpr uint8_t kNotHeld = 0xFF;
 
-// Defaults for a new radio2: 911.150 MHz, 125 kHz SF7 (about 2x faster than
-// SF7/62.5 for ~3 dB less range, so most of the main mesh's reach). 911.150, a
-// quiet spot found on site, is inside a BayMesh 3 cavity filter tuned for
-// 910.525 (flat about 908.6-912.8 MHz), 625 kHz above the main channel (the
-// two channels' edges about 530 kHz apart).
+// Defaults for a new radio2 (the fast preset): 911.150 MHz, 250 kHz SF7, about
+// 4x faster than SF7/62.5 for ~6 dB less range. The range preset is the same
+// at 125 kHz (half the speed, ~40% farther). 911.150, a quiet spot found on
+// site, is inside a BayMesh 3 cavity filter tuned for 910.525 (flat about
+// 908.6-912.8 MHz), 625 kHz above the main channel.
 static constexpr float kDefaultFreq = 911.150f;
-static constexpr float kDefaultBw = 125.0f;
+static constexpr float kDefaultBw = 250.0f;
+static constexpr float kRangeBw = 125.0f;
 static constexpr uint8_t kDefaultSf = 7;
 static constexpr uint8_t kDefaultCr = 5;
 
@@ -183,8 +197,9 @@ inline const char* maskName(uint8_t mask) {
 // mediamesh.share; older blobs read as share off. v4 adds byte 19, the radio2
 // mode Client Repeat is holding (0xFF none).
 
-static constexpr uint8_t kBlobVersion = 4;
-static constexpr size_t kBlobSize = 20;
+static constexpr uint8_t kBlobVersion = 5;
+static constexpr size_t kBlobSize = 21;
+static constexpr size_t kBlobSizeV4 = 20;
 static constexpr size_t kBlobSizeV2 = 18;
 static constexpr size_t kBlobSizeV3 = 19;
 
@@ -197,12 +212,14 @@ inline size_t encode(const Config& c, uint8_t out[kBlobSize]) {
   out[17] = (uint8_t)(c.p.preamble >> 8);
   out[18] = c.share ? 1 : 0;
   out[19] = c.held;
+  out[20] = c.main_ok ? 1 : 0;
   return kBlobSize;
 }
 
 inline bool decode(const uint8_t* in, size_t len, Config& c) {
-  if (!in || len < kBlobSizeV2 || in[0] != 'M' || in[1] != 'M' || in[2] < 1 || in[2] > 4) return false;
-  if ((in[2] == 3 && len < kBlobSizeV3) || (in[2] == 4 && len < kBlobSize)) return false;
+  if (!in || len < kBlobSizeV2 || in[0] != 'M' || in[1] != 'M' || in[2] < 1 || in[2] > 5) return false;
+  if ((in[2] == 3 && len < kBlobSizeV3) || (in[2] == 4 && len < kBlobSizeV4) || (in[2] == 5 && len < kBlobSize))
+    return false;
   Config d;
   d.mode = in[3] <= MODE_RXTX ? in[3] : (uint8_t)MODE_OFF;
   if (in[2] == 1) {
@@ -218,6 +235,7 @@ inline bool decode(const uint8_t* in, size_t len, Config& c) {
   d.p.preamble = (uint16_t)(in[16] | (in[17] << 8));
   d.share = in[2] >= 3 && in[18] == 1 ? 1 : 0;
   d.held = in[2] >= 4 && in[19] <= MODE_RXTX ? in[19] : kNotHeld;
+  d.main_ok = in[2] >= 5 && in[20] == 1 ? 1 : 0;
   if (!validParams(d.p)) return false;
   c = d;
   return true;
@@ -1013,12 +1031,13 @@ inline CliResult handleCli(const char* cmd, Runtime& r, const Env& env, char* re
   const bool status_key = !strcmp(key, "radio2.status");
   const bool summary = !strcmp(key, "mediamesh");
   const bool share = !strcmp(key, "mediamesh.share");
+  const bool main_key = !strcmp(key, "mediamesh.main");   // developer switch, not in the help
   const bool temp1 = !strcmp(key, "tempradio");
   const bool normal = !strcmp(key, "normalradio");
   if (verb == BARE && !temp1 && !normal) return res;
   if (verb != BARE && (normal || (temp1 && verb == DEL))) return res;
   if (!base && !temp && !sched && !media && !cross && !timing_key && !scan_key && !status_key && !summary
-      && !share && !temp1 && !normal) {
+      && !share && !main_key && !temp1 && !normal) {
     return res;
   }
   if (verb == DEL && !sched) return res;
@@ -1115,6 +1134,21 @@ inline CliResult handleCli(const char* cmd, Runtime& r, const Env& env, char* re
     res.save = p != r.saved.media;
     r.saved.media = p;
     describe("OK -", p);
+    return res;
+  }
+
+  // ---- mediamesh.main (developer) ----
+  if (main_key) {
+    if (verb == GET && !*arg) { snprintf(reply, cap, "> %s", r.saved.main_ok ? "on" : "off"); return res; }
+    if (verb != SET || (strcmp(arg, "on") && strcmp(arg, "off"))) {
+      snprintf(reply, cap, "Error: use get mediamesh.main or set mediamesh.main on|off");
+      return res;
+    }
+    const uint8_t v = !strcmp(arg, "on") ? 1 : 0;
+    res.save = v != r.saved.main_ok;
+    r.saved.main_ok = v;
+    snprintf(reply, cap, "OK - mediamesh.main %s (%s)", v ? "on" : "off",
+             v ? "developer: photos and voice may use the main mesh" : "photos and voice on radio2 only");
     return res;
   }
 
