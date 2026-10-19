@@ -186,8 +186,8 @@ class ServeIo : public VoxServeIo {
     return the_mesh.voxSendRaw(path, (uint8_t)len, data, n);
   }
 
-  bool sendChannelData(int ch, uint16_t type, const uint8_t* data, size_t n) override {
-    return the_mesh.voxSendChannelData(ch, type, data, n);
+  bool sendChannelData(int ch, uint16_t type, const uint8_t* data, size_t n, bool zero_hop) override {
+    return the_mesh.voxSendChannelData(ch, type, data, n, zero_hop);
   }
 
   // Clips go out on radio2 alone (tx.media radio2): space them by its airtime,
@@ -249,9 +249,9 @@ void onChannelText(const char* text, int channel_idx) {
   g_fetch.onEnvelope(env, nullptr, name, channel_idx, false);
 }
 
-void onPayload(const uint8_t* data, size_t len, int channel_idx, uint8_t via) {
+void onPayload(const uint8_t* data, size_t len, int channel_idx, uint8_t via, int hops) {
   g_fetch.onPayload(data, len, channel_idx, via);
-  g_serve.onPayload(data, len, channel_idx);
+  g_serve.onPayload(data, len, channel_idx, hops);
 }
 
 void tick() {

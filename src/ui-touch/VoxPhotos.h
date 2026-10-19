@@ -26,7 +26,8 @@ bool onDirectText(const char* text, const uint8_t sender_pub[32]);
 void onChannelText(const char* text, int channel_idx);   // "Name: VI1:..." as posted
 // raw (-1) or GRP_DATA 0x5643; `via` is the radio profile it arrived on
 // (VoxFetch::kViaMain / kViaRadio2, or kViaUnknown).
-void onPayload(const uint8_t* data, size_t len, int channel_idx, uint8_t via = VoxFetch::kViaUnknown);
+// `hops`: how far a channel packet came (0 = heard directly; -1 unknown).
+void onPayload(const uint8_t* data, size_t len, int channel_idx, uint8_t via = VoxFetch::kViaUnknown, int hops = -1);
 void tick();
 
 // UI side. `text` is a message body as shown (sender already split off).

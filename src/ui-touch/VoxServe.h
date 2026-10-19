@@ -40,7 +40,9 @@ class VoxServeIo {
   // is unknown, has no direct route, or uses multi-byte path hashes.
   virtual bool routeToKey6(const uint8_t key6[6], uint8_t* path, int* len) = 0;
   virtual bool sendRaw(const uint8_t* path, int len, const uint8_t* data, size_t n) = 0;
-  virtual bool sendChannelData(int channel, uint16_t type, const uint8_t* data, size_t n) = 0;
+  // `zero_hop`: direct with an empty path, heard by every radio in range and
+  // relayed by none; otherwise flooded like any channel packet.
+  virtual bool sendChannelData(int channel, uint16_t type, const uint8_t* data, size_t n, bool zero_hop) = 0;
   // Airtime of one full voice packet at the radio's current settings.
   virtual uint32_t packetAirMs() = 0;
   // A clip this radio holds (recorded here or downloaded): its VE3 wire mode and
@@ -68,7 +70,8 @@ class VoxServe {
 
   // A raw-data payload (channel < 0) or a GRP_DATA 0x5643 payload on `channel`.
   // Anything but a fetch request is ignored.
-  void onPayload(const uint8_t* data, size_t len, int channel);
+  // `hops`: how far a channel request came (0 = heard directly; -1 unknown).
+  void onPayload(const uint8_t* data, size_t len, int channel, int hops = -1);
   // A DM's text. Returns true if it was a VR3 request (never shown in a chat).
   bool onDirectText(const char* text);
 
@@ -105,16 +108,24 @@ class VoxServe {
     int total = 0;
     uint32_t next_at = 0;
     uint32_t gap = 0;
+    // Channel jobs: one per clip per channel, whoever asks. Requests add the
+    // packets they lack (pend, once started) instead of starting over; the
+    // farthest requester decides zero-hop (all in range) or flood.
+    uint8_t pend[32] = {0};        // bit i: packet i still to send
+    int max_hops = 0;
   };
 
   struct Recent { uint32_t sig; uint32_t at; };
 
-  void enqueue(const VoxWire::FetchRequest& r, int channel, bool from_dm);
+  void enqueue(const VoxWire::FetchRequest& r, int channel, bool from_dm, int hops = -1);
   bool start(Job& j);
   void finish(Job& j, const char* why);
   int  packetCount(const Job& j) const;
   int  packetIndex(const Job& j, int k) const;
   uint32_t packetGap(bool flood, int hops);
+  uint32_t zeroHopGap();
+  bool mergeChannel(const VoxWire::FetchRequest& r, int channel, int hops);
+  static int nextPending(const Job& j);
   uint32_t signature(const Job& j) const;
   uint32_t listenerKey(uint32_t sid, const uint8_t key6[6], int channel) const;
   void logf(const char* fmt, ...);
