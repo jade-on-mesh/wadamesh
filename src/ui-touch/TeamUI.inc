@@ -8,6 +8,7 @@
 
 #include "TeamCore.h"
 #include "WatchFeed.h"
+#include "MapHighlight.h"
 
 #if defined(HAS_GPS_MOTION)
 extern bool wadaGpsMotion(float* speed_kmh, float* course_deg);   // board target.cpp
@@ -131,6 +132,29 @@ static watchfeed::Store* watch() {
     }
   }
   return s_watch;
+}
+
+// New points flash on the map (MapHighlight.h); the time is kept in "maphl".
+static maphl::Table* s_hl = nullptr;
+static uint32_t s_hl_until = 0;     // the next highlight to run out (millis)
+static bool s_hl_active = false;
+
+static maphl::Table* highlights() {
+  if (!s_hl) {
+    void* m = heap_caps_malloc(sizeof(maphl::Table), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!m) return nullptr;
+    s_hl = new (m) maphl::Table();
+    uint8_t v = 0;
+    size_t n = 0;
+    if (s_io.readFile("maphl", &v, 1, &n) && n == 1) s_hl->choice = (uint8_t)(v % maphl::kChoices);
+  }
+  return s_hl;
+}
+
+static void highlightsSave() {
+  if (!s_hl) return;
+  const uint8_t v = s_hl->choice;
+  s_io.writeFile("maphl", &v, 1);
 }
 
 static void watchSave() {
@@ -457,6 +481,85 @@ static void mapLabel(lv_obj_t* parent, int sx, int sy, const char* text, uint32_
   mapTrack(l);
 }
 
+// A new point's highlight: a ring in [rgb] that flashes (its border fades
+// in and out), under the point's own dot. Deleted with the map objects.
+static void mapRing(lv_obj_t* parent, int sx, int sy, uint32_t rgb) {
+  lv_obj_t* d = mapDot(parent, sx, sy, 38, rgb, rgb, LV_RADIUS_CIRCLE, LV_OPA_20);
+  lv_obj_set_style_border_width(d, 3, LV_PART_MAIN);
+  lv_anim_t a;
+  lv_anim_init(&a);
+  lv_anim_set_var(&a, d);
+  lv_anim_set_values(&a, LV_OPA_20, LV_OPA_COVER);
+  lv_anim_set_time(&a, 600);
+  lv_anim_set_playback_time(&a, 600);
+  lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
+  lv_anim_set_exec_cb(&a, [](void* o, int32_t v) {
+    lv_obj_set_style_border_opa((lv_obj_t*)o, (lv_opa_t)v, LV_PART_MAIN);
+  });
+  lv_anim_start(&a);
+}
+
+// Whether a point should flash now (see MapHighlight.h), noting when the
+// next highlight runs out so the map is redrawn then.
+static bool mapIsNew(uint32_t key, uint32_t now, uint32_t age_ms) {
+  maphl::Table* t = highlights();
+  if (!t) return false;
+  uint32_t until = s_hl_active ? s_hl_until : now + 0x7FFFFFFFUL;
+  if (!t->isNew(key, now, age_ms, &until)) return false;
+  s_hl_until = until;
+  s_hl_active = true;
+  return true;
+}
+
+static constexpr uint32_t kNewPointRgb = 0x00E5FF;   // as the app's newPointAuraColor
+
+// Points' keys, as the app's highlightPointsOf: a drone is one point however
+// often it reports (its serial); a teammate is their key.
+static uint32_t hlKeyWatch(const watchfeed::Item& it) {
+  if (it.r.track[0]) return maphl::key('d', it.r.track, strlen(it.r.track), maphl::key('c', &it.channel, 1));
+  const int32_t pos[2] = {(int32_t)lround(it.r.lat * 1e5), (int32_t)lround(it.r.lon * 1e5)};
+  return maphl::key('w', pos, sizeof pos, maphl::key('t', &it.at_ms, sizeof it.at_ms));
+}
+static uint32_t hlKeyMarker(const TeamWire::Marker& m) {
+  return maphl::key('p', m.key4, 4, maphl::key('i', &m.id, sizeof m.id));
+}
+static uint32_t hlKeyMember(const team::Member& m) { return maphl::key('m', m.pos.key4, 4); }
+static uint32_t hlAge(uint32_t now, uint32_t at) { return (int32_t)(now - at) > 0 ? now - at : 0; }
+static uint32_t hlMarkerAge(const TeamWire::Marker& m) {
+  const uint32_t epoch = s_io.epoch();
+  return epoch && m.time && epoch >= m.time ? (epoch - m.time) * 1000UL : maphl::kUnknownAge;
+}
+
+// Notes the points there now, so "new" means new here, map open or not.
+// Teammates already there in the first seconds after boot aren't new.
+static void highlightsObserve(uint32_t now) {
+  maphl::Table* t = highlights();
+  if (!t) return;
+  static uint32_t start = 0;
+  static bool started = false;
+  if (!started) { started = true; start = now; }
+  const bool settling = now - start < 10000;
+  uint8_t self4[4];
+  s_io.selfKey4(self4);
+  if (watchfeed::Store* w = s_watch) {
+    for (int i = 0; i < watchfeed::kMaxItems; i++) {
+      const watchfeed::Item& it = w->items[i];
+      if (w->live(it, now)) t->note(hlKeyWatch(it), now, hlAge(now, it.at_ms));
+    }
+  }
+  team::Core* c = s_core;
+  if (!c || !c->cfg.enabled) return;
+  for (int i = 0; i < team::kMaxMarkers; i++) {
+    const TeamWire::Marker* m = c->marker(i);
+    if (m && memcmp(m->key4, self4, 4) != 0) t->note(hlKeyMarker(*m), now, hlMarkerAge(*m));
+  }
+  for (int i = 0; i < team::kMaxMembers; i++) {
+    team::Member* m = c->member(i);
+    if (m && memcmp(m->pos.key4, self4, 4) != 0)
+      t->note(hlKeyMember(*m), now, settling ? maphl::kNeverNew : maphl::kUnknownAge);
+  }
+}
+
 static bool toScreen(double lat, double lon, double cwx, double cwy, int* sx, int* sy) {
   double wx, wy;
   latLonToWorldPx(lat, lon, s_map_zoom, &wx, &wy);
@@ -472,6 +575,11 @@ static void teamDrawMapOverlay(lv_obj_t* parent, double cwx, double cwy) {
   using namespace teamui;
   mapFree();
   int sx, sy;
+  const uint32_t hl_now = millis();
+  highlightsObserve(hl_now);
+  s_hl_active = false;   // recomputed as the points are drawn
+  uint8_t self4[4];
+  s_io.selfKey4(self4);
   // Watched reports underneath everything: a dot in the report's colour, a
   // drone as an orange square with its label, its operator as a small grey dot.
   if (watchfeed::Store* w = s_watch) {
@@ -491,6 +599,8 @@ static void teamDrawMapOverlay(lv_obj_t* parent, double cwx, double cwy) {
         if (s_hit_n < kMapObjs) s_hits[s_hit_n++] = {(int16_t)sx, (int16_t)sy, 2, (uint8_t)i};
       }
       if (!toScreen(it.r.lat, it.r.lon, cwx, cwy, &sx, &sy)) continue;
+      if (mapIsNew(hlKeyWatch(it), hl_now, hlAge(hl_now, it.at_ms)))
+        mapRing(parent, sx, sy, watchfeed::levelRgb(it.r.level));
       if (drone) {
         // A plane in the report's colour, pointing where it is heading when known.
         lv_obj_t* dd = mapDot(parent, sx, sy, 22, watchfeed::levelRgb(it.r.level), 0x101418, LV_RADIUS_CIRCLE,
@@ -535,6 +645,8 @@ static void teamDrawMapOverlay(lv_obj_t* parent, double cwx, double cwy) {
   for (int i = 0; i < team::kMaxMarkers; i++) {
     const TeamWire::Marker* m = c->marker(i);
     if (!m || !toScreen(m->lat, m->lon, cwx, cwy, &sx, &sy)) continue;
+    if (memcmp(m->key4, self4, 4) != 0 && mapIsNew(hlKeyMarker(*m), hl_now, hlMarkerAge(*m)))
+      mapRing(parent, sx, sy, kNewPointRgb);
     // The kind's icon in its colour on a dark tile with a border in that colour.
     const uint32_t kc = TeamWire::kindRgb(m->kind);
     lv_obj_t* d = mapDot(parent, sx, sy, 22, 0x101418, kc, 5, LV_OPA_COVER);
@@ -547,6 +659,8 @@ static void teamDrawMapOverlay(lv_obj_t* parent, double cwx, double cwy) {
     if (!m || !toScreen(m->pos.lat, m->pos.lon, cwx, cwy, &sx, &sy)) continue;
     const team::Fresh fr = c->freshness(*m);
     if (fr == team::Fresh::Lost) continue;
+    if (memcmp(m->pos.key4, self4, 4) != 0 && mapIsNew(hlKeyMember(*m), hl_now, maphl::kUnknownAge))
+      mapRing(parent, sx, sy, TeamWire::colorRgb(m->pos.color));
     if (m->pos.sos) mapDot(parent, sx, sy, 30, 0xE53935, 0xE53935, LV_RADIUS_CIRCLE, LV_OPA_40);
     // Heading: the app's arrow just outside the disc, turned to the direction of travel.
     if (m->pos.has_motion && m->pos.speed_mps > 0.5f) {
@@ -1133,6 +1247,28 @@ static void buildWatch(lv_obj_t* b) {
     useChainedFont(l);
     lv_obj_align(l, LV_ALIGN_LEFT_MID, 0, 0);
   }
+  if (maphl::Table* t = highlights()) {
+    lv_obj_t* x = lv_btn_create(b);
+    styleButton(x);
+    lv_obj_set_size(x, LV_PCT(100), 32);
+    lv_obj_add_event_cb(x, [](lv_event_t*) {
+      if (!s_hl) return;
+      s_hl->choice = (uint8_t)((s_hl->choice + 1) % maphl::kChoices);
+      highlightsSave();
+      renderMapMarkers();
+      pageBuild();
+    }, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t* l = lv_label_create(x);
+    char v[16];
+    if (t->minutes()) snprintf(v, sizeof v, "%u min", (unsigned)t->minutes());
+    else snprintf(v, sizeof v, "%s", TR("off"));
+    snprintf(line, sizeof line, "%s: %s", TR("Flash new points"), v);
+    lv_label_set_text(l, line);
+    useChainedFont(l);
+    lv_obj_align(l, LV_ALIGN_LEFT_MID, 0, 0);
+    lbl(b, TR("A teammate, pin or watched report that appears on the map flashes with a ring for this long."),
+        &g_font_12, COLOR_SUB);
+  }
   lbl(b, TR("Watched channels:"), &g_font_12, COLOR_SUB);
   lv_obj_t* row = lv_obj_create(b);
   lv_obj_remove_style_all(row);
@@ -1282,6 +1418,14 @@ static void loopTick() {
   if (s_alarm && now - s_alarm_beep_ms >= 4000) {
     s_alarm_beep_ms = now;
     if (g_lv.task && !g_lv.task->isBuzzerQuiet()) uiPlaySlot(TOUCH_SND_MEN);
+  }
+  // Note new points as they arrive (the map may not be open).
+  static uint32_t last_hl = 0;
+  if (now - last_hl >= 2000) { last_hl = now; highlightsObserve(now); }
+  // A new point's highlight ran out: redraw without its ring.
+  if (s_hl_active && (int32_t)(now - s_hl_until) >= 0) {
+    s_hl_active = false;
+    Io::s_version++;
   }
   // Watched reports leave the map as they pass the time limit.
   static uint32_t last_watch = 0;
