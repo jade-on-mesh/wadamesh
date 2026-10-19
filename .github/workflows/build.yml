@@ -272,4 +272,10 @@ jobs:
           echo "::error title=build log tail::$(tail -40 build.log | sed 's/%/%25/g' | sed ':a;N;$!ba;s/\n/%0A/g')"
       - name: Size
         run: echo "::notice title=tdisplay-p4 size::application.bin $(stat -c %s dist/wadamesh-tdisplay-p4.bin) bytes (4 MB slot)"
+      # The OTA image and the merged one for a USB flash, like the other boards'.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tdisplay-p4
+          path: dist/wadamesh-tdisplay-p4*.bin
+          if-no-files-found: warn
 
