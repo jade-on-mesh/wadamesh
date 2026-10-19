@@ -65,7 +65,7 @@ class MediaMeshRadio : public Base {
   volatile uint8_t _cur = 0;        // profile the radio is tuned to
   bool _user_rxq = false;           // buffered receive as the user set it
   uint32_t _hold_start = 0;
-  uint32_t _switch_max_us = 0;      // largest retune since the last profile change
+  mediamesh::SwitchTimes _switch_times;   // retunes since the last profile change
   uint32_t _switch_life_max_us = 0; // largest ever (radio2.status max=)
   uint8_t _switch_samples = 0;
   uint32_t _switches = 0;
@@ -101,10 +101,10 @@ class MediaMeshRadio : public Base {
   uint32_t switchBudgetUs() const {
     // Until a few hops are measured, assume a conservative allowance.
     if (_switch_samples < mediamesh::kSwitchSamples) return mediamesh::kDefaultSwitchUs;
-    return (_switch_max_us * 11 + 9) / 10;
+    return (_switch_times.baseUs() * 11 + 9) / 10;
   }
 
-  void resetSwitchTest() { _switch_samples = 0; _switch_max_us = 0; }
+  void resetSwitchTest() { _switch_samples = 0; _switch_times.reset(); }
 
   void recalc() {
     if (!_main_known || !mediamesh::validParams(_cfg.p)) { _timing = mediamesh::Timing(); return; }
@@ -164,9 +164,23 @@ class MediaMeshRadio : public Base {
     return rc == RADIOLIB_ERR_NONE;
   }
 
-  void applyProfile(uint8_t profile) {
+  // `scanning`: a retune between two receive visits. The chip goes to standby
+  // without the wrapper's idle(), so its state stays "receiving" and the next
+  // startRecvScan() arms the receiver once instead of twice (the wrapper's
+  // stock arm and then ours with the preamble flag): about half the SPI
+  // commands per retune, and on the T-Deck every command is a chance to wait
+  // for the screen. If a packet finished just before the standby, the stock
+  // path is taken, as before. Returns whether the fast path was taken.
+  bool applyProfile(uint8_t profile, bool scanning = false) {
     syncOrigins();
-    this->idle();
+    bool fast = false;
+    if (scanning && this->isInRecvMode()) {
+      chip()->standby();
+      fast = !rxWaiting();   // in standby nothing new can land
+      if (!fast) this->idle();
+    } else {
+      this->idle();
+    }
     const bool ok = profile ? tune(_cfg.p, _timing.valid ? _timing.preamble[1] : mediamesh::kMaxAutoPreamble)
                             : tune(_main, mainPreamble());
     if (!ok) {
@@ -178,6 +192,7 @@ class MediaMeshRadio : public Base {
                                         : mainPreamble());
     }
     _cur = profile;
+    return fast && ok;   // the stock fallback leaves the wrapper idle
   }
 
   // A retune slower than this was held up waiting for the SPI bus (on the
@@ -194,13 +209,10 @@ class MediaMeshRadio : public Base {
       ++_switch_stalls;
       return;
     }
+    const uint32_t before = switchBudgetUs();
     if (_switch_samples < 255) ++_switch_samples;
-    if (us > _switch_max_us) {
-      _switch_max_us = us;
-      if (_switch_samples >= mediamesh::kSwitchSamples) recalc();
-    } else if (_switch_samples == mediamesh::kSwitchSamples) {
-      recalc();
-    }
+    _switch_times.add(us);
+    if (_switch_samples >= mediamesh::kSwitchSamples && switchBudgetUs() != before) recalc();
   }
 
   // Receive, with the preamble-detected flag latched while scanning. RadioLib's
@@ -212,12 +224,19 @@ class MediaMeshRadio : public Base {
   // nothing, on either profile. (Core's CustomLLCC68 asks for it the same
   // way.) Without radio2 the stock receive is kept: a latched preamble flag
   // nothing clears would read as "receiving" for good.
-  void startRecvScan() {
+  //
+  // `armed`: applyProfile's fast path left the wrapper "receiving", so only
+  // our arm is needed. If it fails, the stock path puts things right.
+  void startRecvScan(bool armed = false) {
+    if (armed && _scan && armScan() == RADIOLIB_ERR_NONE) return;
     this->startRecv();   // the wrapper's state (receiving) and the stock arm
     if (!_scan) return;
-    chip()->startReceive(RADIOLIB_SX126X_RX_TIMEOUT_INF,
-                         RADIOLIB_IRQ_RX_DEFAULT_FLAGS | (1UL << RADIOLIB_IRQ_PREAMBLE_DETECTED),
-                         RADIOLIB_IRQ_RX_DEFAULT_MASK, 0);
+    armScan();
+  }
+  int16_t armScan() {
+    return chip()->startReceive(RADIOLIB_SX126X_RX_TIMEOUT_INF,
+                                RADIOLIB_IRQ_RX_DEFAULT_FLAGS | (1UL << RADIOLIB_IRQ_PREAMBLE_DETECTED),
+                                RADIOLIB_IRQ_RX_DEFAULT_MASK, 0);
   }
 
   // How long a preamble with no header yet may keep the receiver on a profile:
@@ -292,8 +311,8 @@ class MediaMeshRadio : public Base {
         }
         _hold_start = 0;
         const uint32_t t0 = micros();
-        applyProfile(_cur ^ 1);
-        startRecvScan();
+        const bool armed = applyProfile(_cur ^ 1, true);
+        startRecvScan(armed);
         sampleSwitch(micros() - t0);
         ++_switches;
       } else {
@@ -389,7 +408,8 @@ class MediaMeshRadio : public Base {
   uint32_t mediaMeshSwitches() const { return _switches; }
   uint32_t mediaMeshSwitchErrors() const { return _switch_errors; }
   uint32_t mediaMeshSwitchStalls() const { return _switch_stalls; }
-  uint32_t mediaMeshSwitchUs() const { return _switch_samples ? _switch_max_us : 0; }
+  uint32_t mediaMeshSwitchUs() const { return _switch_samples ? _switch_times.baseUs() : 0; }
+  uint32_t mediaMeshSwitchTypUs() const { return _switch_samples ? _switch_times.typicalUs() : 0; }
   uint32_t mediaMeshSwitchMaxUs() const { return _switch_life_max_us; }
   uint32_t mediaMeshSwitchBudgetUs() const { return switchBudgetUs(); }
   uint8_t mediaMeshSwitchSamples() const { return _switch_samples; }

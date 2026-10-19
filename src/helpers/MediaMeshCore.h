@@ -842,6 +842,60 @@ inline bool parseRadio2(const char* text, Config& c, const char** why) {
   return true;
 }
 
+// Measured retune times, for the per-switch budget. The budget used to be the
+// longest retune seen (under the stall cutoff). On a radio alone that is close
+// to every retune (~0.9 ms on a repeater), but on the T-Deck the screen shares
+// the SPI bus: most retunes take ~1 ms and a few wait for a redraw to let go
+// of the bus, so the longest crept up towards the cutoff and the budget sat at
+// ~8.7 ms. That sizes every cycle for the rare slow retune: radio2 gets a
+// fraction of the listening time and needs a longer preamble. Now the budget
+// follows the 95th percentile of the recent retunes; the slow few just make
+// that one cycle a little longer, which the preambles' rounding absorbs.
+struct SwitchTimes {
+  static constexpr uint32_t kBinUs = 125;
+  static constexpr uint8_t kBins = 64;              // 0-8 ms; past that is a stall
+  static constexpr uint16_t kForPercentile = 32;    // until then: the longest seen
+  static constexpr uint16_t kAgeAt = 4096;          // halve the counts: follow recent load
+  static constexpr uint8_t kBudgetPercentile = 95;
+  uint16_t bins[kBins] = {};
+  uint16_t total = 0;
+  uint32_t max_us = 0;   // longest since the last reset
+
+  void reset() { *this = SwitchTimes(); }
+
+  void add(uint32_t us) {
+    uint32_t b = us / kBinUs;
+    if (b >= kBins) b = kBins - 1;
+    ++bins[b];
+    if (us > max_us) max_us = us;
+    if (++total >= kAgeAt) {
+      total = 0;
+      for (uint8_t i = 0; i < kBins; ++i) { bins[i] /= 2; total += bins[i]; }
+    }
+  }
+
+  // The upper edge of the bin `pct` percent of the retunes fall in, never past
+  // the longest seen. 0 with nothing measured.
+  uint32_t percentileUs(uint8_t pct) const {
+    if (!total) return max_us;
+    const uint32_t want = ((uint32_t)total * pct + 99) / 100;
+    uint32_t seen = 0;
+    for (uint8_t i = 0; i < kBins; ++i) {
+      seen += bins[i];
+      if (seen >= want) {
+        const uint32_t edge = (uint32_t)(i + 1) * kBinUs;
+        return edge < max_us ? edge : max_us;
+      }
+    }
+    return max_us;
+  }
+
+  uint32_t typicalUs() const { return percentileUs(50); }
+
+  // What the guarded budget is built on.
+  uint32_t baseUs() const { return total < kForPercentile ? max_us : percentileUs(kBudgetPercentile); }
+};
+
 // Live figures a getter reports; the glue fills them from the radio.
 struct Stats {
   uint32_t rx[2] = {};
@@ -850,6 +904,7 @@ struct Stats {
   uint32_t errors = 0;
   uint32_t max_us = 0;            // longest retune seen (lifetime diagnostic)
   uint32_t stalls = 0;            // retunes held up waiting for the SPI bus (left out of the timing)
+  uint32_t typ_us = 0;            // typical (median) retune since the last profile change
   uint8_t samples = 0;            // retunes measured since the last profile change
 };
 
@@ -991,6 +1046,10 @@ inline CliResult handleCli(const char* cmd, Runtime& r, const Env& env, char* re
                (unsigned long)env.stats.tx[0], (unsigned long)env.stats.tx[1], (unsigned long)env.stats.switches,
                (unsigned long)env.stats.errors, (unsigned long)env.stats.max_us, env.main_preamble,
                t.valid ? t.preamble[1] : 0);
+      if (env.stats.typ_us) {
+        const size_t used = strlen(reply);
+        if (used < cap) snprintf(reply + used, cap - used, " typ=%luus", (unsigned long)env.stats.typ_us);
+      }
       if (env.stats.stalls) {
         const size_t used = strlen(reply);
         if (used < cap) snprintf(reply + used, cap - used, " stalls=%lu", (unsigned long)env.stats.stalls);
