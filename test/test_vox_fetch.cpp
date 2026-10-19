@@ -44,6 +44,9 @@ struct Sim : VoxFetchIo {
   std::vector<uint8_t> payload;       // what the sender holds
   int pb = VoxWire::kBytesPerPacket;  // codec bytes per packet
   std::vector<Event> inbox;           // to deliver to the engine
+  std::vector<int> drop_first;        // indices lost on the first burst only
+  int bursts = 0;
+  int channel_hops = -1;              // hops reported for channel packets
   std::map<uint32_t, std::vector<uint8_t>> store;
   VoxFetch* fetch = nullptr;
 
@@ -79,10 +82,14 @@ struct Sim : VoxFetchIo {
     if (idx.empty()) for (int i = 0; i < total; i++) idx.push_back(i);
     const uint32_t gap = on_channel ? 4 * air + 150 : 2 * air + 150;
     uint32_t t = start;
+    const bool first = bursts++ == 0;
     for (int i : idx) {
       t += gap;
       served_packets++;
       if (!lossy_link_ok || rnd() < loss) continue;
+      bool drop = false;
+      for (int d : drop_first) drop |= first && d == i;
+      if (drop) continue;
       const size_t off = (size_t)i * pb;
       const size_t n = payload.size() - off < (size_t)pb ? payload.size() - off : (size_t)pb;
       Event e{t, {}, on_channel ? 2 : -1};
@@ -174,7 +181,7 @@ struct Sim : VoxFetchIo {
         if ((int32_t)(now - inbox[i].at) >= 0) {
           Event e = inbox[i];
           inbox.erase(inbox.begin() + (long)i);
-          fetch->onPayload(e.data.data(), e.data.size(), e.channel, via);
+          fetch->onPayload(e.data.data(), e.data.size(), e.channel, via, e.channel >= 0 ? channel_hops : -1);
         } else {
           i++;
         }
@@ -387,6 +394,61 @@ int main() {
     assert(gotIt(sim, f) && !strcmp(f.statusText(kSid, buf, sizeof buf), "Voice 9s - tap to play"));
     printf("voice: %d requests, %d packets served for 6\n", sim.raw_requests, sim.served_packets);
   }
+
+  // 13. A push lands before its announcement (the two travel on different
+  //     radios): the packets are kept and the photo completes on announce.
+  {
+    Sim sim; setup(sim, 2750); sim.channel_hops = 0;
+    VoxFetch f(sim); sim.fetch = &f;
+    sim.serve({}, true, sim.now, true);
+    sim.run(60000);
+    assert(f.status(kSid) == VoxFetch::kUnknown);
+    f.onEnvelope(envFor(sim), nullptr, "Jade", 2, false);
+    assert(gotIt(sim, f) && sim.raw_requests + sim.dm_requests + sim.channel_requests == 0);
+    printf("push before announcement: complete on announce\n");
+  }
+
+  // 14. A push to a listener that didn't ask loses two packets: it shows the
+  //     download, then asks for just those two once the push stops.
+  {
+    Sim sim; setup(sim, 2750); sim.channel_hops = 0; sim.drop_first = {3, 9};
+    VoxFetch f(sim); sim.fetch = &f;
+    f.onEnvelope(envFor(sim), nullptr, "Jade", 2, false);
+    sim.serve({}, true, sim.now, true);
+    sim.run(4 * sim.air + 200);
+    char buf[64];
+    assert(!strcmp(f.statusText(kSid, buf, sizeof buf), "Downloading 1/18"));
+    const int pushed = sim.served_packets;
+    sim.run(120000);
+    assert(gotIt(sim, f) && sim.served_packets == pushed + 2);
+    printf("push with loss: finished with %d extra packets\n", sim.served_packets - pushed);
+  }
+
+  // 15. A requested transfer whose last packet is lost: the stall is noticed
+  //     a few packet gaps after the stream stops, not after a full request
+  //     round trip (8 s and up).
+  {
+    Sim sim; setup(sim, 2750); sim.drop_first = {17};
+    VoxFetch f(sim); sim.fetch = &f;
+    f.onEnvelope(envFor(sim), sim.sender_pub, nullptr, -1, true);
+    const uint32_t start = sim.now;
+    while (!gotIt(sim, f) && sim.now - start < 120000) sim.run(50);
+    assert(gotIt(sim, f) && sim.raw_requests == 2);
+    // Burst: 2 airtimes out, 18 gaps; the stall wait (the receiver's 1-hop
+    // packet gap, as voice_service.dart's _packetGap); the answer.
+    const uint32_t gap = 2 * sim.air + 150;
+    const uint32_t rx_gap = (uint32_t)(sim.air + 2.5 * 1.15 * sim.air + 400);
+    const uint32_t bound = 2 * sim.air + 18 * gap + VoxFetch::stallWait(rx_gap) + 2 * sim.air + gap + 500;
+    assert(sim.now - start <= bound);   // was ~13 s later: 3 gaps + 2 trips + 8 s
+    printf("tail loss: complete after %lu ms\n", (unsigned long)(sim.now - start));
+  }
+
+  // 16. The shared timing (lib/vox/vox_timing.dart).
+  assert(VoxFetch::gapRequestDelay(false, 800, 210) == 610);
+  assert(VoxFetch::gapRequestDelay(true, 800, 210) == 1800);
+  assert(VoxFetch::stallWait(800) == 4900);
+  assert(VoxFetch::shouldFinishPassive(18, 36) && !VoxFetch::shouldFinishPassive(17, 36));
+  assert(!VoxFetch::shouldFinishPassive(36, 36) && !VoxFetch::shouldFinishPassive(0, 0));
 
   printf("all VoxFetch scenarios pass\n");
   return 0;

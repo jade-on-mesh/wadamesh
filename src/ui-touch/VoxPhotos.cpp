@@ -59,6 +59,7 @@ void normName(const char* in, char* out, size_t cap) {
 class MeshIo : public VoxFetchIo {
  public:
   uint32_t nowMs() override { return millis(); }
+  uint32_t random32() override { return esp_random(); }
 
   void selfKey6(uint8_t out[6]) override { memcpy(out, the_mesh.getSelfPubKey(), 6); }
 
@@ -250,7 +251,7 @@ void onChannelText(const char* text, int channel_idx) {
 }
 
 void onPayload(const uint8_t* data, size_t len, int channel_idx, uint8_t via, int hops) {
-  g_fetch.onPayload(data, len, channel_idx, via);
+  g_fetch.onPayload(data, len, channel_idx, via, hops);
   g_serve.onPayload(data, len, channel_idx, hops);
 }
 

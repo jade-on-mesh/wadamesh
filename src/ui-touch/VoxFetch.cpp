@@ -13,6 +13,7 @@ inline int imin(int a, int b) { return a < b ? a : b; }
 
 VoxFetch::~VoxFetch() {
   for (auto& s : sessions_) release(s);
+  free(orphans_);
 }
 
 VoxFetch::Session* VoxFetch::find(uint32_t sid) {
@@ -87,7 +88,40 @@ void VoxFetch::onEnvelope(const VoxWire::Envelope& env, const uint8_t* sender_pu
     s->name[sizeof s->name - 1] = '\0';
   }
   if (channel >= 0) s->channel = channel;
+  adoptOrphans(*s);
   if (start) request(env.sid);
+}
+
+void VoxFetch::keepOrphan(const VoxWire::Packet& p, uint8_t via, bool relayed) {
+  if (p.len <= 0 || p.len > kOrphanBytes) return;
+  if (!orphans_) {
+    orphans_ = (Orphan*)calloc(kMaxOrphans, sizeof(Orphan));   // ~8 KB: PSRAM
+    if (!orphans_) return;
+  }
+  for (int i = 0; i < kMaxOrphans; i++) {
+    const Orphan& o = orphans_[i];
+    if (o.len && o.sid == p.sid && o.index == p.index) return;   // have it
+  }
+  Orphan& o = orphans_[orphan_next_];
+  orphan_next_ = (orphan_next_ + 1) % kMaxOrphans;
+  o.sid = p.sid;
+  o.index = p.index;
+  o.len = (uint8_t)p.len;
+  o.via = via;
+  o.relayed = relayed;
+  memcpy(o.data, p.data, (size_t)p.len);
+}
+
+void VoxFetch::adoptOrphans(Session& s) {
+  if (!orphans_ || s.st == kComplete) return;
+  for (int i = 0; i < kMaxOrphans; i++) {
+    Orphan& o = orphans_[i];
+    if (!o.len || o.sid != s.sid) continue;
+    if (o.relayed) s.relayed = true;
+    VoxWire::Packet p{o.sid, o.index, o.data, o.len};
+    o.len = 0;
+    if (s.st != kComplete) accept(s, p, o.via);
+  }
 }
 
 bool VoxFetch::request(uint32_t sid) {
@@ -130,12 +164,19 @@ uint32_t VoxFetch::packetGap(bool flood, int h) {
   return (uint32_t)(air + imin(h, 2) * 2.5 * relay_air + 400);
 }
 
+uint32_t VoxFetch::zeroHopGap() {
+  const uint32_t g = io_.packetAirMs() + 60;   // VoxServe::zeroHopGap
+  return g > 150 ? g : 150;
+}
+
 uint32_t VoxFetch::waitFor(Session& s) {
   const int h = hops(s);
+  // Once packets flow the stream is live: silence for a few packet gaps means
+  // its tail was lost, not that the request is still on its way.
+  if (s.st == kReceiving) return stallWait(packetGap(s.last == kChannel, h));
   const uint32_t hop_ms = io_.packetAirMs() * 2 + 700;
   const uint32_t trips = s.last == kDm ? 5 : s.last == kChannel ? 3 : 2;
-  const uint32_t wait = trips * (uint32_t)(h + 1) * hop_ms + 8000;
-  return s.st == kReceiving ? packetGap(s.last == kChannel, h) * 3 + wait : wait;
+  return trips * (uint32_t)(h + 1) * hop_ms + 8000;
 }
 
 void VoxFetch::arm(Session& s, uint32_t ms) {
@@ -229,6 +270,12 @@ void VoxFetch::attempt(Session& s) {
 }
 
 void VoxFetch::onTimeout(Session& s) {
+  if (s.st == kRemote) {
+    // Unasked packets stopped arriving: finish it if most of it is here.
+    const int got = s.storage ? s.asm_.received() : 0;
+    if (shouldFinishPassive(got, s.total)) request(s.sid);
+    return;
+  }
   if (s.st != kRequesting && s.st != kReceiving) return;
   const int got = s.storage ? s.asm_.received() : 0;
   if (got > s.at_last_attempt) {
@@ -255,13 +302,19 @@ void VoxFetch::fail(Session& s, const char* why) {
 
 // --------------------------------------------------------------- packets
 
-void VoxFetch::onPayload(const uint8_t* data, size_t len, int channel, uint8_t via) {
-  (void)channel;
+void VoxFetch::onPayload(const uint8_t* data, size_t len, int channel, uint8_t via, int hops) {
   if (!data || len == 0 || VoxWire::isFetchRequest(data, len)) return;   // this radio doesn't serve
   VoxWire::Packet p;
   if (!VoxWire::parsePacket(data, len, &p)) return;
+  // Raw data doesn't say how far it came: count it as relayed.
+  const bool relayed = channel < 0 || hops != 0;
   Session* s = find(p.sid);
-  if (!s || s->st == kComplete) return;
+  if (!s) {
+    keepOrphan(p, via, relayed);
+    return;
+  }
+  if (s->st == kComplete) return;
+  if (relayed) s->relayed = true;
   accept(*s, p, via);
 }
 
@@ -282,10 +335,15 @@ void VoxFetch::accept(Session& s, const VoxWire::Packet& p, uint8_t via) {
     s.st = kReceiving;
     if (p.index == s.expected_last) {
       // The sender's burst is over, so the gaps are final: ask again soon.
-      arm(s, packetGap(s.last == kChannel, hops(s)) + 1500);
+      arm(s, gapRequestDelay(s.relayed, packetGap(s.last == kChannel, hops(s)), zeroHopGap()));
     } else {
       arm(s, waitFor(s));
     }
+  } else if (s.st == kRemote && s.channel >= 0) {
+    // Pushed, or sent for another listener: if it stops short, ask for the
+    // rest. Everyone in range hears the same push stop, so spread out.
+    const uint32_t gap = s.relayed ? packetGap(true, 0) : zeroHopGap();
+    arm(s, stallWait(gap) + io_.random32() % 1500);
   }
   io_.changed(s.sid);
 }
@@ -354,7 +412,9 @@ const char* VoxFetch::statusText(uint32_t sid, char* buf, size_t cap) const {
   switch (st) {
     case kUnknown:
     case kRemote:
-      snprintf(buf, cap, "%s", voice ? ready : "Photo - tap to download");
+      // Pushed packets arriving unasked show as a download in progress.
+      if (got > 0) snprintf(buf, cap, "Downloading %d/%d", got, total);
+      else snprintf(buf, cap, "%s", voice ? ready : "Photo - tap to download");
       break;
     case kRequesting:
       snprintf(buf, cap, "%s", !s ? "Requesting..."
