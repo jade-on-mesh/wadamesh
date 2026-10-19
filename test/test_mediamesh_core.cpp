@@ -147,6 +147,19 @@ static void testMainLockdown() {
   assert(res.save && r.saved.main_ok == 0);
 }
 
+// radio2.status reports how long ago radio2 last heard a valid packet.
+static void testHeard() {
+  Runtime r; defaults(r.saved);
+  Env e = E();
+  char out[300];
+  run("set radio2 911.15,250,7,5,rxtx", r, e, out);
+  run("get radio2.status", r, e, out);
+  assert(!strstr(out, "heard="));
+  e.stats.heard_s = 42;
+  run("get radio2.status", r, e, out);
+  assert(strstr(out, " heard=42s"));
+}
+
 // mediamesh.share: strict MediaMesh unless sharing with main-mesh nodes.
 static void testShare() {
   // Off: requests and answers follow tx.media's route, as keymindCascade.
@@ -683,6 +696,7 @@ int main() {
   testBlob();
   testShare();
   testMainLockdown();
+  testHeard();
   testCrossTable();
   testCli();
   testTemp2();

@@ -182,6 +182,7 @@ Env makeEnv() {
   e.stats.max_us = radio_driver.mediaMeshSwitchMaxUs();
   e.stats.stalls = radio_driver.mediaMeshSwitchStalls();
   e.stats.typ_us = radio_driver.mediaMeshSwitchTypUs();
+  if (s_r2_heard) e.stats.heard_s = (uint32_t)(millis() - s_r2_heard_ms) / 1000;
   e.stats.samples = radio_driver.mediaMeshSwitchSamples();
 #else
   e.main_saved = savedPrimary();
