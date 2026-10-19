@@ -33,7 +33,7 @@ constexpr uint32_t kBootGraceMs = 40000;
 constexpr uint8_t kChannels = 13;
 
 // The queue lives in PSRAM: internal RAM is the scarce one on these boards.
-flock::Alert* s_q = nullptr;
+flockyou::Alert* s_q = nullptr;
 volatile uint8_t s_head = 0, s_tail = 0;
 portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
 
@@ -48,7 +48,7 @@ const char* s_wifi_why = "off";
 const char* s_ble_why = "off";
 Diag s_diag;
 
-void push(const flock::Alert& a) {
+void push(const flockyou::Alert& a) {
   if (!s_q) return;
   portENTER_CRITICAL(&s_mux);
   const uint8_t next = (uint8_t)((s_head + 1) % kQueue);
@@ -67,8 +67,8 @@ void wifiRx(void* buf, wifi_promiscuous_pkt_type_t type) {
   const auto* p = static_cast<const wifi_promiscuous_pkt_t*>(buf);
   s_diag.wifi_frames++;
   if (p->rx_ctrl.rssi < -92) return;
-  flock::Alert a;
-  if (!flock::parseWifiFrame(p->payload, (int)p->rx_ctrl.sig_len, p->rx_ctrl.rssi, (uint8_t)p->rx_ctrl.channel, a))
+  flockyou::Alert a;
+  if (!flockyou::parseWifiFrame(p->payload, (int)p->rx_ctrl.sig_len, p->rx_ctrl.rssi, (uint8_t)p->rx_ctrl.channel, a))
     return;
   s_diag.wifi_hits++;
   push(a);
@@ -80,19 +80,19 @@ class BleCb final : public NimBLEAdvertisedDeviceCallbacks {
   void onResult(NimBLEAdvertisedDevice* d) override {
     if (!s_wanted || !d) return;
     s_diag.ble_adv++;
-    flock::BleAdv adv;
-    flock::parseAdv(d->getPayload(), d->getPayloadLength(), adv);
+    flockyou::BleAdv adv;
+    flockyou::parseAdv(d->getPayload(), d->getPayloadLength(), adv);
     const NimBLEAddress addr = d->getAddress();
     // getNative() is the stack's little-endian order; the OUI is the last three bytes there.
     const uint8_t* n = addr.getNative();
     const uint8_t disp[6] = {n[5], n[4], n[3], n[2], n[1], n[0]};
-    const flock::Method m = flock::classifyBle(disp, d->getAddressType() == BLE_ADDR_PUBLIC, adv);
-    if (m == flock::Method::None) return;
+    const flockyou::Method m = flockyou::classifyBle(disp, d->getAddressType() == BLE_ADDR_PUBLIC, adv);
+    if (m == flockyou::Method::None) return;
     s_diag.ble_hits++;
-    flock::Alert a;
-    a.source = flock::Source::Ble;
+    flockyou::Alert a;
+    a.source = flockyou::Source::Ble;
     a.method = m;
-    flock::macToStr(disp, a.mac, sizeof a.mac);
+    flockyou::macToStr(disp, a.mac, sizeof a.mac);
     memcpy(a.name, adv.name, sizeof a.name);
     a.rssi = (int16_t)d->getRSSI();
     push(a);
@@ -102,7 +102,7 @@ BleCb s_ble_cb;
 
 bool ensureQueue() {
   if (s_q) return true;
-  s_q = static_cast<flock::Alert*>(heap_caps_calloc(kQueue, sizeof(flock::Alert), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  s_q = static_cast<flockyou::Alert*>(heap_caps_calloc(kQueue, sizeof(flockyou::Alert), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
   return s_q != nullptr;
 }
 
@@ -244,7 +244,7 @@ void tick(uint32_t now) {
   bleTick(now);
 }
 
-bool pop(flock::Alert& out) {
+bool pop(flockyou::Alert& out) {
   if (!s_q) return false;
   bool got = false;
   portENTER_CRITICAL(&s_mux);

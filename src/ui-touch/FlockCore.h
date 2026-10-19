@@ -23,7 +23,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-namespace flock {
+namespace flockyou {
 
 // ---- small helpers ------------------------------------------------------------------------
 inline char lower(char c) { return (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c; }
@@ -634,4 +634,4 @@ inline void loadSettings(const char* t, Settings& s) {
   }
 }
 
-}  // namespace flock
+}  // namespace flockyou

@@ -44,7 +44,7 @@ bool wanted();
 void tick(uint32_t now_ms);
 
 // Next queued detection; false when none.
-bool pop(flock::Alert& out);
+bool pop(flockyou::Alert& out);
 
 bool wifiActive();   // sniffing now
 bool bleActive();    // our scan is running now

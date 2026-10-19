@@ -14,7 +14,7 @@
 
 namespace flockui {
 
-using flock::Detection;
+using flockyou::Detection;
 
 constexpr int kRows = 160;              // detection table (PSRAM)
 constexpr int kMaxCams = 40000;         // known cameras (PSRAM, 12 bytes each)
@@ -30,13 +30,13 @@ static const char* const kLogOldRel = "/flock-you/detections.old.csv";
 static const char* const kCamsRel = "/flock-you/cameras.csv";
 static const char* const kMarkedRel = "/flock-you/marked.csv";
 
-static flock::Settings s_cfg;
+static flockyou::Settings s_cfg;
 static bool s_cfg_loaded = false;
 static bool s_cfg_found = false;   // the app has been used on this radio
-static flock::Table<kRows>* s_tab = nullptr;
-static flock::CamDb s_cams;
-static flock::Cam* s_cam_buf = nullptr;
-static flock::SendGate s_gate;
+static flockyou::Table<kRows>* s_tab = nullptr;
+static flockyou::CamDb s_cams;
+static flockyou::Cam* s_cam_buf = nullptr;
+static flockyou::SendGate s_gate;
 static uint32_t s_ver = 0;       // anything the page shows changed
 static uint32_t s_map_ver = 0;   // anything the map shows changed
 static char s_share_err[48] = "";   // why the last post did not go out
@@ -88,7 +88,7 @@ static void ensureDir(fs::FS* fs) {
 
 static void saveCfg() {
   char buf[160];
-  const size_t n = flock::saveSettings(s_cfg, buf, sizeof buf);
+  const size_t n = flockyou::saveSettings(s_cfg, buf, sizeof buf);
   teamui::s_io.writeFile("flockyou", (const uint8_t*)buf, n);
 }
 
@@ -99,7 +99,7 @@ static void loadCfg() {
   size_t n = 0;
   if (teamui::s_io.readFile("flockyou", (uint8_t*)buf, sizeof buf - 1, &n)) {
     buf[n] = 0;
-    flock::loadSettings(buf, s_cfg);
+    flockyou::loadSettings(buf, s_cfg);
     s_cfg_found = true;
   }
 }
@@ -125,9 +125,9 @@ static void appendLog(const Detection& d) {
   }
   File f = fs->open(path, fresh ? "w" : "a");
   if (!f) return;
-  if (fresh) f.println(flock::kLogHeader);
+  if (fresh) f.println(flockyou::kLogHeader);
   char line[200];
-  flock::formatLogRow(d, line, sizeof line);
+  flockyou::formatLogRow(d, line, sizeof line);
   f.println(line);
   f.close();
 }
@@ -149,7 +149,7 @@ static void loadLogTail() {
   while (f.available()) {
     String line = f.readStringUntil('\n');
     Detection d;
-    if (flock::parseLogRow(line.c_str(), d)) s_tab->load(d);
+    if (flockyou::parseLogRow(line.c_str(), d)) s_tab->load(d);
   }
   f.close();
 }
@@ -182,7 +182,7 @@ static bool ensureCamBuf(int want) {
   if (s_cam_buf) { heap_caps_free(s_cam_buf); s_cam_buf = nullptr; s_cams.attach(nullptr, 0); }
   int cap = want;
   while (cap >= 256 && !s_cam_buf) {
-    s_cam_buf = static_cast<flock::Cam*>(heap_caps_malloc((size_t)cap * sizeof(flock::Cam), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    s_cam_buf = static_cast<flockyou::Cam*>(heap_caps_malloc((size_t)cap * sizeof(flockyou::Cam), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
     if (!s_cam_buf) cap /= 2;
   }
   if (!s_cam_buf) return false;
@@ -210,9 +210,9 @@ static void camsReload() {
 }
 
 static void camTake(const char* line) {
-  flock::Cam c;
-  if (!flock::parseCamLine(line, c)) return;
-  if (s_cam_state == CamLoad::Marked) c.flags |= flock::kCamMine;
+  flockyou::Cam c;
+  if (!flockyou::parseCamLine(line, c)) return;
+  if (s_cam_state == CamLoad::Marked) c.flags |= flockyou::kCamMine;
   if (!s_cams.add(c)) { s_cams_truncated = true; return; }
   if (s_cam_state == CamLoad::Marked) s_cams_marked++;
   else s_cams_from_file++;
@@ -279,7 +279,7 @@ static bool post(const char* text) {
 
 static bool shareDetection(Detection& d) {
   char text[160];
-  flock::formatChannelAlert(d, text, sizeof text);
+  flockyou::formatChannelAlert(d, text, sizeof text);
   if (!post(text)) return false;
   d.sent = true;
   s_gate.sent(d.alert.mac, millis());
@@ -293,7 +293,7 @@ static void shareTick(uint32_t now) {
   for (int i = 0; i < s_tab->n; i++) {
     Detection& d = s_tab->rows[i];
     if (d.historical || d.sent || !d.has_gps) continue;
-    if (flock::confidence(d.alert.method) < s_cfg.share_conf) continue;
+    if (flockyou::confidence(d.alert.method) < s_cfg.share_conf) continue;
     if (now - d.last_ms > kShareFreshMs) continue;
     if (!s_gate.allow(d.alert.mac, now)) continue;
     shareDetection(d);
@@ -304,14 +304,14 @@ static void shareTick(uint32_t now) {
 // ---- detections ----------------------------------------------------------------------------
 static bool ensureTable() {
   if (s_tab) return true;
-  void* m = heap_caps_malloc(sizeof(flock::Table<kRows>), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  void* m = heap_caps_malloc(sizeof(flockyou::Table<kRows>), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   if (!m) return false;
-  s_tab = new (m) flock::Table<kRows>();
+  s_tab = new (m) flockyou::Table<kRows>();
   loadLogTail();
   return true;
 }
 
-static void hear(const flock::Alert& a, uint32_t now) {
+static void hear(const flockyou::Alert& a, uint32_t now) {
   bool is_new = false;
   Detection& d = s_tab->hear(a, now, epochNow(), &is_new);
   double la, lo;
@@ -327,10 +327,10 @@ static void hear(const flock::Alert& a, uint32_t now) {
   if (d.has_gps && (!had || is_new)) s_map_ver++;
   if (d.count == 1) {   // new this session: log it, and say so when it is a real one
     appendLog(d);
-    if (flock::confidence(d.alert.method) >= flock::kConfMed) {
+    if (flockyou::confidence(d.alert.method) >= flockyou::kConfMed) {
       char m[80];
-      snprintf(m, sizeof m, "%s %s %ddBm", d.alert.method == flock::Method::BleRaven ? TR("Raven sensor") : TR("Flock device"),
-               flock::methodLabel(d.alert.method), d.alert.rssi);
+      snprintf(m, sizeof m, "%s %s %ddBm", d.alert.method == flockyou::Method::BleRaven ? TR("Raven sensor") : TR("Flock device"),
+               flockyou::methodLabel(d.alert.method), d.alert.rssi);
       toast(m, 2600);
       chime();
     }
@@ -349,7 +349,7 @@ static void proximityTick(uint32_t now) {
     if (was != s_near_idx) s_ver++;
     return;
   }
-  const double radius = flock::kRadiusM[s_cfg.radius % flock::kRadiusChoices];
+  const double radius = flockyou::kRadiusM[s_cfg.radius % flockyou::kRadiusChoices];
   double dm = 0;
   const int idx = s_cams.nearest(la, lo, radius, &dm);
   s_near_idx = idx;
@@ -363,11 +363,11 @@ static void proximityTick(uint32_t now) {
   }
   slot->idx = idx;
   slot->at = now;
-  const flock::Cam& c = s_cams.at(idx);
+  const flockyou::Cam& c = s_cams.at(idx);
   const double cl = c.lat_e6 / 1e6, co = c.lon_e6 / 1e6;
   char brg[16];
-  watchfeed::bearingLabel((float)flock::bearingDeg(la, lo, cl, co), brg, sizeof brg);
-  const bool sees = c.dir >= 0 && flock::facing(c.dir, flock::bearingDeg(cl, co, la, lo));
+  watchfeed::bearingLabel((float)flockyou::bearingDeg(la, lo, cl, co), brg, sizeof brg);
+  const bool sees = c.dir >= 0 && flockyou::facing(c.dir, flockyou::bearingDeg(cl, co, la, lo));
   char m[96];
   snprintf(m, sizeof m, "%s %.0f m %s%s", TR("Flock camera"), dm, brg, sees ? TR(", facing you") : "");
   toast(m, 3200);
@@ -471,19 +471,19 @@ static void drawCameras(lv_obj_t* parent, double cwx, double cwy) {
     for (int i = 0; i < gw * gh; i++) { grid[i] = -1; count[i] = 0; }
   int sx, sy;
   for (int i = 0; i < s_cams.size(); i++) {
-    const flock::Cam& c = s_cams.at(i);
+    const flockyou::Cam& c = s_cams.at(i);
     if (c.lat_e6 > la_hi || c.lat_e6 < la_lo || c.lon_e6 < lo_lo || c.lon_e6 > lo_hi) continue;
     if (!teamui::toScreen(c.lat_e6 / 1e6, c.lon_e6 / 1e6, cwx, cwy, &sx, &sy)) continue;
     if (cluster && can_cluster) {
       const int gx = (sx + 12) / kCell, gy = (sy + 12) / kCell;
       if (gx < 0 || gy < 0 || gx >= gw || gy >= gh) continue;
       const int k = gy * gw + gx;
-      if (grid[k] < 0 || (c.flags & flock::kCamMine)) grid[k] = i;
+      if (grid[k] < 0 || (c.flags & flockyou::kCamMine)) grid[k] = i;
       if (count[k] < 0xFFFF) count[k]++;
       continue;
     }
     if (s_obj_n >= kMapObjs - 2) break;
-    const uint32_t col = (c.flags & flock::kCamMine) ? kMineRgb : kCamRgb;
+    const uint32_t col = (c.flags & flockyou::kCamMine) ? kMineRgb : kCamRgb;
     lv_obj_t* d = dot(parent, sx, sy, 20, 0x101418, col, 5, LV_OPA_COVER);
     glyph(d, mapicons::kVideocam, col);
     // Which way it looks: an arrow just outside the tile.
@@ -499,9 +499,9 @@ static void drawCameras(lv_obj_t* parent, double cwx, double cwy) {
   if (!cluster || !can_cluster) return;
   for (int k = 0; k < gw * gh && s_obj_n < kMapObjs - 2; k++) {
     if (grid[k] < 0) continue;
-    const flock::Cam& c = s_cams.at(grid[k]);
+    const flockyou::Cam& c = s_cams.at(grid[k]);
     if (!teamui::toScreen(c.lat_e6 / 1e6, c.lon_e6 / 1e6, cwx, cwy, &sx, &sy)) continue;
-    const uint32_t col = (c.flags & flock::kCamMine) ? kMineRgb : kCamRgb;
+    const uint32_t col = (c.flags & flockyou::kCamMine) ? kMineRgb : kCamRgb;
     if (count[k] == 1) {
       lv_obj_t* d = dot(parent, sx, sy, 18, 0x101418, col, 5, LV_OPA_COVER);
       glyph(d, mapicons::kVideocam, col);
@@ -523,11 +523,11 @@ static void drawDetections(lv_obj_t* parent, double cwx, double cwy) {
   for (int i = 0; i < s_tab->n && s_obj_n < kMapObjs - 2; i++) {
     const Detection& d = s_tab->rows[i];
     if (!d.has_gps || !teamui::toScreen(d.lat, d.lon, cwx, cwy, &sx, &sy)) continue;
-    const bool wifi = d.alert.source == flock::Source::Wifi;
+    const bool wifi = d.alert.source == flockyou::Source::Wifi;
     const uint32_t col = wifi ? kWifiRgb : kBleRgb;
-    const uint8_t conf = flock::confidence(d.alert.method);
-    const lv_opa_t opa = d.historical ? LV_OPA_50 : conf >= flock::kConfMed ? LV_OPA_COVER : LV_OPA_70;
-    lv_obj_t* o = dot(parent, sx, sy, conf >= flock::kConfHigh ? 22 : 16, col, d.historical ? 0x5F6368 : 0xFFFFFF,
+    const uint8_t conf = flockyou::confidence(d.alert.method);
+    const lv_opa_t opa = d.historical ? LV_OPA_50 : conf >= flockyou::kConfMed ? LV_OPA_COVER : LV_OPA_70;
+    lv_obj_t* o = dot(parent, sx, sy, conf >= flockyou::kConfHigh ? 22 : 16, col, d.historical ? 0x5F6368 : 0xFFFFFF,
                       LV_RADIUS_CIRCLE, opa);
     glyph(o, wifi ? mapicons::kVideocam : mapicons::kSensors, 0x000000);
     if (!d.historical && s_map_zoom >= 14) {
@@ -570,11 +570,11 @@ static void detectionSheet(int i) {
   else if (d.epoch && epochNow() > d.epoch) snprintf(ago, sizeof ago, "%lu h ago (log)", (unsigned long)((epochNow() - d.epoch) / 3600));
   else snprintf(ago, sizeof ago, "earlier (log)");
   snprintf(body, sizeof body, "%s%s%s\n%s \xC2\xB7 %s confidence\n%ddBm%s \xC2\xB7 heard %ux \xC2\xB7 %s\n%s%s",
-           d.alert.mac, d.alert.name[0] ? " \xC2\xB7 " : "", d.alert.name, flock::methodLabel(d.alert.method),
-           confName[flock::confidence(d.alert.method) & 3], d.alert.rssi, ch, d.count, ago,
+           d.alert.mac, d.alert.name[0] ? " \xC2\xB7 " : "", d.alert.name, flockyou::methodLabel(d.alert.method),
+           confName[flockyou::confidence(d.alert.method) & 3], d.alert.rssi, ch, d.count, ago,
            d.has_gps ? where : "no GPS position", d.sent ? "\nPosted to the alert channel" : "");
-  lv_obj_t* card = teamui::sheetOpen(d.alert.method == flock::Method::BleRaven ? TR("Raven sensor")
-                                     : d.alert.source == flock::Source::Wifi ? TR("Flock camera (Wi-Fi)")
+  lv_obj_t* card = teamui::sheetOpen(d.alert.method == flockyou::Method::BleRaven ? TR("Raven sensor")
+                                     : d.alert.source == flockyou::Source::Wifi ? TR("Flock camera (Wi-Fi)")
                                                                               : TR("Flock device (BLE)"), body);
   if (d.has_gps) {
     teamui::sheetBtn(card, TR("Map"), [](lv_event_t*) {
@@ -601,11 +601,11 @@ static void detectionSheet(int i) {
 }
 
 static void saveMarked(double lat, double lon, int dir) {
-  flock::Cam c;
+  flockyou::Cam c;
   c.lat_e6 = (int32_t)lround(lat * 1e6);
   c.lon_e6 = (int32_t)lround(lon * 1e6);
   c.dir = (int16_t)dir;
-  c.flags = flock::kCamMine;
+  c.flags = flockyou::kCamMine;
   double dm;
   if (s_cam_state == CamLoad::Done && s_cams.nearest(lat, lon, 15, &dm) >= 0) {
     toast(TR("A camera is already marked there"));
@@ -620,7 +620,7 @@ static void saveMarked(double lat, double lon, int dir) {
     if (f) {
       char label[24];
       snprintf(label, sizeof label, "%lu", (unsigned long)epochNow());
-      flock::formatCamLine(c, label, line, sizeof line);
+      flockyou::formatCamLine(c, label, line, sizeof line);
       f.println(line);
       f.close();
     }
@@ -631,7 +631,7 @@ static void saveMarked(double lat, double lon, int dir) {
   s_ver++;
   if (s_cfg.share && s_cfg.share_marked && s_cfg.channel[0]) {
     char t[160];
-    flock::formatMarkedAlert(lat, lon, dir, t, sizeof t);
+    flockyou::formatMarkedAlert(lat, lon, dir, t, sizeof t);
     if (post(t)) { toast(TR("Camera marked and posted")); return; }
   }
   toast(TR("Camera marked"));
@@ -661,7 +661,7 @@ static void markSheet(double lat, double lon) {
 
 static void cameraSheet(int idx, bool cluster) {
   if (idx < 0 || idx >= s_cams.size()) return;
-  const flock::Cam& c = s_cams.at(idx);
+  const flockyou::Cam& c = s_cams.at(idx);
   const double la = c.lat_e6 / 1e6, lo = c.lon_e6 / 1e6;
   if (cluster) {   // a cluster: zoom in on it
     s_map_center_lat = la;
@@ -682,7 +682,7 @@ static void cameraSheet(int idx, bool cluster) {
     watchfeed::bearingLabel((float)c.dir, b, sizeof b);
     snprintf(dir, sizeof dir, "faces %s", b);
   }
-  snprintf(body, sizeof body, "%s \xC2\xB7 %s\n%s\n%.5f, %.5f", (c.flags & flock::kCamMine) ? "marked on this radio" : "OpenStreetMap",
+  snprintf(body, sizeof body, "%s \xC2\xB7 %s\n%s\n%.5f, %.5f", (c.flags & flockyou::kCamMine) ? "marked on this radio" : "OpenStreetMap",
            dir, rb, la, lo);
   lv_obj_t* card = teamui::sheetOpen(TR("Flock camera"), body);
   teamui::sheetBtn(card, TR("Hound"), [](lv_event_t*) {
@@ -694,7 +694,7 @@ static void cameraSheet(int idx, bool cluster) {
     teamui::sheetBtn(card, TR("Post"), [](lv_event_t*) {
       teamui::sheetClose();
       char t[160];
-      flock::formatMarkedAlert(s_mark_lat, s_mark_lon, -1, t, sizeof t);
+      flockyou::formatMarkedAlert(s_mark_lat, s_mark_lon, -1, t, sizeof t);
       if (post(t)) toast(TR("Posted"));
       else { char m[80]; snprintf(m, sizeof m, "%s: %s", TR("Not posted"), s_share_err); toast(m); }
     }, nullptr, 0xE53935);
@@ -790,7 +790,7 @@ static void buildLive(lv_obj_t* b) {
     pageBuild();
   }, nullptr, s_cfg.armed ? 0x7F1D1D : 0x2E7D32);
   if (s_near_idx >= 0 && s_near_idx < s_cams.size()) {
-    const flock::Cam& c = s_cams.at(s_near_idx);
+    const flockyou::Cam& c = s_cams.at(s_near_idx);
     char rb[40];
     teamui::rangeTo(c.lat_e6 / 1e6, c.lon_e6 / 1e6, rb, sizeof rb);
     snprintf(line, sizeof line, LV_SYMBOL_WARNING " %s  %s", TR("Known camera"), rb);
@@ -816,7 +816,7 @@ static void buildLive(lv_obj_t* b) {
       if (d.historical != (pass == 1)) continue;
       if (pass == 1 && shown == s_tab->liveCount()) lbl(b, TR("From the log:"), &g_font_12, COLOR_SUB);
       shown++;
-      const bool wifi = d.alert.source == flock::Source::Wifi;
+      const bool wifi = d.alert.source == flockyou::Source::Wifi;
       lv_obj_t* card = rowCard(b, [](lv_event_t* e) { detectionSheet((int)(intptr_t)lv_event_get_user_data(e)); },
                                (void*)(intptr_t)i);
       lv_obj_set_style_border_color(card, lv_color_hex(wifi ? kWifiRgb : kBleRgb), LV_PART_MAIN);
@@ -825,7 +825,7 @@ static void buildLive(lv_obj_t* b) {
       lbl(card, line, &g_font_14, d.historical ? COLOR_SUB : COLOR_TEXT);
       char rb[40] = "no GPS";
       if (d.has_gps) teamui::rangeTo(d.lat, d.lon, rb, sizeof rb);
-      snprintf(line, sizeof line, "%s \xC2\xB7 %ddBm \xC2\xB7 x%u \xC2\xB7 %s%s", flock::methodLabel(d.alert.method), d.alert.rssi,
+      snprintf(line, sizeof line, "%s \xC2\xB7 %ddBm \xC2\xB7 x%u \xC2\xB7 %s%s", flockyou::methodLabel(d.alert.method), d.alert.rssi,
                d.count, rb, d.sent ? " \xC2\xB7 posted" : "");
       lbl(card, line, &g_font_12, COLOR_SUB);
     }
@@ -885,12 +885,12 @@ static void setupToggle(lv_event_t* e) {
     case 0: s_cfg.show_cams = !s_cfg.show_cams; s_map_ver++; break;
     case 1: s_cfg.show_hits = !s_cfg.show_hits; s_map_ver++; break;
     case 2: s_cfg.proximity = !s_cfg.proximity; break;
-    case 3: s_cfg.radius = (uint8_t)((s_cfg.radius + 1) % flock::kRadiusChoices); break;
+    case 3: s_cfg.radius = (uint8_t)((s_cfg.radius + 1) % flockyou::kRadiusChoices); break;
     case 4:
       if (!s_cfg.share && !s_cfg.channel[0]) { toast(TR("Pick the alert channel first")); return; }
       s_cfg.share = !s_cfg.share;
       break;
-    case 5: s_cfg.share_conf = (uint8_t)(s_cfg.share_conf <= flock::kConfLow ? flock::kConfHigh : s_cfg.share_conf - 1); break;
+    case 5: s_cfg.share_conf = (uint8_t)(s_cfg.share_conf <= flockyou::kConfLow ? flockyou::kConfHigh : s_cfg.share_conf - 1); break;
     case 6: s_cfg.share_marked = !s_cfg.share_marked; break;
     case 7: {   // others' alerts on this channel on the map: Team's watched channels
       watchfeed::Store* w = teamui::watch();
@@ -914,7 +914,7 @@ static void buildSetup(lv_obj_t* b) {
   wideBtn(b, line, setupToggle, (void*)1);
   snprintf(line, sizeof line, "%s: %s", TR("Warn near a known camera"), onoff(s_cfg.proximity));
   wideBtn(b, line, setupToggle, (void*)2);
-  snprintf(line, sizeof line, "%s: %u m", TR("Warning distance"), flock::kRadiusM[s_cfg.radius % flock::kRadiusChoices]);
+  snprintf(line, sizeof line, "%s: %u m", TR("Warning distance"), flockyou::kRadiusM[s_cfg.radius % flockyou::kRadiusChoices]);
   wideBtn(b, line, setupToggle, (void*)3);
 
   lbl(b, TR("Alert channel (e.g. #flockwatch; never Public):"), &g_font_12, COLOR_SUB);
@@ -1064,7 +1064,7 @@ static void loopTick() {
   camLoadStep();
   FlockRadio::tick(now);
   if (s_tab) {
-    flock::Alert a;
+    flockyou::Alert a;
     int budget = 8;   // the rest waits for the next pass
     while (budget-- > 0 && FlockRadio::pop(a)) hear(a, now);
   }

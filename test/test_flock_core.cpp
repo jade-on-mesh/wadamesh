@@ -8,6 +8,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/file.h>   // POSIX flock(2): the namespace must not clash with it, as on the ESP32 toolchain
 
 #include <vector>
 
@@ -18,7 +19,7 @@ static int g_fail = 0;
 #define CHECK(c) do { if (!(c)) { fprintf(stderr, "FAIL %s:%d  %s\n", __FILE__, __LINE__, #c); g_fail++; } } while (0)
 #define CHECK_STR(a, b) do { if (strcmp((a), (b))) { fprintf(stderr, "FAIL %s:%d  \"%s\" != \"%s\"\n", __FILE__, __LINE__, (a), (b)); g_fail++; } } while (0)
 
-using namespace flock;
+using namespace flockyou;
 
 // A probe request as a Flock camera sends it, from `src`, with the FCS on the end.
 static std::vector<uint8_t> probe(const uint8_t src[6], bool with_fcs, bool break_sig = false) {
@@ -43,17 +44,17 @@ static std::vector<uint8_t> probe(const uint8_t src[6], bool with_fcs, bool brea
 }
 
 static void wifi() {
-  const uint8_t flock[6] = {0x70, 0xc9, 0x4e, 0x12, 0x34, 0x56};
+  const uint8_t fmac[6] = {0x70, 0xc9, 0x4e, 0x12, 0x34, 0x56};
   Alert a;
-  auto f = probe(flock, true);
+  auto f = probe(fmac, true);
   CHECK(parseWifiFrame(f.data(), (int)f.size(), -61, 6, a));
   CHECK_STR(a.mac, "70:c9:4e:12:34:56");
   CHECK(a.method == Method::WifiProbe && a.rssi == -61 && a.channel == 6);
   CHECK(confidence(a.method) == kConfHigh);
-  f = probe(flock, false);
+  f = probe(fmac, false);
   CHECK(parseWifiFrame(f.data(), (int)f.size(), -70, 1, a));
   // Another vendor on the same module: the IEs differ.
-  f = probe(flock, true, true);
+  f = probe(fmac, true, true);
   CHECK(!parseWifiFrame(f.data(), (int)f.size(), -61, 6, a));
   // Not a Flock OUI; a locally administered address (the old 82:6b:f2 entry).
   const uint8_t other[6] = {0x00, 0x11, 0x22, 0x33, 0x44, 0x55};
@@ -62,7 +63,7 @@ static void wifi() {
   const uint8_t la[6] = {0x82, 0x6b, 0xf2, 0x00, 0x00, 0x01};
   CHECK(!wifiOui(la));
   // A beacon from a Flock OUI is not a probe request.
-  f = probe(flock, true);
+  f = probe(fmac, true);
   f[0] = 0x80;
   CHECK(!parseWifiFrame(f.data(), (int)f.size(), -61, 6, a));
   // Truncated frames do not read past the end.
