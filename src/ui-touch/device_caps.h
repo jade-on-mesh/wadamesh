@@ -280,6 +280,20 @@
   #define CAP_BLE_KEYBOARD 0
 #endif
 
+// Flock You (FLOCK_YOU.md): passive Flock ALPR detection from Wi-Fi probe
+// requests and BLE advertisements, plus known cameras on the map. Needs what the
+// Bluetooth keyboard needs (NimBLE's central role on an ESP32-S3 with Wi-Fi), so
+// it rides the same gate. Not on the Pager yet: its Wi-Fi/BLE handoff tears
+// NimBLE down on every Wi-Fi retry, which wants its own testing first. A board
+// can opt in or out by defining it.
+#ifndef CAP_FLOCK_YOU
+  #if CAP_BLE_KEYBOARD && !defined(TLORA_PAGER)
+    #define CAP_FLOCK_YOU 1
+  #else
+    #define CAP_FLOCK_YOU 0
+  #endif
+#endif
+
 // A keyboard that comes and goes at runtime and is routed like the Bluetooth
 // one above (bleKbdDispatch() and friends): Bluetooth itself, an M5Stack CardKB,
 // or the T-Display P4's clip-on keyboard expansion. CAP_BLE_KEYBOARD stays the

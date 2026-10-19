@@ -37703,9 +37703,19 @@ static void teamDrawMapOverlay(lv_obj_t* parent, double cwx, double cwy);
 static void teamFreeMapOverlay();
 static bool teamMapTap(lv_point_t p);
 static bool teamMapLongPress(lv_point_t p);
+#if CAP_FLOCK_YOU
+// Flock You's cameras and detections (FlockYouUI.inc, included after Team's).
+static void flockDrawMapOverlay(lv_obj_t* parent, double cwx, double cwy);
+static void flockFreeMapOverlay();
+static bool flockMapTap(lv_point_t p);
+static bool flockMapLongPress(lv_point_t p);
+#endif
 
 static void freeMapMarkers() {
   teamFreeMapOverlay();
+#if CAP_FLOCK_YOU
+  flockFreeMapOverlay();
+#endif
   if (s_map_location_marker) {
     lv_obj_del(s_map_location_marker);
     s_map_location_marker = nullptr;
@@ -37956,6 +37966,10 @@ static void renderMapMarkers() {
   trackDrawOnMap(parent, cwx, cwy, s_map_zoom, k_map_canvas_w, k_map_canvas_h);   // Record track
 #endif
 
+#if CAP_FLOCK_YOU
+  // Known Flock cameras and what this radio heard, under the team's layer.
+  flockDrawMapOverlay(parent, cwx, cwy);
+#endif
   // Teammates, their alerts and the team's pins.
   teamDrawMapOverlay(parent, cwx, cwy);
 
@@ -39378,7 +39392,11 @@ static void mapCanvasEventCb(lv_event_t* e) {
     s_map_panning = false;
     const int jx = s_map_pan_last.x - s_map_pan_anchor.x, jy = s_map_pan_last.y - s_map_pan_anchor.y;
     if (jx || jy) shiftMapChildren(-jx, -jy);
+#if CAP_FLOCK_YOU
+    if (!teamMapLongPress(p) && !flockMapLongPress(p)) return;   // Team's pin first, else mark a camera
+#else
     if (!teamMapLongPress(p)) return;
+#endif
     lv_indev_wait_release(indev);
     return;
   }
@@ -39411,6 +39429,9 @@ static void mapCanvasEventCb(lv_event_t* e) {
   if (tdx > -6 && tdx < 6 && tdy > -6 && tdy < 6) {
     if (tdx != 0 || tdy != 0) shiftMapChildren(-tdx, -tdy);
     if (teamMapTap(p)) return;   // a teammate, an alert or a team pin
+#if CAP_FLOCK_YOU
+    if (flockMapTap(p)) return;  // a Flock camera or detection
+#endif
     // Centralized marker hit-test: find every marker whose center is
     // within 16 px of the tap. One hit → open that contact. Multiple
     // hits (overlapping markers) → open a picker so the user can choose.
@@ -56477,12 +56498,15 @@ enum AppDrawerAction {
   APPACT_USB_FILES,
   APPACT_OTP,
   APPACT_TEAM,
+  APPACT_FLOCK,
   APPACT_LUA_BASE = 100,   // APPACT_LUA_BASE + i = installed Lua app s_lua_inst[i]
 };
 // OTP Messenger (app drawer -> APPACT_OTP): the screens; protocol in OtpCore.cpp.
 #include "OtpMessengerUI.inc"
 // Team (app drawer -> APPACT_TEAM): MeshCore Open TAK team awareness; rules in TeamCore.cpp.
 #include "TeamUI.inc"
+// Flock You (app drawer -> APPACT_FLOCK): Flock ALPR detection + known cameras; rules in FlockCore.h.
+#include "FlockYouUI.inc"
 static uint32_t otpUnreadSig() {
   return OtpMessenger::ready() ? ((uint32_t)(OtpMessenger::core().unreadTotal() & 0xFF) << 8) * 0x9E37u : 0u;
 }
@@ -56499,6 +56523,9 @@ static const AppTileDef k_app_tiles[] = {
   { UI_ICON_AT_SIGN,            "Mentions",  APPACT_MENTIONS,  HUE_MSG },
   { UI_ICON_MAP_PIN,            "Map",       APPACT_MAP,       HUE_PLACE },
   { UI_ICON_USERS,              "Team",      APPACT_TEAM,      HUE_PLACE },   // teammates, SOS, pins, Bloodhound
+#if CAP_FLOCK_YOU
+  { UI_ICON_EYE,                "Flock You", APPACT_FLOCK,     HUE_RADIO },   // Flock ALPR detector + known cameras
+#endif
   { UI_ICON_RADIO,              "Advertise", APPACT_ADVERT,    HUE_RADIO },
   { UI_ICON_SIGNAL,             "Signal",    APPACT_SIGNAL,    HUE_RADIO },
   { UI_ICON_RADAR,              "Discover",  APPACT_DISCOVER,  HUE_RADIO },   // active node-discovery sweep
@@ -56892,6 +56919,9 @@ static void appLaunch(int act, lv_event_t* e) {
     case APPACT_MENTIONS:  openMentionsScreen();  return;
     case APPACT_OTP:       otpui::open();         return;   // one-time-pad messenger
     case APPACT_TEAM:      teamui::pageOpen();    return;   // team awareness
+#if CAP_FLOCK_YOU
+    case APPACT_FLOCK:     flockui::pageOpen();   return;   // Flock ALPR detector
+#endif
     case APPACT_CMDCENTER: setHomeDrawer(false);  return;   // back to the Home widgets
     case APPACT_SIGNAL:    openSignalInfoPopup(); return;   // signal/traffic + auto-discover settings
     case APPACT_SPECTRUM:  openSpectrumPage();   return;   // swept RF spectrum analyzer (borrows the radio)
@@ -80412,6 +80442,9 @@ void UITask::loop() {
     if (VoxMic::available()) VoxMic::state();   // releases the mic once a recording ends
     OtpMessenger::tick();   // sends, retries, sync checks: whether or not the app is open
     teamui::loopTick();     // beacons, alert repeats, alarm, Bloodhound, map refresh
+#if CAP_FLOCK_YOU
+    flockui::loopTick();    // Flock You: radios, detections, nearby cameras, channel alerts
+#endif
     static uint32_t s_vox_voice_seen = 0;   // repaint the bubble when playback starts or ends
     if (s_vox_voice_sid != s_vox_voice_seen) { s_vox_voice_seen = s_vox_voice_sid; g_lv.dirty_timeline = true; }
     const uint32_t v = VoxPhotos::version();
