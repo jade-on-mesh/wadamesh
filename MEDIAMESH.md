@@ -222,8 +222,8 @@ community mesh preset is refused on the device with "Conflicts with <preset>".
 
 ### Photos and voice stay off the main mesh
 
-Photos and voice clips (Open TAK's, and the app's AEIC channel photos) go out
-on radio2 alone, whatever `tx.media` and `mediamesh.share` say: a photo burst
+Open TAK's photos and voice clips go out on radio2 alone (upstream MeshCore
+Open's channel image messages are left as they are), whatever `tx.media` and `mediamesh.share` say: a photo burst
 on the main mesh takes minutes of everyone's airtime. With radio2 off, or
 receive-only, they are not sent, and the T-Deck says so when you hold the mic.
 Text, adverts and the rest follow `tx.media`/`radio2.cross` as before. Client
