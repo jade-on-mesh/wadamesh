@@ -5787,7 +5787,9 @@ bool MyMesh::sendGroupDataMedia(mesh::GroupChannel& channel, uint8_t* path, uint
   const uint8_t chan_policy = slot >= 0 ? channelTxPolicy(slot) : (uint8_t)mediamesh::TX_AUTO;
   // An explicit tx.media wins over the channel's choice, except on a #r2-
   // channel, whose receivers only listen on radio2.
-  if (data_type == VoxWire::kChannelDataType && !(slot >= 0 && channelBoundToRadio2(slot))) {
+  // The app's AEIC channel photos (0xAE1C) are photos too: same route.
+  const bool media = data_type == VoxWire::kChannelDataType || data_type == 0xAE1C;
+  if (media && !(slot >= 0 && channelBoundToRadio2(slot))) {
     markTransfer(pkt, data, data_len > 0 ? (size_t)data_len : 0, chan_policy, true);
   } else {
     mediamesh::markPacket(pkt, chan_policy);

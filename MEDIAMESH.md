@@ -213,6 +213,15 @@ A packet heard on the main profile that only an `#r2-` channel could open is
 dropped before it is marked as seen, so the same packet arriving on radio2 is
 still taken. `#r2-` alone, or nested prefixes, are refused.
 
+### Photos and voice stay off the main mesh
+
+Photos and voice clips (Open TAK's, and the app's AEIC channel photos) go out
+on radio2 alone, whatever `tx.media` and `mediamesh.share` say: a photo burst
+on the main mesh takes minutes of everyone's airtime. With radio2 off, or
+receive-only, they are not sent, and the T-Deck says so when you hold the mic.
+Text, adverts and the rest follow `tx.media`/`radio2.cross` as before. Client
+Repeat, which has no radio2, still sends them on its own frequency.
+
 ### Diagnostics
 
 ```text

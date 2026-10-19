@@ -15892,7 +15892,8 @@ static void buildMediaMeshCard() {
                                 opts, 3, mmUseIndex(cfg), mmUseCb);
     setChoicePick(s_mm_use_row, mmUseIndex(cfg), cfg.mode != mediamesh::MODE_OFF);
   }
-  {
+  s_mm_share_row = nullptr;
+  if (cfg.main_ok) {   // developer switch on (mediamesh.main): photos and voice may use the main mesh
     const char* opts[2] = { TR("MediaMesh only"), TR("Share with them") };
     s_mm_share_row = setChoiceRow(c, "Main-mesh nodes",
                                   "MediaMesh only: photo and voice requests and answers stay on radio2, so nodes "
@@ -71956,6 +71957,11 @@ static void voxMicButtonCb(lv_event_t* e) {
     if (s_mic_pill || g_lv.task->activeThreadIdx() < 0) return;
     if (luaAudioActive() || s_notify_playing || s_vox_voice_sid) {
       g_lv.task->showAlert(TR("Audio is busy"), 1500);
+      return;
+    }
+    // Voice goes on MediaMesh (radio2) only, never the main mesh.
+    if (!mediamesh::mediaSendable()) {
+      g_lv.task->showAlert(TR("Voice needs MediaMesh: radio2 on rx+tx"), 2500);
       return;
     }
     // Keep notification chimes off while the mic is open (they'd be recorded).

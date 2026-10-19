@@ -125,6 +125,11 @@ bool radio2Defined();
 /** Whether photos and voice are currently sent on radio2. */
 bool mediaActive();
 
+/** Whether photos and voice can go out at all: on radio2 alone, or anywhere
+ *  with the developer switch (mediamesh.main) on. Off and without radio2 to
+ *  transmit on, they don't go out, so the UI shouldn't offer to send them. */
+bool mediaSendable();
+
 /** Airtime in ms of a `payload_len`-byte packet on radio2 when photos and voice
  *  go out on radio2 alone (tx.media radio2, share off), for pacing a transfer;
  *  0 when they (also) use the main radio, which then sets the pace. */
