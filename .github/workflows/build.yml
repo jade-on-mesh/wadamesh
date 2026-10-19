@@ -29,6 +29,11 @@ jobs:
           g++ -std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined -I src \
               -o /tmp/test_vox_wire test/test_vox_wire.cpp
           /tmp/test_vox_wire
+      - name: New map points flash (MapHighlight.h)
+        run: |
+          g++ -std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined -I src \
+              -o /tmp/test_map_highlight test/test_map_highlight.cpp
+          /tmp/test_map_highlight
       - name: Mesh photo fetch client (simulated mesh and Open TAK sender)
         run: |
           g++ -std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined -I src \
