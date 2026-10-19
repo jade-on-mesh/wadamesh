@@ -49,6 +49,8 @@ class VoxFetchIo {
   virtual bool savePayload(uint32_t sid, const uint8_t* data, size_t len) = 0;
   // A session's status changed (the UI redraws its bubble).
   virtual void changed(uint32_t sid) = 0;
+  // Spreads listeners' requests apart (0 is fine where nothing else asks).
+  virtual uint32_t random32() { return 0; }
 };
 
 class VoxFetch {
@@ -77,8 +79,28 @@ class VoxFetch {
   static constexpr uint8_t kViaRadio2 = 1;
   static constexpr uint8_t kViaUnknown = 0xFF;
 
-  // A raw-data payload (channel < 0) or a GRP_DATA 0x5643 payload.
-  void onPayload(const uint8_t* data, size_t len, int channel, uint8_t via = kViaUnknown);
+  // A raw-data payload (channel < 0) or a GRP_DATA 0x5643 payload. `hops`: how
+  // far a channel packet came (0 = straight from the sender), -1 if unknown.
+  void onPayload(const uint8_t* data, size_t len, int channel, uint8_t via = kViaUnknown, int hops = -1);
+
+  // Timing shared with lib/vox/vox_timing.dart.
+  // After the last packet the sender meant to send, with some missing: wait
+  // for stragglers (only relayed packets can still be on their way).
+  static uint32_t gapRequestDelay(bool relayed, uint32_t packet_gap, uint32_t zero_hop_gap) {
+    return relayed ? packet_gap + 1000 : zero_hop_gap + 400;
+  }
+  // Packets were flowing and stopped: the tail was lost.
+  static uint32_t stallWait(uint32_t packet_gap) { return packet_gap * 3 + 2500; }
+  // Unasked packets (a push) stopped with some missing: ask for the rest when
+  // at least half is here.
+  static bool shouldFinishPassive(int received, int total) {
+    return total > 0 && received < total && received * 2 >= total;
+  }
+
+  // Packets kept for photos not announced yet (the announcement comes over
+  // the main mesh, the packets over MediaMesh, and either can win).
+  static constexpr int kMaxOrphans = 48;
+  static constexpr int kOrphanBytes = 160;
 
   // Timeouts; call every loop iteration.
   void tick();
@@ -126,6 +148,16 @@ class VoxFetch {
     uint32_t last_touch = 0;
     const char* note = nullptr;   // why it's unavailable
     uint16_t via_count[2] = {0, 0};   // packets taken from the main mesh / radio2
+    bool relayed = false;   // a packet came through a repeater, or didn't say
+  };
+
+  struct Orphan {
+    uint32_t sid;
+    uint8_t index;
+    uint8_t len;
+    uint8_t via;
+    bool relayed;
+    uint8_t data[kOrphanBytes];
   };
 
   Session* find(uint32_t sid);
@@ -137,6 +169,9 @@ class VoxFetch {
   void attempt(Session& s);
   void onTimeout(Session& s);
   void accept(Session& s, const VoxWire::Packet& p, uint8_t via = kViaUnknown);
+  void keepOrphan(const VoxWire::Packet& p, uint8_t via, bool relayed);
+  void adoptOrphans(Session& s);
+  uint32_t zeroHopGap();
   void complete(Session& s);
   void fail(Session& s, const char* why);
   int hops(const Session& s);
@@ -146,4 +181,6 @@ class VoxFetch {
 
   VoxFetchIo& io_;
   Session sessions_[kMaxSessions];
+  Orphan* orphans_ = nullptr;   // kMaxOrphans, allocated on first use (PSRAM)
+  int orphan_next_ = 0;
 };
