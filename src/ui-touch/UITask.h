@@ -31,6 +31,7 @@ enum class TouchUiScreen : uint8_t { Home = 0, ChatInbox = 1, Contacts = 2, Sett
 void sdMountDiagBegin();
 void sdMountDiagAttempt(uint32_t hz, bool begin_ok, bool card_ready);
 void sdMountDiagSetMounted(bool mounted, uint32_t hz);
+bool sdMountDiagMounted();
 
 class UITask : public AbstractUITask {
 public:
@@ -628,6 +629,7 @@ public:
   void onPingReply(const ContactInfo& contact, const uint8_t* data, size_t len) override;
   void onTelemetryReply(const ContactInfo& contact, const uint8_t* data, size_t len) override;
   void onRegionListReply(const ContactInfo& contact, const uint8_t* data, size_t len) override;
+  void onBinaryReply(const ContactInfo& contact, const uint8_t* data, size_t len) override;
   void onAdminLoginResult(const ContactInfo& contact, bool success, uint8_t perms) override;
   void onServerClock(const ContactInfo& contact, uint32_t server_epoch) override;
   void onAdminCommandReply(const ContactInfo& contact, const char* text) override;

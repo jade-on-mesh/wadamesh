@@ -117,6 +117,10 @@ static const lv_img_dsc_t* sized(uint32_t cp, const lv_img_dsc_t* base, int px) 
 // walking the chain.
 static bool pathCb(const lv_font_t* font, void* img_src, uint16_t /*len*/, uint32_t unicode, uint32_t /*next*/) {
   const lv_img_dsc_t* d = emojiGlyphLookup(unicode);
+  // Skin-tone modifiers (U+1F3FB-1F3FF) have no baked image: draw them as the
+  // invisible zero glyph (the same one U+FE0F maps to), so a toned thumbs-up
+  // shows as the plain one (upstream #673).
+  if (!d && unicode >= 0x1F3FB && unicode <= 0x1F3FF) d = emojiGlyphLookup(0xFE0F);
   if (!d) return false;
   const Slot* s = slotFor(font);
   d = sized(unicode, d, s ? pxFor(s->text) : 16);
