@@ -402,6 +402,20 @@ bool mediaActive() {
   return supported() && (policyMask(s_rt, s_rt.saved.media) & 2);
 }
 
+uint32_t mediaRadio2AirMs(int payload_len) {
+  ensureLoaded();
+  if (!supported() || s_rt.saved.share || s_rt.saved.media == TX_AUTO) return 0;
+  if (policyMask(s_rt, s_rt.saved.media) != 2) return 0;
+  const Profile2 a = s_rt.active2();
+  uint16_t pre = a.p.preamble;
+#if defined(MEDIAMESH_RADIO)
+  const Timing& t = radio_driver.mediaMeshTiming();
+  if (t.valid) pre = t.preamble[1];
+#endif
+  if (!pre) pre = kMaxAutoPreamble;
+  return (timeOnAirUs(a.p, pre, payload_len) + 999) / 1000;
+}
+
 // ---- per-contact / per-channel choices ---------------------------------------
 
 uint8_t userPolicy(const uint8_t* pub_key) {
