@@ -29,7 +29,7 @@ jobs:
           g++ -std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined -I src \
               -o /tmp/test_vox_wire test/test_vox_wire.cpp
           /tmp/test_vox_wire
-      - name: VOX photo fetch client (simulated mesh and Open TAK sender)
+      - name: Mesh photo fetch client (simulated mesh and Open TAK sender)
         run: |
           g++ -std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined -I src \
               -o /tmp/test_vox_fetch test/test_vox_fetch.cpp src/ui-touch/VoxFetch.cpp
