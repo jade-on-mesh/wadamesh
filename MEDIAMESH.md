@@ -213,6 +213,13 @@ A packet heard on the main profile that only an `#r2-` channel could open is
 dropped before it is marked as seen, so the same packet arriving on radio2 is
 still taken. `#r2-` alone, or nested prefixes, are refused.
 
+### Presets and community meshes
+
+MediaMesh Settings offers two presets, each SF7, CR 4/5 at 911.150 MHz:
+**250 kHz fast** (the default for a new radio2) and **125 kHz range** (half
+the speed, about 40% farther). A radio2 channel that would overlap any listed
+community mesh preset is refused on the device with "Conflicts with <preset>".
+
 ### Photos and voice stay off the main mesh
 
 Photos and voice clips (Open TAK's, and the app's AEIC channel photos) go out

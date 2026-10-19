@@ -94,13 +94,14 @@ inline bool effectiveShare(const Config& c) { return c.main_ok && c.share; }
 
 static constexpr uint8_t kNotHeld = 0xFF;
 
-// Defaults for a new radio2: 911.150 MHz, 125 kHz SF7 (about 2x faster than
-// SF7/62.5 for ~3 dB less range, so most of the main mesh's reach). 911.150, a
-// quiet spot found on site, is inside a BayMesh 3 cavity filter tuned for
-// 910.525 (flat about 908.6-912.8 MHz), 625 kHz above the main channel (the
-// two channels' edges about 530 kHz apart).
+// Defaults for a new radio2 (the fast preset): 911.150 MHz, 250 kHz SF7, about
+// 4x faster than SF7/62.5 for ~6 dB less range. The range preset is the same
+// at 125 kHz (half the speed, ~40% farther). 911.150, a quiet spot found on
+// site, is inside a BayMesh 3 cavity filter tuned for 910.525 (flat about
+// 908.6-912.8 MHz), 625 kHz above the main channel.
 static constexpr float kDefaultFreq = 911.150f;
-static constexpr float kDefaultBw = 125.0f;
+static constexpr float kDefaultBw = 250.0f;
+static constexpr float kRangeBw = 125.0f;
 static constexpr uint8_t kDefaultSf = 7;
 static constexpr uint8_t kDefaultCr = 5;
 
