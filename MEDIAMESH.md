@@ -229,6 +229,15 @@ waiting for the SPI bus and left out of the timing. `budget=` is built on the
 plus 10%: a T-Deck, whose screen shares the bus with the radio, measures
 ~1 ms like a repeater instead of the ~8 ms a rare slow retune used to set.
 
+On the T-Deck the retune itself is also trimmed, following keymindCascade's
+measurements on the same board (mikecarper/MeshCore a46158708, d4c826322):
+the radio's SPI runs buffered at 8.89 MHz instead of byte by byte at 2 MHz
+(`variants/lilygo_tdeck/TDeckRadioHal.h`; 8.89 MHz is the fastest the board's
+wiring passed), a scan retune skips the commands that can't have changed (the
+wake-up NOP, a second standby, the packet-type query and the IQ register
+fix-up: eight SPI commands instead of about fifteen), and the screen is sent in
+pieces of at most 960 pixels so the radio never waits long for the bus.
+
 `get radio.timing` is the same as `get radio2.timing`. Warnings follow the
 figures: `WARN recommended preamble: radio2=64` when a profile's preamble is
 shorter than a scanning receiver needs, `short override: radio2` when that is an

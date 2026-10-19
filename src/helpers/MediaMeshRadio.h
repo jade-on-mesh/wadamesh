@@ -62,6 +62,10 @@ class MediaMeshRadio : public Base {
   volatile bool _scan = false;      // radio2 active: scan both profiles
   volatile bool _tx = false;        // a transmit is in progress
   volatile bool _paused = false;    // spectrum analyzer owns the radio
+  // The chip is known to be in LoRa mode with the IQ register fix in place:
+  // a full arm confirmed it, and only scan retunes have touched the radio
+  // since. armScanLean() relies on it (see there).
+  bool _lean_ok = false;
   volatile uint8_t _cur = 0;        // profile the radio is tuned to
   bool _user_rxq = false;           // buffered receive as the user set it
   uint32_t _hold_start = 0;
@@ -175,12 +179,14 @@ class MediaMeshRadio : public Base {
     syncOrigins();
     bool fast = false;
     if (scanning && this->isInRecvMode()) {
-      chip()->standby();
+      // From receive the chip is awake: no wake-up NOP before the standby.
+      chip()->standby(chip()->standbyXOSC ? RADIOLIB_SX126X_STANDBY_XOSC : RADIOLIB_SX126X_STANDBY_RC, false);
       fast = !rxWaiting();   // in standby nothing new can land
       if (!fast) this->idle();
     } else {
       this->idle();
     }
+    if (!fast) _lean_ok = false;
     const bool ok = profile ? tune(_cfg.p, _timing.valid ? _timing.preamble[1] : mediamesh::kMaxAutoPreamble)
                             : tune(_main, mainPreamble());
     if (!ok) {
@@ -228,10 +234,56 @@ class MediaMeshRadio : public Base {
   // `armed`: applyProfile's fast path left the wrapper "receiving", so only
   // our arm is needed. If it fails, the stock path puts things right.
   void startRecvScan(bool armed = false) {
-    if (armed && _scan && armScan() == RADIOLIB_ERR_NONE) return;
+    if (armed && _scan) {
+      if (_lean_ok && armScanLean() == RADIOLIB_ERR_NONE) return;
+      if (armScan() == RADIOLIB_ERR_NONE) { confirmLean(); return; }
+      _lean_ok = false;
+    }
     this->startRecv();   // the wrapper's state (receiving) and the stock arm
     if (!_scan) return;
-    armScan();
+    if (armScan() == RADIOLIB_ERR_NONE) confirmLean();
+    else _lean_ok = false;
+  }
+  // After a full arm: the lean one may follow if the chip is in LoRa with
+  // standard IQ (one packet-type query, on this path only).
+  void confirmLean() {
+    CustomSX1262* r = chip();
+    _lean_ok = r->invertIQEnabled == RADIOLIB_SX126X_LORA_IQ_STANDARD
+            && r->getPacketType() == RADIOLIB_SX126X_PACKET_TYPE_LORA;
+  }
+
+  // RadioLib's receive arm, less what a scan retune can't have changed. From
+  // keymindCascade's T-Deck work (mikecarper/MeshCore d4c826322: "confirmed
+  // modem" and "IQ workaround" caches, checked over thousands of retunes):
+  //  - no standby (applyProfile just put the chip there), so no wake-up NOP;
+  //  - no packet-type query: only a full arm sets _lean_ok, after confirming
+  //    LoRa, and anything that could change the modem (a send, new radio
+  //    settings, the spectrum analyzer) clears it;
+  //  - no read-modify-write of the IQ register (SX126x errata 15.4): the full
+  //    arm wrote it for standard IQ, which MeshCore always uses, and standby
+  //    keeps registers.
+  // What is left: IRQ masks, buffer base, clear IRQs, packet parameters (the
+  // preamble differs between the profiles), RX. Eight SPI commands a retune
+  // in all, where RadioLib's path made about fifteen.
+  int16_t armScanLean() {
+    CustomSX1262* r = chip();
+    const uint16_t irqs = RADIOLIB_SX126X_IRQ_RX_DONE | RADIOLIB_SX126X_IRQ_TIMEOUT | RADIOLIB_SX126X_IRQ_CRC_ERR
+                        | RADIOLIB_SX126X_IRQ_HEADER_VALID | RADIOLIB_SX126X_IRQ_HEADER_ERR
+                        | RADIOLIB_SX126X_IRQ_PREAMBLE_DETECTED;
+    int16_t rc = r->setDioIrqParams(irqs, RADIOLIB_SX126X_IRQ_RX_DONE);
+    if (rc == RADIOLIB_ERR_NONE) rc = r->setBufferBaseAddress();
+    if (rc == RADIOLIB_ERR_NONE) rc = r->clearIrqStatus();
+    if (rc == RADIOLIB_ERR_NONE) {
+      const uint16_t pre = r->preambleLengthLoRa;
+      const uint8_t data[6] = {(uint8_t)(pre >> 8), (uint8_t)(pre & 0xFF), r->headerType,
+                               (uint8_t)r->implicitLen, r->crcTypeLoRa, r->invertIQEnabled};
+      rc = r->mod->SPIwriteStream(RADIOLIB_SX126X_CMD_SET_PACKET_PARAMS, data, 6);
+    }
+    if (rc == RADIOLIB_ERR_NONE) {
+      r->mod->setRfSwitchState(Module::MODE_RX);
+      rc = r->setRx(RADIOLIB_SX126X_RX_TIMEOUT_INF);
+    }
+    return rc;
   }
   int16_t armScan() {
     return chip()->startReceive(RADIOLIB_SX126X_RX_TIMEOUT_INF,
@@ -328,6 +380,7 @@ class MediaMeshRadio : public Base {
   bool sendOn(uint8_t profile, const uint8_t* bytes, int len) {
     this->radioAcquire();
     _tx = true;
+    _lean_ok = false;
     if (_cur != profile) applyProfile(profile);
     const bool ok = Base::startSendRaw(bytes, len);
     if (ok) ++_tx_count[profile];
@@ -349,6 +402,7 @@ class MediaMeshRadio : public Base {
   // The second profile in use (saved or temporary); off stops the scan.
   void mediaMeshConfigure(const mediamesh::Profile2& cfg) {
     this->radioAcquire();
+    _lean_ok = false;
     syncOrigins();
     const bool params_changed = !mediamesh::sameParams(cfg.p, _cfg.p) || cfg.mode != _cfg.mode;
     _cfg = cfg;
@@ -424,6 +478,7 @@ class MediaMeshRadio : public Base {
 
   void setParams(float freq, float bw, uint8_t sf, uint8_t cr) override {
     this->radioAcquire();
+    _lean_ok = false;
     _main_saved.freq = freq; _main_saved.bw = bw; _main_saved.sf = sf; _main_saved.cr = cr;
     _main_saved.preamble = 0;
     const bool first = !_main_known;
@@ -532,7 +587,10 @@ class MediaMeshRadio : public Base {
     Base::rxQueueEnable(en || _scan);
   }
   void rxQueueSuspend(bool s) {
+    this->radioAcquire();   // not mid-retune: the next arm after this is a full one
+    _lean_ok = false;
     _paused = s;
+    this->radioRelease();
     Base::rxQueueSuspend(s);
     if (!s) wake();
   }
