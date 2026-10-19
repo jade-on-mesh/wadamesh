@@ -9,6 +9,7 @@
 #include <esp_heap_caps.h>
 #include <string.h>
 #include "../../ui-touch/BleKeyboard.h"   // stackGoingDown() before NimBLE teardown
+#include "../../ui-touch/FlockRadio.h"    // likewise: Flock You's BLE scan
 
 // USB Files (ui-touch/UsbFilesSession.h) owns the USB serial port while its app is
 // open: the USB leg of the companion link neither reads nor writes meanwhile.
@@ -325,6 +326,9 @@ bool MultiTransportCompanionInterface::releaseBleForUpdate() {
 #if CAP_BLE_KEYBOARD
   BleKbd::stackGoingDown();
 #endif
+#if CAP_FLOCK_YOU
+  FlockRadio::stackGoingDown();
+#endif
   NimBLEDevice::deinit(true);
   _ble_begun = false;
   return true;
@@ -348,6 +352,9 @@ void MultiTransportCompanionInterface::disableBle() {
     bleDetachServerCallbacks();
 #if CAP_BLE_KEYBOARD
     BleKbd::stackGoingDown();
+#endif
+#if CAP_FLOCK_YOU
+    FlockRadio::stackGoingDown();
 #endif
     NimBLEDevice::deinit(true);
     _ble_begun = false;
@@ -475,6 +482,9 @@ void MultiTransportCompanionInterface::prepareForHttpOta() {
     bleDetachServerCallbacks();
 #if CAP_BLE_KEYBOARD
     BleKbd::stackGoingDown();
+#endif
+#if CAP_FLOCK_YOU
+    FlockRadio::stackGoingDown();
 #endif
     NimBLEDevice::deinit(true);
     _ble_begun = false;
