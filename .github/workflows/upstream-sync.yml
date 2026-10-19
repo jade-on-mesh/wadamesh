@@ -73,6 +73,18 @@ jobs:
           echo "release=$rel" >> "$GITHUB_OUTPUT"
           echo "Upstream release: $rel"
 
+          # A release synced by hand (its mirror commit merged into main
+          # through a pull request) is already in main's history: take that
+          # commit rather than make a second one with the same content, which
+          # would merge in again and repeat the same conflicts.
+          if [ "$(git rev-parse "$mirror^{tree}")" != "$up_tree" ]; then
+            have=$(git log --format='%H %T' HEAD | awk -v t="$up_tree" '$2 == t { print $1; exit }')
+            if [ -n "$have" ] && git merge-base --is-ancestor "$mirror" "$have"; then
+              mirror=$have
+              git push -q origin "$mirror:refs/heads/upstream-mirror" || true
+              echo "upstream-mirror caught up to $rel (synced by hand)."
+            fi
+          fi
           if [ "$(git rev-parse "$mirror^{tree}")" != "$up_tree" ]; then
             msg="Wadamesh $rel (upstream main $(git rev-parse --short refs/upstream/main))"
             mirror=$(git commit-tree "$up_tree" -p "$mirror" -m "$msg")
@@ -173,6 +185,11 @@ jobs:
           title="Upstream Wadamesh $REL needs a hand"
           if [ "$STATE" = blocked ]; then
             why="Wadamesh **$REL** changes files under \`.github/workflows\`, which the default Actions token may not push. Add a repo secret \`SYNC_TOKEN\` (fine-grained token with Contents and Workflows read/write on this repo) and run upstream-sync again, or sync this release by hand."
+            echo "### $title"$'\n\n'"$why" >> "$GITHUB_STEP_SUMMARY"
+            if [ "$(gh api "repos/$REPO" --jq .has_issues)" != true ]; then
+              echo "::error title=$title::$why"
+              exit 1
+            fi
             gh api "repos/$REPO/issues" -f title="$title" -f body="$why"$'\n\n'"From the [upstream sync]($RUN)." --jq .html_url
             exit 0
           elif [ "$STATE" = conflict ]; then
@@ -191,6 +208,19 @@ jobs:
               echo "::warning::Could not open the pull request: $(tr '\n' ' ' </tmp/pr.err)"
               pr="none: this workflow couldn't open one ($(head -c 200 /tmp/pr.err | tr '\n' ' ')). Open one from \`$BRANCH\` into \`main\`."
             fi
+          fi
+          {
+            echo "### $title"
+            echo
+            echo "$why"
+            echo
+            echo "Pull request: $pr"
+          } >> "$GITHUB_STEP_SUMMARY"
+          # Issues may be switched off on the repo: the run fails, red, with
+          # the reason on its summary page, rather than a 410 nobody reads.
+          if [ "$(gh api "repos/$REPO" --jq .has_issues)" != true ]; then
+            echo "::error title=$title::$(echo "$why" | head -c 600 | tr '\n' ' ') Pull request: $pr"
+            exit 1
           fi
           # One issue per release: update it rather than file a second.
           num=$(gh api "repos/$REPO/issues?state=open&per_page=100" --jq "[.[] | select(.title == \"$title\")][0].number // empty")

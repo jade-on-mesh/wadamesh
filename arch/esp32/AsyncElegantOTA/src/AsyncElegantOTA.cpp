@@ -38,9 +38,13 @@ void AsyncElegantOtaClass::begin(AsyncWebServer *server, const char* username, c
                 return request->requestAuthentication();
             }
         }
+#if defined(ELEGANT_OTA_LITE)
+        request->send_P(200, "text/html", ELEGANT_LITE_HTML);
+#else
         AsyncWebServerResponse *response = request->beginResponse_P(200, "text/html", ELEGANT_HTML, ELEGANT_HTML_SIZE);
         response->addHeader("Content-Encoding", "gzip");
         request->send(response);
+#endif
     });
 
     _server->on("/update", HTTP_POST, [&](AsyncWebServerRequest *request) {
@@ -65,6 +69,14 @@ void AsyncElegantOtaClass::begin(AsyncWebServer *server, const char* username, c
         }
 
         if (!index) {
+#if defined(ELEGANT_OTA_LITE)
+            // The lite page has no MD5 in JavaScript to send; the ESP32 still
+            // checks the image itself (header and SHA-256) in Update.end().
+            if(request->hasParam("MD5", true)
+               && !Update.setMD5(request->getParam("MD5", true)->value().c_str())) {
+                return request->send(400, "text/plain", "MD5 parameter invalid");
+            }
+#else
             if(!request->hasParam("MD5", true)) {
                 return request->send(400, "text/plain", "MD5 parameter missing");
             }
@@ -72,6 +84,7 @@ void AsyncElegantOtaClass::begin(AsyncWebServer *server, const char* username, c
             if(!Update.setMD5(request->getParam("MD5", true)->value().c_str())) {
                 return request->send(400, "text/plain", "MD5 parameter invalid");
             }
+#endif
 
             #if defined(ESP8266)
                 int cmd = (filename == "filesystem") ? U_FS : U_FLASH;

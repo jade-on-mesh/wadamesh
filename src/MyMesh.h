@@ -38,7 +38,13 @@
 #endif
 
 #ifndef FIRMWARE_VERSION
-#define FIRMWARE_VERSION "v1.17.4-touch"
+#define FIRMWARE_VERSION "v1.18.0.1-touch"
+#endif
+
+// The meshcomod release the pinned core is (scripts/release.sh reads it from the core's
+// own examples/companion_radio/MyMesh.h and refreshes this default; About shows it).
+#ifndef FIRMWARE_CORE_VERSION
+#define FIRMWARE_CORE_VERSION "v1.18.0.1"
 #endif
 
 #if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
@@ -151,7 +157,7 @@ public:
                   const char* text, uint32_t& expected_ack, uint32_t& est_timeout,
                   uint32_t* out_packet_hash4 = nullptr, TxtTxDebugInfo* out_dbg = nullptr);
   int sendCommandData(const ContactInfo& recipient, uint32_t timestamp, uint8_t attempt,
-                      const char* text, uint32_t& est_timeout,
+                      uint8_t txt_type, const char* text, uint32_t& est_timeout,
                       uint32_t* out_packet_hash4 = nullptr, TxtTxDebugInfo* out_dbg = nullptr);
 
   // ---- radio2 TX choices (tx.user / tx.channel / #r2- channels; MEDIAMESH.md) ----
@@ -383,6 +389,8 @@ protected:
                      const char *text) override;
   void onCommandDataRecv(const ContactInfo &from, mesh::Packet *pkt, uint32_t sender_timestamp,
                          const char *text) override;
+  void onCLICommandRecv(const ContactInfo &from, mesh::Packet *pkt, uint32_t sender_timestamp,
+                        const char *text, char* reply) override;
   void onSignedMessageRecv(const ContactInfo &from, mesh::Packet *pkt, uint32_t sender_timestamp,
                            const uint8_t *sender_prefix, const char *text) override;
   // An UNCONFIGURED channel slot is all zeroes — including its secret, its hash
@@ -436,7 +444,7 @@ protected:
 public:
   /** Which kind of touch-UI request is currently in flight, so the response
    *  matcher in onContactResponse routes to the right callback. */
-  enum class UiReqKind : uint8_t { None = 0, Status = 1, Telemetry = 2, Regions = 3 };
+  enum class UiReqKind : uint8_t { None = 0, Status = 1, Telemetry = 2, Regions = 3, Binary = 4 };
 
   /** Fire a REQ_TYPE_GET_STATUS from the touch UI side. Result is delivered
    *  via AbstractUITask::onPingReply when the reply arrives.
@@ -526,12 +534,35 @@ public:
    *  auto-poll keeps the immediate chained send above (a single arm slot can't
    *  serve its multi-node loop, and a missed poll just retries next interval). */
   int uiSendRequestAfterGuestLogin(ContactInfo& recipient, UiReqKind kind) {
+    cancelUIDeferredLogin();
     // Nothing to defer behind on a companion: send the request itself, now.
     if (!contactNeedsGuestLogin(recipient)) {
-      cancelUIDeferredLogin();
       return (kind == UiReqKind::Telemetry) ? sendTelemetryRequestForUI(recipient)
                                             : sendStatusPingForUI(recipient);
     }
+    // Repeaters, rooms, sensors: ask directly first, the way the MeshCore app does,
+    // and only fall back to the guest login when no reply comes (we are not in the
+    // node's ACL yet). Login-first threw away a working path on every tap and fired
+    // the REQ from inside the login-reply callback while that reply was still being
+    // re-flooded: against a repeater next to the device it answered 2 of 8 times,
+    // direct-first 8 of 8, about 1 s each (#683, "under 5% from the device").
+    const bool had_path = recipient.out_path_len != OUT_PATH_UNKNOWN;
+    const int r = (kind == UiReqKind::Telemetry) ? sendTelemetryRequestForUI(recipient)
+                                                 : sendStatusPingForUI(recipient);
+    if (r == MSG_SEND_SENT_FLOOD || r == MSG_SEND_SENT_DIRECT) {
+      memcpy(_ui_fallback_key, recipient.id.pub_key, PUB_KEY_SIZE);
+      _ui_fallback_kind = kind;
+      _ui_fallback_at = millis() + (had_path ? 6000u : 12000u);
+      if (!_ui_fallback_at) _ui_fallback_at = 1;
+      return r;
+    }
+    return uiSendRequestViaGuestLogin(recipient, kind);   // could not even send: try the login
+  }
+
+  /** The guest-login route: reset the path, send a blank LOGIN, and send the
+   *  request a moment after LOGIN-OK (uiRequestTick), so it does not go out while
+   *  the login reply is still being re-flooded around the sender. */
+  int uiSendRequestViaGuestLogin(ContactInfo& recipient, UiReqKind kind) {
     uiResetPathForLogin(recipient);
     uint32_t login_est = 0;
     int r = sendLogin(recipient, "", login_est);
@@ -617,7 +648,7 @@ public:
     if (!text || !text[0]) return MSG_SEND_FAILED;
     uint32_t est = 0;
     uint32_t ts = getRTCClock()->getCurrentTimeUnique();
-    return sendCommandData(recipient, ts, 0, text, est);
+    return sendCommandData(recipient, ts, 0, TXT_TYPE_CLI_DATA, text, est);
   }
   /** Cancel UI ping pending state (used by timeout). */
   void cancelUIPingPending() {
@@ -631,6 +662,28 @@ public:
   void cancelUIDeferredLogin() {
     _ui_login_then      = 0;
     _ui_login_then_kind = UiReqKind::None;
+    _ui_fallback_at     = 0;
+    _ui_deferred_at     = 0;
+  }
+  /** Runs from loop(): the login fallback when a direct request got no reply, and
+   *  the request a moment after a fallback login was accepted. */
+  void uiRequestTick() {
+    const uint32_t now = millis();
+    if (_ui_fallback_at && (int32_t)(now - _ui_fallback_at) >= 0) {
+      _ui_fallback_at = 0;
+      if (_ui_pending_status && memcmp(&_ui_pending_status, _ui_fallback_key, 4) == 0) {
+        ContactInfo* c = lookupContactByPubKey(_ui_fallback_key, PUB_KEY_SIZE);
+        if (c) uiSendRequestViaGuestLogin(*c, _ui_fallback_kind);
+      }
+    }
+    if (_ui_deferred_at && (int32_t)(now - _ui_deferred_at) >= 0) {
+      _ui_deferred_at = 0;
+      ContactInfo* c = lookupContactByPubKey(_ui_deferred_key, PUB_KEY_SIZE);
+      if (c) {
+        if (_ui_deferred_kind == UiReqKind::Telemetry) sendTelemetryRequestForUI(*c);
+        else                                           sendStatusPingForUI(*c);
+      }
+    }
   }
   /** True if a UI ping is still waiting on a reply. */
   bool hasUIPingPending() const { return _ui_pending_status != 0; }
@@ -1033,6 +1086,31 @@ public:
     }
     return r;
   }
+
+  /** Repeater admin app: send a binary REQ (first byte = REQ_TYPE_*, then its
+   *  parameters, e.g. GET_NEIGHBOURS' count/offset/order/prefix) to a repeater or
+   *  room server we are logged in to. The reply (minus its 4-byte reflected tag)
+   *  lands in AbstractUITask::onBinaryReply. Same single-flight slot as the
+   *  status/telemetry helpers above, so the caller serialises its requests. */
+  int uiSendBinaryRequest(ContactInfo& recipient, const uint8_t* payload, uint8_t len) {
+    if (!payload || len == 0) return MSG_SEND_FAILED;
+    uint32_t tag = 0, est = 0;
+    pending_req = 0;
+    int r = sendRequest(recipient, payload, len, tag, est);
+    if (r == MSG_SEND_SENT_FLOOD || r == MSG_SEND_SENT_DIRECT) {
+      memcpy(&_ui_pending_status, recipient.id.pub_key, 4);
+      _ui_pending_kind = UiReqKind::Binary;
+      _ui_pending_tag  = tag;
+    }
+    return r;
+  }
+
+  /** What the last LOGIN_OK said beyond "admin or not" (repeater admin app): the
+   *  ACL permission byte (data[7], PERM_ACL_* in the low two bits) and the
+   *  server's firmware version level (data[12]). `valid` is false until a
+   *  LOGIN_OK of the new format has been seen for `pub4`. */
+  struct UiLoginInfo { uint8_t pub4[4]; uint8_t acl; uint8_t fw_level; bool valid; };
+  const UiLoginInfo& uiLastLoginInfo() const { return _ui_last_login; }
 
   /** Ask a directly-heard repeater for the public regions it allows. Region
    *  discovery is direct-only in MeshCore, so this deliberately sends zero-hop
@@ -1524,12 +1602,22 @@ private:
    *  matching by pubkey alone misroutes the login OK as the REQ reply.
    *  Compare tag in onContactResponse to keep the two streams separate. */
   uint32_t _ui_pending_tag = 0;
+  UiLoginInfo _ui_last_login = {};   // uiLastLoginInfo()
   /** Deferred guest-login-then-request arm: holds the first 4 bytes of the
    *  recipient pub_key (0 = none) plus which REQ to send, set by
    *  uiSendRequestAfterGuestLogin(). onContactResponse fires the REQ when the
    *  matching LOGIN-OK arrives, removing the ACL-commit race on the first try. */
   uint32_t _ui_login_then = 0;
   UiReqKind _ui_login_then_kind = UiReqKind::None;
+  // Direct-first UI requests (#683): fall back to the guest login at _ui_fallback_at
+  // if the reply has not come; after a fallback LOGIN-OK the REQ waits until
+  // _ui_deferred_at. 0 = not armed.
+  uint8_t   _ui_fallback_key[PUB_KEY_SIZE] = {0};
+  UiReqKind _ui_fallback_kind = UiReqKind::None;
+  uint32_t  _ui_fallback_at = 0;
+  uint8_t   _ui_deferred_key[PUB_KEY_SIZE] = {0};
+  UiReqKind _ui_deferred_kind = UiReqKind::None;
+  uint32_t  _ui_deferred_at = 0;
   BaseSerialInterface *_serial;
   AbstractUITask* _ui;
 
@@ -1546,6 +1634,12 @@ private:
   // 200 not 80: the serial sideload ("fadd ...", see cliPutChunk) carries up
   // to ~130 chars per line; every other command is far shorter.
   char cli_command[200];
+  char reply_buf[166];   // CMD_RUN_CLI_COMMAND replies (MeshCore 1.18)
+  // The companion CLI (MeshCore 1.18): app v1.50's Command Line, the serial CLI's
+  // fall-through and the remote CLI of contacts granted that permission.
+  bool handleCommand(const char* text, uint32_t sender_timestamp, char* reply);
+  bool handleRadioCommand(const char* command, char* reply);
+  bool printSharedCliReply();
 #if defined(ESP32)
   // Serial sideload state ("fput" / "fadd" / "fend"): the file being written.
   File _cli_put;
