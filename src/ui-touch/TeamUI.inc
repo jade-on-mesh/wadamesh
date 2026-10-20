@@ -483,18 +483,30 @@ static void mapLabel(lv_obj_t* parent, int sx, int sy, const char* text, uint32_
 
 // A new point's highlight: a ring in [rgb] that flashes (its border fades
 // in and out), under the point's own dot. Deleted with the map objects.
+// As the app's NewPointAura: a ring that swells from the point and fades as it
+// goes, over and over (1.2 s, eased out). The ring keeps its centre on the point
+// as it grows: the centre rides in the object's user data.
+static constexpr int kRingFrom = 20, kRingTo = 56;   // diameter, px
 static void mapRing(lv_obj_t* parent, int sx, int sy, uint32_t rgb) {
-  lv_obj_t* d = mapDot(parent, sx, sy, 38, rgb, rgb, LV_RADIUS_CIRCLE, LV_OPA_20);
+  lv_obj_t* d = mapDot(parent, sx, sy, kRingFrom, rgb, rgb, LV_RADIUS_CIRCLE, LV_OPA_30);
   lv_obj_set_style_border_width(d, 3, LV_PART_MAIN);
+  lv_obj_set_user_data(d, (void*)(intptr_t)(((uint32_t)(uint16_t)sx << 16) | (uint16_t)sy));
   lv_anim_t a;
   lv_anim_init(&a);
   lv_anim_set_var(&a, d);
-  lv_anim_set_values(&a, LV_OPA_20, LV_OPA_COVER);
-  lv_anim_set_time(&a, 600);
-  lv_anim_set_playback_time(&a, 600);
+  lv_anim_set_values(&a, 0, 1000);
+  lv_anim_set_time(&a, 1200);
+  lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
   lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
-  lv_anim_set_exec_cb(&a, [](void* o, int32_t v) {
-    lv_obj_set_style_border_opa((lv_obj_t*)o, (lv_opa_t)v, LV_PART_MAIN);
+  lv_anim_set_exec_cb(&a, [](void* p, int32_t v) {   // v: 0..1000 of the swell
+    lv_obj_t* o = (lv_obj_t*)p;
+    const uint32_t c = (uint32_t)(uintptr_t)lv_obj_get_user_data(o);
+    const int cx = (int16_t)(c >> 16), cy = (int16_t)(c & 0xFFFF);
+    const int size = kRingFrom + (kRingTo - kRingFrom) * v / 1000;
+    lv_obj_set_size(o, size, size);
+    lv_obj_set_pos(o, cx - size / 2, cy - size / 2);
+    lv_obj_set_style_bg_opa(o, (lv_opa_t)(71 * (1000 - v) / 1000), LV_PART_MAIN);         // 0.28 -> 0
+    lv_obj_set_style_border_opa(o, (lv_opa_t)(255 - 204 * v / 1000), LV_PART_MAIN);     // 1 -> 0.2
   });
   lv_anim_start(&a);
 }

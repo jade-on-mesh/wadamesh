@@ -64479,12 +64479,15 @@ static lv_obj_t*   s_splash_root  = nullptr;
 static lv_obj_t*   s_splash_mark  = nullptr;
 static lv_obj_t*   s_splash_wm    = nullptr;   // the wordmark
 static lv_obj_t*   s_splash_sub   = nullptr;   // the channel line
+static lv_obj_t*   s_splash_tak   = nullptr;   // "TAK", fading in slowly after the wordmark (this fork)
 static lv_timer_t* s_splash_timer = nullptr;   // the frame clock
 static uint32_t    s_splash_clock = 0;         // animation time, ms
 static uint32_t    s_splash_last  = 0;         // millis() at the last frame
 static uint32_t    s_splash_born  = 0;         // millis() when built: a boot that never settles still ends it
 static constexpr uint32_t kSplashHoldMs = 2400;   // the fade-out starts here
 static constexpr uint32_t kSplashFadeMs = 350;
+static constexpr uint32_t kSplashTakFrom = 1050;   // "TAK" starts fading in (the wordmark has risen)
+static constexpr uint32_t kSplashTakMs   = 1150;   // and is fully in just before the fade-out
 static UnderHidden s_splash_under;               // the UI, hidden while the splash animates over it
 
 // Brand colours, not the theme's: the splash continues the pre-LVGL screen,
@@ -64505,7 +64508,7 @@ static void splashRemove() {
   if (!s_splash_root) return;
   lv_obj_del(s_splash_root);
   s_splash_root = nullptr;
-  s_splash_mark = s_splash_wm = s_splash_sub = nullptr;
+  s_splash_mark = s_splash_wm = s_splash_sub = s_splash_tak = nullptr;
 }
 
 static void splashTapDismissCb(lv_event_t* e) {
@@ -64677,6 +64680,12 @@ static void splashTickCb(lv_timer_t*) {
     splashLabelAt(s_splash_wm, t, 550);
     splashLabelAt(s_splash_sub, t, 800);
   }
+  if (s_splash_tak && t <= kSplashTakFrom + kSplashTakMs) {
+    // "TAK" fades in slowly once the wordmark has risen into place (ease in-out).
+    const float f = splashClamp01(((float)t - (float)kSplashTakFrom) / (float)kSplashTakMs);
+    const float e = f * f * (3.0f - 2.0f * f);
+    lv_obj_set_style_opa(s_splash_tak, (lv_opa_t)(255.0f * e), LV_PART_MAIN);
+  }
   if (t >= kSplashHoldMs) {
     const float f = splashClamp01((float)(t - kSplashHoldMs) / (float)kSplashFadeMs);
     lv_obj_set_style_opa(s_splash_root, (lv_opa_t)(255.0f * (1.0f - f * f)), LV_PART_MAIN);   // ease in
@@ -64732,7 +64741,22 @@ static void buildBootSplash() {
   lv_obj_set_style_text_font(wm, &g_font_semi_16, LV_PART_MAIN);
   lv_obj_set_style_text_color(wm, ink, LV_PART_MAIN);
   lv_obj_set_style_text_letter_space(wm, 5, LV_PART_MAIN);
-  lv_obj_align(wm, LV_ALIGN_CENTER, 0, 71);
+
+  // This fork's name: "TAK" after the wordmark, the pair centred together.
+  lv_obj_t* tak = s_splash_tak = lv_label_create(s_splash_root);
+  lv_label_set_text(tak, "TAK");
+  lv_obj_set_style_text_font(tak, &g_font_semi_16, LV_PART_MAIN);
+  lv_obj_set_style_text_color(tak, lv_color_hex(kSplashGlow), LV_PART_MAIN);
+  lv_obj_set_style_text_letter_space(tak, 5, LV_PART_MAIN);
+  lv_obj_update_layout(s_splash_root);
+  constexpr lv_coord_t kTakGap = 10;
+  const lv_coord_t tak_w = lv_obj_get_width(tak);
+  lv_obj_align(wm, LV_ALIGN_CENTER, -(tak_w + kTakGap) / 2, 71);
+  lv_obj_update_layout(s_splash_root);   // align_to reads where the wordmark landed
+  lv_obj_align_to(tak, wm, LV_ALIGN_OUT_RIGHT_MID, kTakGap, 0);
+#if !defined(HAS_TDECK_PRO)
+  lv_obj_set_style_opa(tak, LV_OPA_TRANSP, LV_PART_MAIN);
+#endif
 
   // The build channel, quiet, under it.
   lv_obj_t* sub = s_splash_sub = lv_label_create(s_splash_root);
