@@ -19,9 +19,6 @@ file(GLOB LUA_SRCS "${REPO}/lib/lua/src/*.c")
 # Vendored Codec2 (lib/codec2, LGPL-2.1): plays MeshCore Open TAK voice messages and
 # records them from the ES8311 mic (VoxVoice / VoxMic). Same flags as its library.json.
 file(GLOB CODEC2_SRCS "${REPO}/lib/codec2/src/*.c")
-set_source_files_properties(${CODEC2_SRCS} PROPERTIES
-  COMPILE_DEFINITIONS "__EMBEDDED__;CODEC2_MODE_700C_EN=0;GIT_HASH=\"vendored\""
-  COMPILE_OPTIONS "-O2")
 
 idf_component_register(
   SRCS ${APP_SRCS} ${LUA_SRCS} ${CODEC2_SRCS}
@@ -37,3 +34,9 @@ idf_component_register(
 # Our own code, but huge + LVGL-heavy — keep the first port building; don't -Werror on warnings.
 target_compile_options(${COMPONENT_LIB} PRIVATE -w
   -include "${REPO}/variants/tdisplay_p4/tdisplay_p4_compat.h")   # adcAttachPin() shim (arduino 3.x dropped it)
+
+# Codec2's own flags (as its library.json). After idf_component_register: the
+# requirements scan runs this file as a script, where these commands don't exist.
+set_source_files_properties(${CODEC2_SRCS} PROPERTIES
+  COMPILE_DEFINITIONS "__EMBEDDED__;CODEC2_MODE_700C_EN=0"
+  COMPILE_OPTIONS "-O2")
