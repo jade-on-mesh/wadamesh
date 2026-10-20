@@ -167,7 +167,7 @@ static volatile bool s_job_done = true;
 static const char* volatile s_job_err = nullptr;
 static volatile int s_level = 0;          // mic peak, 0..100
 static char s_err[96] = "";               // why listening or playing failed (shown on the page)
-static uint32_t s_rx_retry_at = 0;
+static uint32_t s_rx_retry_at = 8000;   // listening resumes a few seconds after boot
 
 struct Out { char msg[soundlink::kMaxBytes + 1]; uint8_t proto; uint8_t volume; };
 static Out s_queue[kQueueMax];
