@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
-// Firmware updates for THIS fork (jade-on-mesh/wadamesh), not upstream Wadamesh.
+// Firmware updates for THIS fork (jade-on-mesh/wadamesh-tak), not upstream Wadamesh.
 //
 // Upstream's About page checks firmware.wadamesh.com for the newest beta_N and
 // installs it. A fork device doing that would replace itself with upstream
@@ -37,7 +37,7 @@
 #define WADA_FORK_RELEASES 1
 #endif
 
-#define WADA_FORK_REPO "jade-on-mesh/wadamesh"
+#define WADA_FORK_REPO "jade-on-mesh/wadamesh-tak"
 #define WADA_TAG_PREFIX "tak-"
 #define WADA_BRAND "WADAMESH-TAK"
 #define WADA_UPDATE_SITE "github.com/" WADA_FORK_REPO "/releases"

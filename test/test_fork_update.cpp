@@ -38,7 +38,7 @@ int main() {
 
   CHECK(forkupd::releaseCode("tak-beta_93.12") == 93012);
   CHECK(forkupd::releaseCode("beta_93.1") == 93001);
-  CHECK(forkupd::releaseCode("https://github.com/jade-on-mesh/wadamesh/releases/tag/tak-beta_94.3") == 94003);
+  CHECK(forkupd::releaseCode("https://github.com/jade-on-mesh/wadamesh-tak/releases/tag/tak-beta_94.3") == 94003);
   CHECK(forkupd::releaseCode("https://github.com/x/releases/tag/tak-beta_94.3\r\n") == 94003);
   CHECK(forkupd::releaseCode("beta_93") == -1);         // upstream's own release
   CHECK(forkupd::releaseCode("tak_1") == -1);

@@ -8418,7 +8418,7 @@ static void      buildThemeSettings();           // fwd: defined with the accent
 #ifndef FIRMWARE_RELEASE_TAG
 #define FIRMWARE_RELEASE_TAG ""
 #endif
-// This fork follows its OWN releases (tak_N on jade-on-mesh/wadamesh), never
+// This fork follows its OWN releases (tak_N on jade-on-mesh/wadamesh-tak), never
 // upstream's: see ForkUpdateCore.h. Upstream's names stay for an upstream build.
 #include "ForkUpdateCore.h"
 #ifndef WADA_UPDATE_SITE
