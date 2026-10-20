@@ -71724,6 +71724,12 @@ void luaHostTextPrompt(const char* title, const char* initial, void (*cb)(const 
 }
 #endif
 
+#if defined(HAS_TOUCH_UI) && !(defined(HAS_TDECK_GT911) || defined(TLORA_PAGER) || defined(HAS_TDECK_MAX))
+// Boards without the T-Deck/pager notification task (the T-Display P4 chimes
+// through P4Audio, whose lock already keeps a chime and the mic apart).
+static constexpr bool s_notify_playing = false;
+#endif
+
 #if defined(HAS_TOUCH_UI)
 // ---- MeshCore Open TAK voice clips: Codec2 to the speaker ---------------------
 // Streams a stored clip through the same audio sink Lua apps use, decoding frame
