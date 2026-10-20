@@ -20,10 +20,13 @@ file(GLOB LUA_SRCS "${REPO}/lib/lua/src/*.c")
 # records them from the ES8311 mic (VoxVoice / VoxMic). Same flags as its library.json.
 file(GLOB CODEC2_SRCS "${REPO}/lib/codec2/src/*.c")
 
+# Vendored ggwave (lib/ggwave, MIT): Sound link's data over sound (SoundLinkUI.inc).
+set(GGWAVE_SRCS "${REPO}/lib/ggwave/src/ggwave.cpp")
+
 idf_component_register(
-  SRCS ${APP_SRCS} ${LUA_SRCS} ${CODEC2_SRCS}
+  SRCS ${APP_SRCS} ${LUA_SRCS} ${CODEC2_SRCS} ${GGWAVE_SRCS}
   INCLUDE_DIRS "${APP}" "${APP}/ui-touch" "${REPO}/include" "${REPO}/variants/tdisplay_p4" "${REPO}/lib/lua/src"
-               "${REPO}/lib/codec2/include"
+               "${REPO}/lib/codec2/include" "${REPO}/lib/ggwave/include"
   REQUIRES espressif__arduino-esp32 meshcore lvgl ardlibs RadioLib nvs_flash esp_lcd fatfs
            esp_driver_i2c esp_driver_gpio esp_hosted h2zero__esp-nimble-cpp bt
            soc esp_hw_support app_update driver esp_timer esp_partition spi_flash esp_adc esp_pm espcoredump
@@ -40,6 +43,11 @@ target_compile_options(${COMPONENT_LIB} PRIVATE -w
 set_source_files_properties(${CODEC2_SRCS} PROPERTIES
   COMPILE_DEFINITIONS "__EMBEDDED__;CODEC2_MODE_700C_EN=0"
   COMPILE_OPTIONS "-Os")   # well ahead of real time at -Os on a 360 MHz P4
+
+# ggwave's own flags (as its library.json).
+set_source_files_properties(${GGWAVE_SRCS} PROPERTIES
+  COMPILE_DEFINITIONS "GGWAVE_MAX_RECORDED_FRAMES=640"
+  COMPILE_OPTIONS "-Os")
 
 # The UI logic (UITask.cpp, the biggest file by far) at -Os: Codec2 left the image
 # ~100 KB over its 4 MB OTA slot at -O2. The pixel path the #167 underrun fix is
