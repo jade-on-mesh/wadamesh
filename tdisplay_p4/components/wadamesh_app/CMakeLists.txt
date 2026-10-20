@@ -16,9 +16,17 @@ list(FILTER APP_SRCS EXCLUDE REGEX "/helpers/input/(HeltecV4CapTouch|TDeckKeyboa
 # Vendored Lua 5.4 VM (lib/lua) — the Lua app host (LUA_APPS.md). Plain C, RISC-V clean.
 file(GLOB LUA_SRCS "${REPO}/lib/lua/src/*.c")
 
+# Vendored Codec2 (lib/codec2, LGPL-2.1): plays MeshCore Open TAK voice messages and
+# records them from the ES8311 mic (VoxVoice / VoxMic). Same flags as its library.json.
+file(GLOB CODEC2_SRCS "${REPO}/lib/codec2/src/*.c")
+set_source_files_properties(${CODEC2_SRCS} PROPERTIES
+  COMPILE_DEFINITIONS "__EMBEDDED__;CODEC2_MODE_700C_EN=0;GIT_HASH=\"vendored\""
+  COMPILE_OPTIONS "-O2")
+
 idf_component_register(
-  SRCS ${APP_SRCS} ${LUA_SRCS}
+  SRCS ${APP_SRCS} ${LUA_SRCS} ${CODEC2_SRCS}
   INCLUDE_DIRS "${APP}" "${APP}/ui-touch" "${REPO}/include" "${REPO}/variants/tdisplay_p4" "${REPO}/lib/lua/src"
+               "${REPO}/lib/codec2/include"
   REQUIRES espressif__arduino-esp32 meshcore lvgl ardlibs RadioLib nvs_flash esp_lcd fatfs
            esp_driver_i2c esp_driver_gpio esp_hosted h2zero__esp-nimble-cpp bt
            soc esp_hw_support app_update driver esp_timer esp_partition spi_flash esp_adc esp_pm espcoredump

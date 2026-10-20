@@ -52,6 +52,7 @@ constexpr uint8_t kKeyShift  = 53;
 constexpr uint8_t kKeySym2   = 58;
 constexpr uint8_t kKeyBksp   = 63;
 constexpr uint8_t kKeyLight  = 61;   // F11
+constexpr uint8_t kKeyRecord = 65;   // the microphone key (LilyGo: kRecord)
 constexpr uint8_t kKeyCount  = 68;
 
 constexpr uint8_t kModShift = 0x01;
@@ -91,7 +92,7 @@ const KeyDef kMap[kKeyCount] = {
   {P4KB_LEFT, 0, 0}, {P4KB_DOWN, 0, 0},                                    // 59-60
   {FKEY(11), 0, 0},                                                           // 61
   {'9', '(', '('},                                                         // 62
-  {K_BS, 0, 0}, {K_ENT, 0, 0}, {P4KB_EMOJI, 0, 0}, {K_ENT, 0, 0},                // 63-66
+  {K_BS, 0, 0}, {K_ENT, 0, 0}, {P4KB_RECORD, 0, P4KB_EMOJI}, {K_ENT, 0, 0},       // 63-66 (65: mic)
   {'0', ')', ')'},                                                         // 67
   {P4KB_RIGHT, 0, 0},                                                      // 68
 };
@@ -103,6 +104,10 @@ uint32_t s_last_drain_ms = 0;
 uint8_t  s_mod = 0;
 uint32_t s_mod_ms = 0;
 bool     s_caps = false;
+
+// The microphone key is down (its press went out as P4KB_RECORD): its release
+// goes out as P4KB_RECORD_UP, or as the keyboard comes off.
+bool     s_record_down = false;
 
 // The key being held for repeat (Backspace, the arrows), 0 when none.
 uint8_t  s_held_num = 0;
@@ -231,6 +236,10 @@ bool attach(TwoWire* w) {
 void detach() {
   s_present = false;
   clearState();
+  if (s_record_down) {   // came off mid-recording: stop it as if let go
+    s_record_down = false;
+    ringPush(P4KB_RECORD_UP);
+  }
   applyBacklight();   // nothing is driven into an empty connector
   printf("[P4KB] keyboard expansion removed\n");
 }
@@ -288,10 +297,15 @@ void drain(TwoWire* w, uint32_t now) {
       if (!pressed) {
         // Releases never reach translate(): they would toggle the modifiers back.
         if (k == s_held_num) s_held_num = 0;
+        if (k == kKeyRecord && s_record_down) {
+          s_record_down = false;
+          ringPush(P4KB_RECORD_UP);   // hold-to-talk: letting go stops the recording
+        }
         continue;
       }
       const int code = translate(w, k, now);
       if (!code) continue;
+      if (code == P4KB_RECORD) s_record_down = true;
       ringPush(code);
       if (repeats(code)) {
         s_held_num = k;

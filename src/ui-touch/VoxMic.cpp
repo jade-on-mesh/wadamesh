@@ -8,12 +8,22 @@
 #else
 #define VOX_MIC_TDECK 0
 #endif
+// T-Display P4: the ES8311's ADC, through P4Audio (variants/tdisplay_p4).
+#if defined(HAS_TDISPLAY_P4) && VOX_CODEC2_AVAILABLE
+#define VOX_MIC_P4 1
+#else
+#define VOX_MIC_P4 0
+#endif
 
-#if VOX_MIC_TDECK
+#if VOX_MIC_TDECK || VOX_MIC_P4
 
 #include <Arduino.h>
+#if VOX_MIC_TDECK
 #include <Wire.h>
 #include <driver/i2s.h>
+#else
+#include "P4Audio.h"
+#endif
 #include <esp_heap_caps.h>
 #include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
@@ -28,6 +38,7 @@ using VoxMic::kRecording;
 using VoxMic::kReady;
 using VoxMic::kFailed;
 
+#if VOX_MIC_TDECK
 // ---- ES7210 ------------------------------------------------------------------
 // Register sequence from Espressif's ES7210 driver (ESP-ADF, MIT licence,
 // Copyright (c) 2021 Espressif Systems (Shanghai) Co., Ltd.), as LilyGo ships
@@ -152,6 +163,46 @@ bool i2sStart() {
   return true;
 }
 
+// ---- the board's mic, as the capture task sees it ------------------------------
+bool hwStart(const char** err) {
+  if (!es7210Start()) {
+    es7210Stop();
+    *err = "Microphone not found";
+    return false;
+  }
+  if (!i2sStart()) {
+    es7210Stop();
+    *err = "Microphone busy";
+    return false;
+  }
+  return true;
+}
+// Up to `bytes` of 16 kHz PCM (stereo or mono: the capture task measures which).
+bool hwRead(int16_t* buf, size_t bytes, size_t* got, uint32_t timeout_ms) {
+  return i2s_read(kMicPort, buf, bytes, got, pdMS_TO_TICKS(timeout_ms)) == ESP_OK && *got > 0;
+}
+void hwStop() {
+  i2s_driver_uninstall(kMicPort);
+  es7210Stop();
+}
+#else   // VOX_MIC_P4
+bool hwStart(const char** err) {
+  if (!p4AudioCaptureBegin()) {
+    *err = "Microphone not available";
+    return false;
+  }
+  return true;
+}
+// 16 kHz mono (P4Audio picks the ES8311's live slot).
+bool hwRead(int16_t* buf, size_t bytes, size_t* got, uint32_t timeout_ms) {
+  size_t n = 0;
+  const bool ok = p4AudioCaptureRead(buf, bytes / sizeof(int16_t), &n, timeout_ms);
+  *got = n * sizeof(int16_t);
+  return ok;
+}
+void hwStop() { p4AudioCaptureEnd(); }
+#endif
+
 // ---- capture task --------------------------------------------------------------
 
 constexpr size_t kMaxBits = (size_t)kVoxMaxRecordSeconds * 3200 / 8;   // 20 s at up to 3200 bps
@@ -214,11 +265,11 @@ void captureJob(void*) {
   // sees samples arriving in real time.
   for (int i = 0; ok && i < 64; i++) {
     size_t got = 0;
-    if (i2s_read(kMicPort, rx, sizeof rx, &got, 0) != ESP_OK || got == 0) break;
+    if (!hwRead(rx, sizeof rx, &got, 0)) break;
   }
   while (ok && !s_stop && !s_cancel) {
     size_t got = 0;
-    if (i2s_read(kMicPort, rx, sizeof rx, &got, pdMS_TO_TICKS(200)) != ESP_OK || got == 0) {
+    if (!hwRead(rx, sizeof rx, &got, 200)) {
       s_error = "The microphone stopped";
       ok = false;
       break;
@@ -289,8 +340,7 @@ void workerTask(void*) {
 }
 
 void shutdownHardware() {
-  i2s_driver_uninstall(kMicPort);
-  if (s_codec_on) es7210Stop();
+  if (s_codec_on) hwStop();
   s_codec_on = false;
 }
 
@@ -344,20 +394,11 @@ bool start(int wire_mode, const char** err) {
   s_bits = (uint8_t*)heap_caps_malloc(kMaxBits, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   if (!s_bits) s_bits = (uint8_t*)heap_caps_malloc(kMaxBits, MALLOC_CAP_8BIT);
   if (!s_bits) { memError("clip"); *err = s_mem_err; return false; }
-  if (!es7210Start()) {
-    es7210Stop();
+  if (!hwStart(err)) {
     dropClip();
-    *err = "Microphone not found";
     return false;
   }
   s_codec_on = true;
-  if (!i2sStart()) {
-    es7210Stop();
-    s_codec_on = false;
-    dropClip();
-    *err = "Microphone busy";
-    return false;
-  }
   s_stop = s_cancel = false;
   s_level = 0;
   s_state = kRecording;

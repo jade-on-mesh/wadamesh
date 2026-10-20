@@ -170,3 +170,20 @@ AMOLED/SX1262 build is never reused. **Select the LCD at build time:** `WADA_P4_
   chart on the left, sized to the measured tab height and clear of a right-hand column of Advert /
   Terminal / Apps / Control (6-px gaps, each 22–46 px tall). The info card is portrait-only; its
   eight rows do not fit the 284-px-tall landscape screen.
+
+## Voice messages and the keyboard's mic key (needs on-device verify)
+
+- **Codec2 is built in** (`lib/codec2`, added to `components/wadamesh_app`), so the P4 now plays
+  MeshCore Open TAK voice messages (VE3) on its speaker and records them.
+- **Microphone:** the ES8311's ADC on I2S DIN GPIO11 (LilyGo `es8311::kAdcData`), as the RX half of a
+  duplex pair with the speaker's TX (same MCLK/BCLK/WS). `p4AudioCaptureBegin()` sets the mic input
+  (reg 0x14 = 0x1A: analog MIC1, PGA 30 dB), digital gain (0x16, `P4A_MIC_DIGITAL_GAIN`, 12 dB) and
+  ADC volume (0x17 = 0xBF, 0 dB); `p4AudioCaptureEnd()` mutes it again. Reads keep whichever I2S
+  slot carries the signal. VoxMic records from it exactly as on the T-Deck (16 kHz in, VoxMicPrep,
+  Codec2 1200/1600/3200 from Settings > Sound > Voice messages).
+- **Hold to record:** in a chat, hold the keyboard's **mic key** (LilyGo `kRecord`, TCA8418 key 65;
+  it was the emoji key here) and let go to stop; the review card offers Play, Delete and Send.
+  **Sym + mic** opens the emoji picker. Holding the send button with an empty composer records too,
+  as on the T-Deck. Voice goes out on MediaMesh only (radio2 rx+tx).
+- To verify: the boot log says `[P4AUDIO] ES8311 up (16 kHz, MCLK 256x, mic)`; a recording logs
+  `[VOX] mic stream 32000 B/s: mono`. If clips are quiet or distorted, tune `P4A_MIC_DIGITAL_GAIN`.
