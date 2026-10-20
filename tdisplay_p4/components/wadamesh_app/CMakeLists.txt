@@ -39,4 +39,9 @@ target_compile_options(${COMPONENT_LIB} PRIVATE -w
 # requirements scan runs this file as a script, where these commands don't exist.
 set_source_files_properties(${CODEC2_SRCS} PROPERTIES
   COMPILE_DEFINITIONS "__EMBEDDED__;CODEC2_MODE_700C_EN=0"
-  COMPILE_OPTIONS "-O2")
+  COMPILE_OPTIONS "-Os")   # well ahead of real time at -Os on a 360 MHz P4
+
+# The UI logic (UITask.cpp, the biggest file by far) at -Os: Codec2 left the image
+# ~100 KB over its 4 MB OTA slot at -O2. The pixel path the #167 underrun fix is
+# about (LVGL rendering, the DSI flush) is in other components and stays -O2.
+set_source_files_properties("${APP}/ui-touch/UITask.cpp" PROPERTIES COMPILE_OPTIONS "-Os")
