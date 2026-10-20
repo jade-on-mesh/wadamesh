@@ -18482,7 +18482,7 @@ static void buildSoundPage() {
     lv_label_set_text_fmt(s_vol_val_lbl, "%d%%", (int)touchPrefsGetSoundVolume());
 #endif
   }
-#if defined(HAS_TDECK_GT911) && CAP_LUA_AUDIO && VOX_CODEC2_AVAILABLE
+#if (defined(HAS_TDECK_GT911) || defined(HAS_TDISPLAY_P4)) && CAP_LUA_AUDIO && VOX_CODEC2_AVAILABLE
   {
     // The Codec2 mode the mic records in (VoxMic), as in MeshCore Open TAK.
     lv_obj_t* c = setCard("Voice messages");
@@ -52797,6 +52797,8 @@ static void bleKbdPageRefresh();   // pairing screen + Bluetooth page status (de
 #endif  // CAP_BLE_KEYBOARD
 
 #if defined(HAS_TDISPLAY_P4_KEYBOARD)
+static void voxMicKey(bool down);   // the mic key: hold to record (voice messages, below)
+
 // The clip-on keyboard's codes (P4Keyboard.h) in the Bluetooth keyboard's terms,
 // so it routes through bleKbdDispatch() like the others.
 static int p4KbUiKey(int raw) {
@@ -52975,6 +52977,10 @@ static void bleKbdUiTick() {
   for (int i = 0; i < 16; ++i) {
     const int raw = p4KeyboardReadKey();
     if (!raw) break;
+    if (raw == P4KB_RECORD || raw == P4KB_RECORD_UP) {   // hold to record a voice message
+      if (!s_remote_mode) voxMicKey(raw == P4KB_RECORD);
+      continue;
+    }
     if (s_remote_mode) {
       if (raw == ' ') remotePhysicalKey(' ');
       continue;
@@ -71718,6 +71724,12 @@ void luaHostTextPrompt(const char* title, const char* initial, void (*cb)(const 
 }
 #endif
 
+#if defined(HAS_TOUCH_UI) && !(defined(HAS_TDECK_GT911) || defined(TLORA_PAGER) || defined(HAS_TDECK_MAX))
+// Boards without the T-Deck/pager notification task (the T-Display P4 chimes
+// through P4Audio, whose lock already keeps a chime and the mic apart).
+static constexpr bool s_notify_playing = false;
+#endif
+
 #if defined(HAS_TOUCH_UI)
 // ---- MeshCore Open TAK voice clips: Codec2 to the speaker ---------------------
 // Streams a stored clip through the same audio sink Lua apps use, decoding frame
@@ -71813,9 +71825,9 @@ static bool voxVoicePlay(uint32_t, const char** err) {
 #endif
 static void voxVoiceStop() { if (s_vox_voice_sid) s_vox_voice_stop = true; }
 
-#if defined(HAS_TDECK_GT911) && CAP_LUA_AUDIO
+#if (defined(HAS_TDECK_GT911) || defined(HAS_TDISPLAY_P4)) && CAP_LUA_AUDIO
 // ---- Recording voice messages: hold the send button ------------------------------
-// On a board with a microphone (VoxMic: the T-Deck), the send button records
+// On a board with a microphone (VoxMic: the T-Deck, the T-Display P4), the send button records
 // while the composer is empty. Hold to talk; lifting the finger stops, and a
 // review card offers Play, Delete and Send (as MeshCore Open TAK does), so
 // nothing goes out by accident. The clip is Codec2 in a VE3 envelope, exactly
@@ -71840,6 +71852,10 @@ static lv_obj_t*    s_mic_play_lbl = nullptr;
 static uint32_t     s_mic_sid = 0;              // the stored, not yet sent, clip
 static char         s_mic_env[48] = "";         // its VE3 envelope
 static int          s_mic_thread = -1;          // the chat it was recorded in
+// Held on a keyboard's microphone key (the T-Display P4 keyboard) rather than
+// the send button: the key's release, not the touch panel, stops it.
+static bool         s_mic_by_key = false;
+static bool         s_mic_key_down = false;
 
 static void voxMicReleaseAudio() {
   if (s_mic_owns_audio) {
@@ -71861,6 +71877,7 @@ static void voxMicUiClose() {
   voxMicReleaseAudio();
   s_mic_panel = nullptr;
   s_mic_indev = nullptr;
+  s_mic_by_key = false;
 }
 
 // Close the review card, deleting the clip unless it was sent.
@@ -71990,6 +72007,7 @@ static void voxMicFinish() {
 }
 
 static bool voxMicFingerDown() {
+  if (s_mic_by_key) return s_mic_key_down;
   return s_mic_indev && s_mic_indev->proc.state == LV_INDEV_STATE_PRESSED;
 }
 
@@ -72057,7 +72075,7 @@ static void voxMicShowPill(LvChatPanel* p) {
   lv_obj_set_style_bg_color(s_mic_bar, lv_color_hex(COLOR_STATUS_OK), LV_PART_INDICATOR);
 
   s_mic_hint = lv_label_create(pill);
-  lv_label_set_text(s_mic_hint, TR("Lift your finger to stop"));
+  lv_label_set_text(s_mic_hint, TR(s_mic_by_key ? "Let go of the mic key to stop" : "Lift your finger to stop"));
   lv_obj_set_style_text_font(s_mic_hint, &g_font_12, LV_PART_MAIN);
   lv_obj_set_style_text_color(s_mic_hint, lv_color_hex(COLOR_SUB), LV_PART_MAIN);
 
@@ -72066,6 +72084,59 @@ static void voxMicShowPill(LvChatPanel* p) {
   else lv_obj_align(pill, LV_ALIGN_BOTTOM_MID, 0, -SC(48));
 }
 
+// Starts recording from chat panel `p`: held on the send button, or on a
+// keyboard's mic key (`by_key`).
+static void voxMicBegin(LvChatPanel* p, bool by_key) {
+  if (!g_lv.task || !p) return;
+  if (s_mic_review) return;      // finish reviewing the last one first
+  if (s_mic_pill || g_lv.task->activeThreadIdx() < 0) return;
+  if (luaAudioActive() || s_notify_playing || s_vox_voice_sid) {
+    g_lv.task->showAlert(TR("Audio is busy"), 1500);
+    return;
+  }
+  // Voice goes on MediaMesh (radio2) only, never the main mesh.
+  if (!mediamesh::mediaSendable()) {
+    g_lv.task->showAlert(TR("Voice needs MediaMesh: radio2 on rx+tx"), 2500);
+    return;
+  }
+  // Keep notification chimes off while the mic is open (they'd be recorded).
+  __atomic_store_n(&s_lua_audio_active, true, __ATOMIC_RELEASE);
+  s_mic_owns_audio = true;
+  const char* err = nullptr;
+  if (!VoxMic::start(touchPrefsGetVoiceRecordMode(), &err)) {
+    voxMicUiClose();
+    g_lv.task->showAlert(TR(err ? err : "Recording failed"), 2200);
+    return;
+  }
+  s_mic_panel = p;
+  s_mic_by_key = by_key;
+  s_mic_indev = by_key ? nullptr : lv_indev_get_act();
+  s_mic_thread = g_lv.task->activeThreadIdx();
+  hideKb();
+  voxMicShowPill(p);
+  s_mic_timer = lv_timer_create(voxMicTimerCb, 100, nullptr);
+}
+
+#if defined(HAS_TDISPLAY_P4_KEYBOARD)
+// The keyboard's microphone key: hold it in a chat to record a voice message,
+// let go to stop (the review card then offers Play, Delete and Send, as for
+// the send button). Typed text in the composer stays where it is.
+static void voxMicKey(bool down) {
+  s_mic_key_down = down;
+  if (!down) {
+    if (s_mic_by_key && s_mic_pill) VoxMic::stop();   // the timer opens the review
+    return;
+  }
+  if (!g_lv.task || !VoxMic::available()) return;
+  LvChatPanel* p = navOpenChatPanel();
+  if (!p || !p->composer_ta) {
+    g_lv.task->showAlert(TR("Open a chat, then hold the mic key to record"), 1800);
+    return;
+  }
+  voxMicBegin(p, true);
+}
+#endif
+
 static void voxMicButtonCb(lv_event_t* e) {
   const lv_event_code_t code = lv_event_get_code(e);
   auto* p = static_cast<LvChatPanel*>(lv_event_get_user_data(e));
@@ -72073,33 +72144,9 @@ static void voxMicButtonCb(lv_event_t* e) {
   if (code == LV_EVENT_PRESSED) {
     const char* text = lv_textarea_get_text(p->composer_ta);
     if (text && text[0]) return;   // there's typed text: the button sends that
-    if (s_mic_review) return;      // finish reviewing the last one first
-    if (s_mic_pill || g_lv.task->activeThreadIdx() < 0) return;
-    if (luaAudioActive() || s_notify_playing || s_vox_voice_sid) {
-      g_lv.task->showAlert(TR("Audio is busy"), 1500);
-      return;
-    }
-    // Voice goes on MediaMesh (radio2) only, never the main mesh.
-    if (!mediamesh::mediaSendable()) {
-      g_lv.task->showAlert(TR("Voice needs MediaMesh: radio2 on rx+tx"), 2500);
-      return;
-    }
-    // Keep notification chimes off while the mic is open (they'd be recorded).
-    __atomic_store_n(&s_lua_audio_active, true, __ATOMIC_RELEASE);
-    s_mic_owns_audio = true;
-    const char* err = nullptr;
-    if (!VoxMic::start(touchPrefsGetVoiceRecordMode(), &err)) {
-      voxMicUiClose();
-      g_lv.task->showAlert(TR(err ? err : "Recording failed"), 2200);
-      return;
-    }
-    s_mic_panel = p;
-    s_mic_indev = lv_indev_get_act();
-    s_mic_thread = g_lv.task->activeThreadIdx();
-    hideKb();
-    voxMicShowPill(p);
-    s_mic_timer = lv_timer_create(voxMicTimerCb, 100, nullptr);
+    voxMicBegin(p, false);
   } else if (code == LV_EVENT_RELEASED) {
+    if (s_mic_by_key) return;        // held on the mic key: its release stops it
     if (s_mic_pill) VoxMic::stop();   // the timer opens the review once the last frame is in
   }
   // PRESS_LOST is ignored on purpose: the finger is still down (see above).
@@ -72132,6 +72179,9 @@ static void voxMicAttach(LvChatPanel* p) {
 }
 #else
 static void voxMicAttach(LvChatPanel*) {}   // no microphone on this board
+#if defined(HAS_TDISPLAY_P4_KEYBOARD)
+static void voxMicKey(bool) {}
+#endif
 #endif
 #endif  // HAS_TOUCH_UI (voice clips)
 // True when the chat history lives on a removable SD card (T-Deck SPI SD or the
@@ -74993,7 +75043,7 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
     // largest block, so the worker could never start and tiles, the update
     // check and the app catalog were all silently dead.
     reserveTileFetchStack();
-#if defined(HAS_TDECK_GT911) && CAP_LUA_AUDIO && VOX_CODEC2_AVAILABLE
+#if (defined(HAS_TDECK_GT911) || defined(HAS_TDISPLAY_P4)) && CAP_LUA_AUDIO && VOX_CODEC2_AVAILABLE
     VoxAudioTask::begin();   // likewise the voice record/playback stack (16 KB)
 #endif
     lv_init();

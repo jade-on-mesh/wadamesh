@@ -22,7 +22,11 @@ constexpr int P4KB_UP    = 0x100;
 constexpr int P4KB_DOWN  = 0x101;
 constexpr int P4KB_LEFT  = 0x102;
 constexpr int P4KB_RIGHT = 0x103;
-constexpr int P4KB_EMOJI = 0x104;
+constexpr int P4KB_EMOJI = 0x104;   // Sym + the microphone key
+// The microphone key (LilyGo's kRecord, key 65): pressed, and let go. Hold it
+// in a chat to record a voice message.
+constexpr int P4KB_RECORD    = 0x105;
+constexpr int P4KB_RECORD_UP = 0x106;
 constexpr int P4KB_F1    = 0x110;   // F1..F11 are P4KB_F1 + 0..10 (F11 is taken here: the light)
 
 /** UI loop, every pass: looks for the expansion (every 1.5 s), drains the

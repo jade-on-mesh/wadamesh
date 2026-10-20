@@ -16,9 +16,14 @@ list(FILTER APP_SRCS EXCLUDE REGEX "/helpers/input/(HeltecV4CapTouch|TDeckKeyboa
 # Vendored Lua 5.4 VM (lib/lua) — the Lua app host (LUA_APPS.md). Plain C, RISC-V clean.
 file(GLOB LUA_SRCS "${REPO}/lib/lua/src/*.c")
 
+# Vendored Codec2 (lib/codec2, LGPL-2.1): plays MeshCore Open TAK voice messages and
+# records them from the ES8311 mic (VoxVoice / VoxMic). Same flags as its library.json.
+file(GLOB CODEC2_SRCS "${REPO}/lib/codec2/src/*.c")
+
 idf_component_register(
-  SRCS ${APP_SRCS} ${LUA_SRCS}
+  SRCS ${APP_SRCS} ${LUA_SRCS} ${CODEC2_SRCS}
   INCLUDE_DIRS "${APP}" "${APP}/ui-touch" "${REPO}/include" "${REPO}/variants/tdisplay_p4" "${REPO}/lib/lua/src"
+               "${REPO}/lib/codec2/include"
   REQUIRES espressif__arduino-esp32 meshcore lvgl ardlibs RadioLib nvs_flash esp_lcd fatfs
            esp_driver_i2c esp_driver_gpio esp_hosted h2zero__esp-nimble-cpp bt
            soc esp_hw_support app_update driver esp_timer esp_partition spi_flash esp_adc esp_pm espcoredump
@@ -29,3 +34,14 @@ idf_component_register(
 # Our own code, but huge + LVGL-heavy — keep the first port building; don't -Werror on warnings.
 target_compile_options(${COMPONENT_LIB} PRIVATE -w
   -include "${REPO}/variants/tdisplay_p4/tdisplay_p4_compat.h")   # adcAttachPin() shim (arduino 3.x dropped it)
+
+# Codec2's own flags (as its library.json). After idf_component_register: the
+# requirements scan runs this file as a script, where these commands don't exist.
+set_source_files_properties(${CODEC2_SRCS} PROPERTIES
+  COMPILE_DEFINITIONS "__EMBEDDED__;CODEC2_MODE_700C_EN=0"
+  COMPILE_OPTIONS "-Os")   # well ahead of real time at -Os on a 360 MHz P4
+
+# The UI logic (UITask.cpp, the biggest file by far) at -Os: Codec2 left the image
+# ~100 KB over its 4 MB OTA slot at -O2. The pixel path the #167 underrun fix is
+# about (LVGL rendering, the DSI flush) is in other components and stays -O2.
+set_source_files_properties("${APP}/ui-touch/UITask.cpp" PROPERTIES COMPILE_OPTIONS "-Os")

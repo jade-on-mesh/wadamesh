@@ -20,3 +20,12 @@ uint32_t p4AudioStreamRate();
 bool p4AudioStreamBegin();
 bool p4AudioStreamWrite(const int16_t* samples, size_t frames);
 void p4AudioStreamEnd();
+
+// Microphone (the ES8311's ADC, I2S DIN = 11, LilyGo's es8311::kAdcData), for
+// voice messages (VoxMic). Begin powers the mic input and holds the audio path
+// (chimes and playback wait); call Begin, Read and End from the same task
+// except Read, which may run on another. Read gives 16 kHz mono samples (the
+// codec's louder slot); false when the stream stopped.
+bool p4AudioCaptureBegin();
+bool p4AudioCaptureRead(int16_t* mono, size_t max_samples, size_t* got, uint32_t timeout_ms);
+void p4AudioCaptureEnd();

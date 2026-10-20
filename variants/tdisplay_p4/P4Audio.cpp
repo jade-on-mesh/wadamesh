@@ -21,6 +21,12 @@
 #define P4A_BCLK      12
 #define P4A_WS        9
 #define P4A_DOUT      10
+#define P4A_DIN       11   // ES8311 ADC data (LilyGo es8311::kAdcData)
+
+// Mic gain: PGA 30 dB (reg 0x14, analog MIC1P/N) plus this many 6 dB digital
+// steps (reg 0x16, 0..7). VoxMicPrep's AGC adds up to 27 dB on top; tune here on
+// hardware if clips come out noisy (lower) or quiet (raise).
+#define P4A_MIC_DIGITAL_GAIN 2   // 12 dB
 
 #define P4A_RATE      16000
 #define P4A_MCLK_HZ   (P4A_RATE * 256)
@@ -81,6 +87,7 @@ static bool es8311Init() {
 }
 
 static i2s_chan_handle_t  s_tx  = nullptr;
+static i2s_chan_handle_t  s_rx  = nullptr;   // the mic: same clocks (duplex), enabled while recording
 static SemaphoreHandle_t  s_mtx = nullptr;   // one player at a time
 static bool s_ready = false, s_failed = false;
 
@@ -111,10 +118,15 @@ bool p4AudioReady() {
 
   i2s_chan_config_t ch = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
   ch.auto_clear = true;                       // underrun sends silence, not a looping last buffer
-  if (i2s_new_channel(&ch, &s_tx, nullptr) != ESP_OK) {
-    s_failed = true;
-    xSemaphoreGive(s_mtx);
-    return false;
+  // Full duplex: the mic's RX shares the speaker's clocks. Without an RX channel
+  // (allocation failed) the speaker still works and recording says so.
+  if (i2s_new_channel(&ch, &s_tx, &s_rx) != ESP_OK) {
+    s_rx = nullptr;
+    if (i2s_new_channel(&ch, &s_tx, nullptr) != ESP_OK) {
+      s_failed = true;
+      xSemaphoreGive(s_mtx);
+      return false;
+    }
   }
   i2s_std_config_t std_cfg = {
     .clk_cfg  = I2S_STD_CLK_DEFAULT_CONFIG(P4A_RATE),
@@ -124,13 +136,19 @@ bool p4AudioReady() {
       .bclk = (gpio_num_t)P4A_BCLK,
       .ws   = (gpio_num_t)P4A_WS,
       .dout = (gpio_num_t)P4A_DOUT,
-      .din  = GPIO_NUM_NC,
+      .din  = s_rx ? (gpio_num_t)P4A_DIN : GPIO_NUM_NC,
       .invert_flags = { .mclk_inv = false, .bclk_inv = false, .ws_inv = false },
     },
   };
   std_cfg.clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_256;   // codec dividers assume 256×fs
-  if (i2s_channel_init_std_mode(s_tx, &std_cfg) != ESP_OK ||
-      i2s_channel_enable(s_tx) != ESP_OK) {
+  // Both halves of a duplex pair are set up before either is enabled.
+  const bool tx_ok = i2s_channel_init_std_mode(s_tx, &std_cfg) == ESP_OK;
+  if (s_rx && (!tx_ok || i2s_channel_init_std_mode(s_rx, &std_cfg) != ESP_OK)) {
+    if (tx_ok) printf("[P4AUDIO] mic I2S init failed\n");
+    i2s_del_channel(s_rx);
+    s_rx = nullptr;
+  }
+  if (!tx_ok || i2s_channel_enable(s_tx) != ESP_OK) {
     printf("[P4AUDIO] I2S init failed\n");
     i2s_channel_disable(s_tx);
     i2s_del_channel(s_tx);
@@ -139,7 +157,7 @@ bool p4AudioReady() {
     xSemaphoreGive(s_mtx);
     return false;
   }
-  printf("[P4AUDIO] ES8311 up (16 kHz, MCLK 256x)\n");
+  printf("[P4AUDIO] ES8311 up (16 kHz, MCLK 256x%s)\n", s_rx ? ", mic" : "");
   s_ready = true;
   xSemaphoreGive(s_mtx);
   return true;
@@ -202,6 +220,61 @@ void p4AudioStreamEnd() {
   static const int16_t silence[256 * 2] = {};
   size_t written = 0;
   i2s_channel_write(s_tx, silence, sizeof silence, &written, pdMS_TO_TICKS(300));
+  xSemaphoreGive(s_mtx);
+}
+
+// ---- microphone ------------------------------------------------------------
+static bool s_capturing = false;
+
+bool p4AudioCaptureBegin() {
+  if (!p4AudioReady() || !s_rx) return false;
+  if (xSemaphoreTake(s_mtx, pdMS_TO_TICKS(500)) != pdTRUE) return false;   // a chime is finishing
+  bool ok = false;
+  if (p4I2c1Acquire(P4_I2C1_AUDIO, 200)) {
+    ok = es8311Write(0x14, 0x1A);                                  // analog mic on MIC1P/N, PGA 30 dB
+    ok = es8311Write(0x16, (uint8_t)P4A_MIC_DIGITAL_GAIN) && ok;   // ADC digital gain
+    ok = es8311Write(0x17, 0xBF) && ok;                            // ADC volume 0 dB (reset: muted)
+    p4I2c1Release();
+  }
+  if (!ok || i2s_channel_enable(s_rx) != ESP_OK) {
+    printf("[P4AUDIO] mic %s\n", ok ? "I2S enable failed" : "codec setup failed");
+    xSemaphoreGive(s_mtx);
+    return false;
+  }
+  s_capturing = true;
+  return true;
+}
+
+bool p4AudioCaptureRead(int16_t* mono, size_t max_samples, size_t* got, uint32_t timeout_ms) {
+  *got = 0;
+  if (!s_capturing || !s_rx || !mono || !max_samples) return false;
+  static int16_t stereo[256 * 2];
+  const size_t frames = max_samples > 256 ? 256 : max_samples;
+  size_t bytes = 0;
+  if (i2s_channel_read(s_rx, stereo, frames * 2 * sizeof(int16_t), &bytes, pdMS_TO_TICKS(timeout_ms)) != ESP_OK)
+    return false;
+  const size_t n = bytes / (2 * sizeof(int16_t));
+  // The ES8311's one ADC: on the left slot, maybe copied to the right. Take
+  // whichever slot carries the signal, so a silent slot can't halve it.
+  int64_t el = 0, er = 0;
+  for (size_t i = 0; i < n; i++) {
+    el += stereo[2 * i] < 0 ? -stereo[2 * i] : stereo[2 * i];
+    er += stereo[2 * i + 1] < 0 ? -stereo[2 * i + 1] : stereo[2 * i + 1];
+  }
+  const int off = er > el ? 1 : 0;
+  for (size_t i = 0; i < n; i++) mono[i] = stereo[2 * i + off];
+  *got = n;
+  return n > 0;
+}
+
+void p4AudioCaptureEnd() {
+  if (!s_capturing) return;
+  s_capturing = false;
+  i2s_channel_disable(s_rx);
+  if (p4I2c1Acquire(P4_I2C1_AUDIO, 200)) {
+    es8311Write(0x17, 0x00);   // ADC muted again
+    p4I2c1Release();
+  }
   xSemaphoreGive(s_mtx);
 }
 
