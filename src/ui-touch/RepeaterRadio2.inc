@@ -343,7 +343,7 @@ static void render() {
     setText(w_line, b);
   }
   // Profile.
-  setChoicePick(w_mode, s->edit_mode, s->supported == 1);
+  setChoicePick(w_mode, s->edit_mode ? 1 : 0, s->supported == 1);
   if (w_apply) {
     if (s->busy || s->supported != 1) lv_obj_add_state(w_apply, LV_STATE_DISABLED);
     else lv_obj_clear_state(w_apply, LV_STATE_DISABLED);
@@ -403,7 +403,9 @@ static void renderAgo() {
 
 static void modeCb(lv_event_t* e) {
   if (lv_event_get_code(e) != LV_EVENT_CLICKED || !s) return;
-  s->edit_mode = (int8_t)setChoiceIndex(e);
+  // Off or On (listen and send). A listen-only radio2 set from the Terminal
+  // shows as On; tapping On makes it send too.
+  s->edit_mode = setChoiceIndex(e) == 1 ? 2 : 0;
   render();
 }
 
@@ -584,9 +586,9 @@ static void build(lv_obj_t* page) {
   // The second profile.
   {
     lv_obj_t* c = setCard("radio2 profile");
-    const char* opts[3] = { TR("Off"), TR("Listen"), TR("Listen + send") };
-    w_mode = setChoiceRow(c, nullptr, "Listen hears radio2 but never sends there. Applies with the button below.",
-                          opts, 3, s->edit_mode, modeCb);
+    const char* opts[2] = { TR("Off"), TR("On") };
+    w_mode = setChoiceRow(c, nullptr, "On listens and sends on radio2. Applies with the button below.",
+                          opts, 2, s->edit_mode ? 1 : 0, modeCb);
     lv_obj_t* r1 = setFieldRow(c);
     w_freq = setField(r1, "Frequency (MHz)", "MHz", 10, setFieldW(2));
     w_bw = setField(r1, "Bandwidth (kHz)", "kHz", 7, setFieldW(2));

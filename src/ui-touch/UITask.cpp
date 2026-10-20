@@ -15704,7 +15704,7 @@ static void mediaMeshInfoRefresh() {
 }
 
 // ---- radio2 card: the second profile (MEDIAMESH.md) ----------------------------
-static lv_obj_t* s_mm_mode_row = nullptr;   // Off / Listen / Listen + send
+static lv_obj_t* s_mm_mode_row = nullptr;   // Off / On (On: listen and send)
 static lv_obj_t* s_mm_use_row = nullptr;    // Photos & voice / Everything / Custom
 static lv_obj_t* s_mm_preset_row = nullptr; // 250 kHz fast / 125 kHz range
 
@@ -15731,9 +15731,9 @@ static lv_obj_t* s_mm_t_sf_ta = nullptr;
 static lv_obj_t* s_mm_t_cr_ta = nullptr;
 static lv_timer_t* s_mm_timer = nullptr;
 
-static int mmModeIndex(const mediamesh::Config& c) {
-  return c.mode == mediamesh::MODE_RXTX ? 2 : c.mode == mediamesh::MODE_RX ? 1 : 0;
-}
+// Off or On. On is listen and send; a listen-only radio2 set from the Terminal
+// shows as On, and tapping On makes it send too.
+static int mmModeIndex(const mediamesh::Config& c) { return c.mode == mediamesh::MODE_OFF ? 0 : 1; }
 // "Photos & voice": media on radio2, nothing else crosses (the MediaMesh setup).
 // "Everything": all traffic on both. Anything else set from the terminal: Custom.
 static int mmUseIndex(const mediamesh::Config& c) {
@@ -15770,7 +15770,7 @@ static void mmShareCb(lv_event_t* e) {
 static void mmModeCb(lv_event_t* e) {
   if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
   const int i = setChoiceIndex(e);
-  if (i < 0 || i > 2) return;
+  if (i < 0 || i > 1) return;
   NodePrefs* np = the_mesh.getNodePrefs();
   if (i != 0 && np && np->client_repeat) {
     // Client repeat keeps radio2 off; it comes back when Client repeat is off.
@@ -15780,7 +15780,7 @@ static void mmModeCb(lv_event_t* e) {
   }
   mediamesh::Config c = mediamesh::config();
   const bool was_off = c.mode == mediamesh::MODE_OFF;
-  c.mode = i == 2 ? mediamesh::MODE_RXTX : i == 1 ? mediamesh::MODE_RX : mediamesh::MODE_OFF;
+  c.mode = i == 1 ? mediamesh::MODE_RXTX : mediamesh::MODE_OFF;
   if (np && np->client_repeat) c.held = c.mode;   // Off chosen now: stays Off afterwards too
   if (was_off && c.mode != mediamesh::MODE_OFF && c.media == mediamesh::TX_AUTO && c.cross == mediamesh::CROSS_AUTO) {
     c.media = mediamesh::TX_RADIO2;   // never set up: start as MediaMesh (photos and voice)
@@ -15790,7 +15790,7 @@ static void mmModeCb(lv_event_t* e) {
   mediaMeshRefreshChoices();
   mediaMeshInfoRefresh();
   if (g_lv.task) {
-    g_lv.task->showAlert(i == 0 ? TR("radio2 off") : i == 1 ? TR("radio2 listening") : TR("radio2 listening and sending"), 1300);
+    g_lv.task->showAlert(i == 0 ? TR("radio2 off") : TR("radio2 on"), 1300);
   }
 }
 
@@ -15933,9 +15933,9 @@ static void buildMediaMeshCard() {
   }
   const mediamesh::Config& cfg = mediamesh::config();
   {
-    const char* opts[3] = { TR("Off"), TR("Listen"), TR("Listen + send") };
-    s_mm_mode_row = setChoiceRow(c, "radio2", "A second frequency the radio switches to and from. Listen only never sends there.",
-                                 opts, 3, mmModeIndex(cfg), mmModeCb);
+    const char* opts[2] = { TR("Off"), TR("On") };
+    s_mm_mode_row = setChoiceRow(c, "radio2", "A second frequency the radio switches to and from, listening and sending there.",
+                                 opts, 2, mmModeIndex(cfg), mmModeCb);
   }
   {
     const char* opts[3] = { TR("Photos & voice"), TR("Everything"), TR("Custom") };

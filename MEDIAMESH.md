@@ -19,8 +19,10 @@ and the infrastructure-only `tx.reply`.
 
 The **radio2 (MediaMesh)** card:
 
-- **radio2**: Off / Listen / Listen + send (`set radio2 ...,off|rx|rxtx`).
-  Turning it on from untouched settings also picks Photos & voice below.
+- **radio2**: Off / On. On listens and sends there (`rxtx`). Listen only (`rx`)
+  is still available from the Terminal (`set radio2 ...,rx`); it shows as On,
+  and tapping On makes it send too. Turning it on from untouched settings also
+  picks Photos & voice below.
 - **Sent on radio2**: *Photos & voice* (`tx.media radio2`, `radio2.cross off`) or
   *Everything* (`tx.media auto`, `radio2.cross on`). Any other mix shows *Custom*;
   set that in the Terminal.
@@ -65,7 +67,8 @@ antenna button in the console's header for its **MediaMesh** page:
 - **Live**: packets heard and sent per radio, the share heard on radio2, switch
   time, preambles, switch errors and the repeater's warnings. **Refresh** asks
   again; nothing is polled, to save airtime.
-- **radio2 profile**: Off / Listen / Listen + send, frequency, bandwidth, SF, CR
+- **radio2 profile**: Off / On (listen and send; a listen-only repeater shows as
+  On until On is tapped and applied), frequency, bandwidth, SF, CR
   and an optional preamble (empty = the repeater picks it), applied with **Apply
   to repeater** after a confirm. The repeater answers first and switches after,
   so if you reach it over radio2 you may lose contact until your radio follows.
@@ -170,7 +173,7 @@ Crossing never sends on an `rx`-only radio2.
     `tx.media`'s route.
 - **Client Repeat** switches radio2 **Off** when it is turned on (and ends a
   `tempradio2`), exactly as choosing Off does, and remembers whether radio2 was
-  Off, Listen or Listen + send. Everything, photos and voice too, goes out on
+  Off or on (and how: `rx` or `rxtx`). Everything, photos and voice too, goes out on
   the main radio (918 MHz for a client-repeat group). radio2 can't be turned
   back on while Client Repeat is on (one turned on from an app or the
   Terminal goes off again, and that choice is the one remembered). Turning
@@ -183,7 +186,7 @@ Crossing never sends on an `rx`-only radio2.
   radio2 photos and voice aren't relayed onto the main mesh. A packet its sender put on both radios (a
   request with `mediamesh.share on`, anything with `cross on`) is relayed on
   each radio it is heard on, once per radio, and handled (shown, passed to the
-  app) only once. radio2 must be *Listen + send* (`rxtx`) to relay there.
+  app) only once. radio2 must be on and sending (`rxtx`) to relay there.
 - **tx.user** covers everything addressed to a contact: messages, logins,
   requests, path-return retries, every flood to them, and the ACKs and replies
   we send them. Direct packets the core sends by itself (room keep-alives) are
