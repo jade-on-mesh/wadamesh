@@ -71,19 +71,29 @@ static void setup(HTTPClient& h, bool follow) {
 }
 
 // Newest release: github.com answers /releases/latest with a redirect to its tag.
+// A renamed repo answers with a redirect to its new name first (and that one
+// with the tag), so redirects are followed until one names a tag: a build that
+// knows the old name keeps finding updates after a rename.
 static int latest() {
-  WiFiClientSecure c;
-  c.setInsecure();
-  HTTPClient h;
-  setup(h, false);
-  const char* keys[] = {"Location"};
-  h.collectHeaders(keys, 1);
-  if (!h.begin(c, "https://github.com/" WADA_FORK_REPO "/releases/latest")) return -1;
-  const int code = h.GET();
-  const String loc = h.header("Location");
-  h.end();
-  if (code != 301 && code != 302) return -1;
-  return forkupd::releaseCode(loc.c_str());   // -1 too when there are no releases yet
+  String url = "https://github.com/" WADA_FORK_REPO "/releases/latest";
+  for (int hop = 0; hop < 4; hop++) {
+    WiFiClientSecure c;
+    c.setInsecure();
+    HTTPClient h;
+    setup(h, false);
+    const char* keys[] = {"Location"};
+    h.collectHeaders(keys, 1);
+    if (!h.begin(c, url)) return -1;
+    const int code = h.GET();
+    String loc = h.header("Location");
+    h.end();
+    if (code != 301 && code != 302 && code != 307 && code != 308) return -1;
+    const int rel = forkupd::releaseCode(loc.c_str());
+    if (rel >= 0 || loc.length() == 0) return rel;   // -1 too when there are no releases yet
+    if (loc.startsWith("/")) loc = String("https://github.com") + loc;
+    url = loc;
+  }
+  return -1;
 }
 
 static void assetUrl(char* out, size_t cap, const char* tag, const char* file) {
