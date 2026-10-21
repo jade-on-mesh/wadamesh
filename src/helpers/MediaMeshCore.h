@@ -117,6 +117,114 @@ inline int findPick(uint32_t heard_fast, uint32_t heard_range) {
   if (!heard_fast && !heard_range) return -1;
   return heard_range > heard_fast ? 1 : 0;
 }
+
+// ---- Find MediaMesh by asking ------------------------------------------------------
+// The first step, like Discover Repeaters: a zero-hop DISCOVER_REQ with the
+// radio2 flag, and repeaters that support it (keymindCascade, proposed) append
+// their radio2 profile to the DISCOVER_RESP after their key:
+//   [ver=1][flags][freq u32 LE, MHz x1000][bw u32 LE, kHz x1000][sf][cr]
+//   flags: bit 0 configured, bits 1-2 mode (0 off, 1 rx, 2 rxtx), bit 3 temporary
+//   radio2 off: just [1][0]
+// Stock firmware ignores the flag (it reads the top four bits of byte 0) and
+// answers without the trailer. Same layout as MeshCore Open TAK's
+// DiscoverRadio2 (lib/connector/meshcore_protocol.dart); the golden bytes are
+// in both test suites.
+static constexpr uint8_t kDiscoverWantRadio2 = 0x02;   // DISCOVER_REQ byte 0 flag
+static constexpr uint32_t kAskListenMs = 12000;        // collect answers this long
+static constexpr uint8_t kDiscoverRadio2Ver = 1;
+static constexpr uint8_t kDiscoverRadio2Len = 12;
+
+struct DiscoverRadio2 {
+  bool configured = false;
+  uint8_t mode = 0;          // 0 off, 1 rx, 2 rxtx
+  bool temporary = false;
+  uint32_t freq_khz = 0;     // MHz x1000
+  uint32_t bw_hz = 0;        // kHz x1000
+  uint8_t sf = 0, cr = 0;
+  bool active() const { return configured && mode != 0; }
+};
+
+/** The trailer in `b` (what follows the key), or false when it isn't one. A
+ *  later version may append; the first twelve bytes keep their meaning. */
+inline bool parseDiscoverRadio2(const uint8_t* b, size_t n, DiscoverRadio2& out) {
+  out = DiscoverRadio2{};
+  if (!b || n < 2 || b[0] < kDiscoverRadio2Ver) return false;
+  if (!(b[1] & 0x01)) return true;   // radio2 not configured
+  if (n < kDiscoverRadio2Len) return false;
+  out.configured = true;
+  out.mode = (uint8_t)((b[1] >> 1) & 0x03);
+  out.temporary = (b[1] & 0x08) != 0;
+  out.freq_khz = (uint32_t)b[2] | ((uint32_t)b[3] << 8) | ((uint32_t)b[4] << 16) | ((uint32_t)b[5] << 24);
+  out.bw_hz = (uint32_t)b[6] | ((uint32_t)b[7] << 8) | ((uint32_t)b[8] << 16) | ((uint32_t)b[9] << 24);
+  out.sf = b[10];
+  out.cr = b[11];
+  return true;
+}
+
+/** Writes the trailer; returns its length (2 or 12). */
+inline size_t encodeDiscoverRadio2(const DiscoverRadio2& p, uint8_t out[kDiscoverRadio2Len]) {
+  out[0] = kDiscoverRadio2Ver;
+  if (!p.configured) { out[1] = 0; return 2; }
+  out[1] = (uint8_t)(0x01 | ((p.mode & 0x03) << 1) | (p.temporary ? 0x08 : 0));
+  for (int i = 0; i < 4; i++) out[2 + i] = (uint8_t)(p.freq_khz >> (8 * i));
+  for (int i = 0; i < 4; i++) out[6 + i] = (uint8_t)(p.bw_hz >> (8 * i));
+  out[10] = p.sf;
+  out[11] = p.cr;
+  return kDiscoverRadio2Len;
+}
+
+/** A profile the app's settings can hold (MeshCore Open TAK's enums). */
+inline bool settableProfile(const DiscoverRadio2& p) {
+  static const uint32_t kBw[] = {7800, 10400, 15600, 20800, 31250, 41700, 62500, 125000, 250000, 500000};
+  bool bw = false;
+  for (uint32_t v : kBw) bw |= p.bw_hz == v;
+  return bw && p.freq_khz != 0 && p.sf >= 5 && p.sf <= 12 && p.cr >= 5 && p.cr <= 8;
+}
+
+/** One answer for profilePick. */
+struct Radio2Report {
+  DiscoverRadio2 p;
+  float snr;
+};
+
+/** The profile most reporting repeaters run (radio2 on: rx or rxtx), the
+ *  stronger signal breaking a tie. Writes it, how many run it and the best
+ *  SNR; false when none reports one. Same rule as MeshCore Open TAK's
+ *  mediaMeshProfilePick. */
+inline bool profilePick(const Radio2Report* r, size_t n, DiscoverRadio2& out, uint8_t& count, float& best_snr) {
+  bool found = false;
+  count = 0;
+  best_snr = 0;
+  for (size_t i = 0; i < n; i++) {
+    const DiscoverRadio2& a = r[i].p;
+    if (!a.active() || !settableProfile(a)) continue;
+    bool counted = false;   // the first of its group does the counting
+    for (size_t k = 0; k < i && !counted; k++) {
+      const DiscoverRadio2& b = r[k].p;
+      counted = b.active() && settableProfile(b) && b.freq_khz == a.freq_khz && b.bw_hz == a.bw_hz && b.sf == a.sf
+                && b.cr == a.cr;
+    }
+    if (counted) continue;
+    uint8_t c = 0;
+    float snr = -1000;
+    for (size_t k = i; k < n; k++) {
+      const DiscoverRadio2& b = r[k].p;
+      if (b.active() && settableProfile(b) && b.freq_khz == a.freq_khz && b.bw_hz == a.bw_hz && b.sf == a.sf
+          && b.cr == a.cr) {
+        if (c < 255) c++;
+        if (r[k].snr > snr) snr = r[k].snr;
+      }
+    }
+    if (!found || c > count || (c == count && snr > best_snr)) {
+      found = true;
+      out = a;
+      out.temporary = false;
+      count = c;
+      best_snr = snr;
+    }
+  }
+  return found;
+}
 static constexpr uint8_t kDefaultSf = 7;
 static constexpr uint8_t kDefaultCr = 5;
 

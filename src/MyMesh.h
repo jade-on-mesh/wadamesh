@@ -757,6 +757,8 @@ public:
     uint32_t first_ms;      // millis() first heard this session
     uint32_t last_ms;       // millis() last heard
     uint16_t heard;         // reply count
+    uint8_t  r2[12];        // radio2 profile after the key (mediamesh::DiscoverRadio2), when asked
+    uint8_t  r2_len;        // 0: the repeater sent none
   };
   static const int DISCOVER_MAX = 64;
   DiscoverHit _discover[DISCOVER_MAX];
@@ -770,7 +772,8 @@ public:
   void     discoverClear() { _discover_cnt = 0; }
   uint32_t discoverScanMs() const { return _discover_scan_ms; }
   void     discoverUpsert(const uint8_t* pk, uint8_t pklen, uint8_t node_type,
-                          int8_t our_snr_q4, int8_t our_rssi, int8_t their_snr_q4, uint8_t path_len);
+                          int8_t our_snr_q4, int8_t our_rssi, int8_t their_snr_q4, uint8_t path_len,
+                          const uint8_t* extra = nullptr, uint8_t extra_len = 0);
 
   // ---- Recent-RX ring (RF Monitor app) ----
   // One record per received frame, captured in logRxRaw(): payload type / route
@@ -1055,9 +1058,10 @@ public:
    *  one zero-hop NODE_DISCOVER_REQ; neighbours reply DIRECTLY (never floods). type_filter = OR of
    *  (1<<ADV_TYPE_*); pass 0 for "all types". Returns the scan tag (0 = failed). The caller should
    *  airtime-gate repeated sweeps (Dispatcher::getRemainingTxBudget). */
-  uint32_t uiStartDiscoverScan(uint8_t type_filter = 0) {
+  uint32_t uiStartDiscoverScan(uint8_t type_filter = 0, bool want_radio2 = false) {
     uint8_t data[10];
     data[0] = CTL_TYPE_NODE_DISCOVER_REQ;            // 0x80; low bit prefix_only=0 -> full 32-byte pubkeys
+    if (want_radio2) data[0] |= 0x02;                // Find MediaMesh: "add your radio2 profile" (MediaMeshCore.h)
     data[1] = type_filter ? type_filter
               : (uint8_t)((1 << ADV_TYPE_CHAT) | (1 << ADV_TYPE_REPEATER) |
                           (1 << ADV_TYPE_ROOM) | (1 << ADV_TYPE_SENSOR));   // all types
