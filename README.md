@@ -52,7 +52,8 @@ and internal-storage paths, see [AUDIO_PLAYBACK_TESTING.md](AUDIO_PLAYBACK_TESTI
 Region discovery, known-region management, and per-channel flood scopes are
 described in [REGIONS.md](REGIONS.md). MeshCore Open TAK photos and voice are
 covered in [VOX_PHOTOS.md](VOX_PHOTOS.md), and sending them on a second LoRa
-frequency (MediaMesh, `radio2`) in [MEDIAMESH.md](MEDIAMESH.md).
+frequency (MediaMesh, `radio2`) in [MEDIAMESH.md](MEDIAMESH.md). Updating a repeater's firmware over LoRa from
+the SD card (Mike Carper's LoRa OTA) is in [LORA_UPDATE.md](LORA_UPDATE.md).
 
 ## Offline map tiles
 

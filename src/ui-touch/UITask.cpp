@@ -256,6 +256,7 @@ static_assert(ChannelSenderSplit::kMaxWireName >= (size_t)UITask::MAX_SENDER_NAM
     // add here (e.g. the signal-probe prefs). Quotes force the local src/ copy.
     #include "../helpers/esp32/TouchPrefsStore.h"
     #include "../helpers/MediaMesh.h"   // MediaMesh Settings (radio2)
+    #include "../helpers/LoraUpdate.h"  // LoRa Update (repeater admin)
     // A block-list slot narrower than a sender name stores a cut name that the full-width
     // RX check can never match again — the block shows in Settings and silently never
     // fires. TouchPrefsStore.h stated this invariant in prose; prose is what let it rot.
@@ -22334,9 +22335,11 @@ static void closeAdminPwPrompt() {
 }
 
 namespace rr2 { void closePage(); void openPage(const uint8_t* pub32, const char* name); }   // RepeaterRadio2.inc
+namespace lup { void closePage(); void openPage(const uint8_t* pub32, const char* name); }   // LoraUpdate.inc
 
 static void closeAdminConsole() {
   rr2::closePage();
+  lup::closePage();   // a running update carries on
   if (s_admin_root) {
     hideKb();
     closeAdminCmdPicker();
@@ -22520,6 +22523,7 @@ static void adminCmdSubmit() {
 }
 
 #include "RepeaterRadio2.inc"   // the MediaMesh (radio2) page for the repeater we are logged in to
+#include "LoraUpdate.inc"       // LoRa Update: firmware from the SD card to that repeater
 
 static void openAdminConsole(const ContactInfo& c) {
   closeAdminPwPrompt();
@@ -22565,10 +22569,10 @@ static void openAdminConsole(const ContactInfo& c) {
     closeAdminConsole();
   });
   // Trim the title's right side so a long repeater name can't slide under
-  // the X. Header is sw=240 wide; reserve 36 px for the X badge and 40 for
-  // the MediaMesh button beside it.
+  // the X. Header is sw=240 wide; reserve 36 px for the X badge and 40 each
+  // for the MediaMesh and LoRa Update buttons beside it.
   lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
-  lv_obj_set_width(title, sw - 8 - 36 - 40);
+  lv_obj_set_width(title, sw - 8 - 36 - 80);
   // MediaMesh (radio2) on this repeater: its own page (RepeaterRadio2.inc).
   {
     lv_obj_t* mm = lv_btn_create(hdr);
@@ -22584,6 +22588,22 @@ static void openAdminConsole(const ContactInfo& c) {
       if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
       hideKb();
       rr2::openPage(s_admin_pub32, s_admin_name);
+    }, LV_EVENT_CLICKED, nullptr);
+  }
+  // LoRa Update: serve this repeater new firmware from the SD card (LoraUpdate.inc).
+  {
+    lv_obj_t* up = lv_btn_create(hdr);
+    lv_obj_set_size(up, 34, 28);
+    lv_obj_align(up, LV_ALIGN_RIGHT_MID, -76, 0);
+    styleButton(up);
+    lv_obj_set_style_pad_all(up, 0, LV_PART_MAIN);
+    lv_obj_t* ul = lv_label_create(up);
+    setIconLabel(ul, UI_ICON_ARROW_UP);
+    lv_obj_center(ul);
+    lv_obj_add_event_cb(up, [](lv_event_t* e) {
+      if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+      hideKb();
+      lup::openPage(s_admin_pub32, s_admin_name);
     }, LV_EVENT_CLICKED, nullptr);
   }
 
@@ -70802,6 +70822,7 @@ void UITask::onAdminCommandReply(const ContactInfo& contact, const char* text) {
   // into. Replies from a different repeater would be confusing — the
   // companion-serial side handles those separately via queueMessage.
   if (rr2::onAdminReply(contact, text)) return;   // the MediaMesh page's own command
+  if (lup::onAdminReply(contact, text)) return;   // a LoRa Update step
   if (raOnCliReply(contact, text)) return;   // a "wX|" reply to the admin app
   if (memcmp(contact.id.pub_key, s_admin_pub32, 32) != 0) return;
   adminLogAppend("", text ? text : "");

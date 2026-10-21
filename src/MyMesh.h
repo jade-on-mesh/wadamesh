@@ -321,6 +321,9 @@ protected:
   bool filterRecvFloodPacket(mesh::Packet* packet) override;
   bool allowPacketForward(const mesh::Packet* packet) override;
   mesh::DispatcherAction forwardSecondCopy(mesh::Packet* pkt);   // Client Repeat on both radios
+public:
+  bool sendLoraUpdatePacket(const uint8_t* msg, uint16_t len);   // LoRa Update: one engine message
+protected:
   // The profile the packet being processed arrived on (radio2 channel lookups),
   // and each contact's TX choice around the core's ACKs and replies.
   mesh::DispatcherAction onRecvPacket(mesh::Packet* pkt) override;
