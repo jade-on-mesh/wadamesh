@@ -96,8 +96,9 @@ Changes from GridDown:
 
 ## Limits
 
-- **Cooperative only.** It hears drones that broadcast Remote ID. A drone
-  without it (older, home-built, or with it turned off) isn't detected.
+- **Remote ID is cooperative.** It hears drones that broadcast it. A drone
+  without it (older, home-built, or with it turned off) is only found by the
+  optional 900 MHz scan above, and only if its control link is on 902-928 MHz.
 - **Wi-Fi is shared.** Wi-Fi listens only while the standalone isn't connected
   to a network and no access point is up, the same rule as Flock You. When a
   network is saved, it steps aside every 45 seconds so the network can
