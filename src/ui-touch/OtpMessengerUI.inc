@@ -1120,7 +1120,7 @@ static void buildChat() {
 // ---- Pad as QR codes ---------------------------------------------------------------------------
 // The unused pad as a loop of QR codes (PadQr.h) for MeshCore Open TAK's
 // OTP Pad > Scan QR: each part a few hundred bytes, shown in turn until the
-// phone has them all. White full screen, so the codes have a clean margin.
+// phone has them all. White below the status bar, so the codes have a clean margin.
 constexpr int kQrMaxVersion = 13;
 static lv_obj_t* s_qr = nullptr;
 static lv_obj_t* s_qr_canvas = nullptr;
@@ -1224,7 +1224,10 @@ static void qrOpen() {
   memset(hex.p, 0, hex.n);
 
   // Landscape screens put the code on the left and the controls beside it.
-  const lv_coord_t sw = lv_disp_get_hor_res(nullptr), sh = lv_disp_get_ver_res(nullptr);
+  // Everything sits below the status bar, which is drawn over the top layer:
+  // a full-screen overlay lost its title, the part counter and the code's top
+  // rows under it.
+  const lv_coord_t sw = lv_disp_get_hor_res(nullptr), sh = appPageContentH();
   const bool side = sw - sh >= SC(80);
   const lv_coord_t avail = side ? LV_MIN(sh - 8, sw - SC(96)) : LV_MIN(sw - 8, sh - SC(30) - SC(40));
   s_qr_ver = 0;
@@ -1245,6 +1248,7 @@ static void qrOpen() {
   s_qr = lv_obj_create(lv_layer_top());
   lv_obj_remove_style_all(s_qr);
   lv_obj_set_size(s_qr, sw, sh);
+  lv_obj_set_pos(s_qr, 0, appPageContentTop());
   lv_obj_set_style_bg_color(s_qr, lv_color_white(), LV_PART_MAIN);
   lv_obj_set_style_bg_opa(s_qr, LV_OPA_COVER, LV_PART_MAIN);
   lv_obj_add_flag(s_qr, LV_OBJ_FLAG_CLICKABLE);
@@ -1260,10 +1264,13 @@ static void qrOpen() {
   lv_obj_t* col = lv_obj_create(s_qr);
   lv_obj_remove_style_all(col);
   lv_obj_set_flex_flow(col, side ? LV_FLEX_FLOW_COLUMN : LV_FLEX_FLOW_ROW_WRAP);
-  lv_obj_set_flex_align(col, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-  lv_obj_set_style_pad_row(col, SC(6), LV_PART_MAIN);
+  // From the top beside the code: centred, an overflow would be cut off above as well as below.
+  lv_obj_set_flex_align(col, side ? LV_FLEX_ALIGN_START : LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lv_obj_set_style_pad_row(col, SC(4), LV_PART_MAIN);
   lv_obj_set_style_pad_column(col, SC(6), LV_PART_MAIN);
-  lv_obj_clear_flag(col, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_style_pad_ver(col, SC(4), LV_PART_MAIN);
+  lv_obj_set_scroll_dir(col, LV_DIR_VER);   // a short screen scrolls the hint rather than cutting it off
+  lv_obj_set_scrollbar_mode(col, LV_SCROLLBAR_MODE_OFF);
   const lv_coord_t bw = side ? sw - s_qr_px - SC(14) : (sw - SC(30)) / 3;
   if (side) {
     lv_obj_set_pos(s_qr_canvas, 4, (sh - s_qr_px) / 2);
@@ -1293,7 +1300,7 @@ static void qrOpen() {
   qrBtn(col, "Close", [](lv_event_t*) { qrClose(); }, bw);
   if (side) {
     lv_obj_t* hint = lv_label_create(col);
-    lv_label_set_text(hint, TR("Scan in MeshCore Open TAK: OTP Pad > Scan QR. Keep it private."));
+    lv_label_set_text(hint, TR("Scan in Open TAK: OTP Pad > Scan QR. Keep it private."));
     lv_label_set_long_mode(hint, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(hint, bw);
     lv_obj_set_style_text_font(hint, &g_font_12, LV_PART_MAIN);
