@@ -91,7 +91,7 @@ static const char* myCallsign() {
 static void toast(const char* m, int ms = 2200) { if (g_lv.task) g_lv.task->showAlert(m, ms); }
 
 // ---- what was heard --------------------------------------------------------------------------
-enum class What : uint8_t { Message, Locked, Channel, Contact, Raw, Sent };
+enum class What : uint8_t { Message, Locked, Channel, Contact, Raw, Sent, PadCheck };
 struct Entry {
   What what;
   char sender[32];
@@ -167,7 +167,11 @@ static volatile bool s_job_done = true;
 static const char* volatile s_job_err = nullptr;
 static volatile int s_level = 0;          // mic peak, 0..100
 static char s_err[96] = "";               // why listening or playing failed (shown on the page)
-static uint32_t s_rx_retry_at = 8000;   // listening resumes a few seconds after boot
+static uint32_t s_rx_retry_at = 8000;
+static uint32_t s_listen_until = 0;        // a short listen asked for elsewhere (OTP pad check)
+static bool wantListen() {
+  return s_cfg.listen || (s_listen_until && (int32_t)(millis() - s_listen_until) < 0);
+}   // listening resumes a few seconds after boot
 
 struct Out { char msg[soundlink::kMaxBytes + 1]; uint8_t proto; uint8_t volume; };
 static Out s_queue[kQueueMax];
@@ -340,6 +344,20 @@ static bool enqueue(const char* msg) {
   return true;
 }
 
+// For other screens: play `msg` as it is, and listen for a while.
+static bool playRaw(const char* msg) {
+  loadCfg();
+  if (strlen(msg) > soundlink::kMaxBytes) return false;
+  return enqueue(msg);
+}
+static void listenFor(uint32_t ms) {
+  loadCfg();
+  s_listen_until = millis() + ms;
+  if (!s_listen_until) s_listen_until = 1;
+  s_rx_retry_at = millis();
+  setErr("");
+}
+
 static bool playing() { return s_st == St::Tx || s_queue_n > 0; }
 static bool listening() { return s_st == St::Rx; }
 
@@ -392,7 +410,13 @@ static void handleHeard(const char* s) {
   uint8_t key[32];
   char name[64];
   uint8_t type = 1;
-  if (soundlink::parseChannelLink(s, name, sizeof name, key)) {
+  uint32_t pad_n = 0;
+  if (otp::parsePadCheck(s, key, &pad_n)) {   // OTP Messenger's pad check code
+    e->what = What::PadCheck;
+    otpui::onPadCheckHeard(key, pad_n, e->text, sizeof e->text);
+    s_listen_until = 0;   // a short listen ends with what it was for
+    return;               // onPadCheckHeard said how it went
+  } else if (soundlink::parseChannelLink(s, name, sizeof name, key)) {
     e->what = What::Channel;
     soundlink::copyUtf8(e->name, sizeof e->name, name[0] ? name : "Channel", 31);
     memcpy(e->key, key, 16);
@@ -450,7 +474,7 @@ static void loopTick() {
   switch (s_st) {
     case St::Idle:
       if (s_queue_n) startTx();
-      else if (s_cfg.listen && (int32_t)(now - s_rx_retry_at) >= 0 && !startRx()) s_rx_retry_at = now + 5000;
+      else if (wantListen() && (int32_t)(now - s_rx_retry_at) >= 0 && !startRx()) s_rx_retry_at = now + 5000;
       break;
     case St::Rx:
       if (s_job_done) {   // ended by itself: the mic or memory
@@ -458,7 +482,7 @@ static void loopTick() {
         setErr(s_job_err ? s_job_err : "Stopped");
         s_st = St::Idle;
         s_rx_retry_at = now + 5000;
-      } else if (s_queue_n || !s_cfg.listen) {
+      } else if (s_queue_n || !wantListen()) {
         s_job_stop = true;
         s_st = St::StoppingRx;
       }
@@ -595,7 +619,7 @@ static lv_obj_t* chip(lv_obj_t* row, const char* t, lv_event_cb_t cb, void* ud, 
 static void statusLine(char* out, size_t cap) {
   if (s_st == St::Tx || s_queue_n) snprintf(out, cap, "%s", TR("Playing..."));
   else if (listening()) snprintf(out, cap, "%s", TR("Listening. Hold the other device near the mic."));
-  else if (s_cfg.listen) snprintf(out, cap, "%s", TR("Starting the microphone..."));
+  else if (wantListen()) snprintf(out, cap, "%s", TR("Starting the microphone..."));
   else snprintf(out, cap, "%s", TR("Not listening."));
 }
 

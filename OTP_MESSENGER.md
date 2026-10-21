@@ -57,6 +57,12 @@ advances.
 Files live on the internal store as `/otp<kind><fnv32>` (SPIFFS names stop at 31
 characters, and hashing keeps contact names out of the listing), plus
 `/otpsettings` and `/otptargets`.
+- **Check code**: the pad screen shows a 16-digit check code, the first 8
+  bytes of SHA-256 over a fixed label and the whole pad (`otp::padFingerprint`).
+  It is the same in MeshCore Open TAK, so two devices with the same code
+  have the same pad, and it reveals nothing usable about the pad. On boards with
+  Sound link (T-Deck, T-Display P4) it can be played and listened for
+  (`meshcore://otp/check?fp=…&n=…`). The pad itself is never sent by sound.
 
 ## Testing
 

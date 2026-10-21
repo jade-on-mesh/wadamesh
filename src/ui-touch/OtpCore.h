@@ -70,6 +70,19 @@ void sha256(const uint8_t* data, size_t len, uint8_t out[32]);
 void hmacSha256(const uint8_t* key, size_t key_len, const uint8_t* msg, size_t msg_len,
                 uint8_t out[32]);
 
+// ---- checking a pad (by sound, or by reading the code out) ---------------------
+// Two copies of a pad are the same when their check codes are: the first 8
+// bytes of SHA-256(kPadCheckLabel || every pad byte). Over the whole pad, not
+// what is left, so it holds after use, and the same in MeshCore Open TAK
+// (lib/services/otp_pad_check.dart, same test vectors). It says nothing usable
+// about the pad itself, so it can be played aloud or read out:
+//   meshcore://otp/check?fp=<16 hex>&n=<pad bytes>
+constexpr const char* kPadCheckLabel = "MeshCore OTP pad check v1\n";
+void padFingerprint(const uint8_t* pad, size_t n, uint8_t fp[8]);
+size_t padCheckLink(const uint8_t fp[8], uint32_t n, char* out, size_t cap);
+bool parsePadCheck(const char* link, uint8_t fp[8], uint32_t* n);
+void padCheckCode(const uint8_t fp[8], char out[20]);   // "73fc dbde 9589 d5a0"
+
 // ---- small helpers (exposed for tests) ----------------------------------------
 void toHex(const uint8_t* b, size_t n, char* out);   // lowercase, NUL-terminated (2n+1)
 bool fromHex(const char* hex, size_t hex_len, Bytes& out);
@@ -237,6 +250,7 @@ class Core {
   void flipRole(Target& t);
   char autoRole(Target& t);                       // 0 when unknown
   bool exportHex(Target& t, Bytes& out);          // the UNUSED part of the pad, as the peer imports it
+  bool padCheck(Target& t, uint8_t fp[8], uint32_t* n);   // false: no pad (or locked)
 
   // ---- messaging ----
   SendResult send(Target& t, const char* text, size_t len, char* err, size_t err_cap);
