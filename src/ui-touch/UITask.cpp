@@ -71939,8 +71939,13 @@ static void voxVoiceStop() { if (s_vox_voice_sid) s_vox_voice_stop = true; }
 
 // Sound link: ggwave through the audio sink above and VoxMic's raw capture.
 #include "SoundLinkUI.inc"
-// Walkie-talkie: push-to-talk on a channel over MediaMesh (WALKIE.md).
+// Walkie-talkie: push-to-talk on a channel over MediaMesh (WALKIE.md). Needs
+// the audio sink; elsewhere talks just arrive as voice messages.
+#if CAP_LUA_AUDIO
 #include "WalkieUI.inc"
+#else
+void walkieOnChannelData(int, const uint8_t*, size_t) {}
+#endif
 
 #if (defined(HAS_TDECK_GT911) || defined(HAS_TDISPLAY_P4)) && CAP_LUA_AUDIO
 // ---- Recording voice messages: hold the send button ------------------------------
