@@ -1,7 +1,7 @@
 # wadamesh language file
 # canonical source - translators: edit this file and PR it
 # code: ru
-# ver: 28
+# ver: 29
 # name: Русский
 # base: ru
  (device behind)	 (устройство отстаёт)
@@ -2160,3 +2160,26 @@ you	вы
 Flood in / out	Flood вход / выход
 Direct in / out	Прямые вход / выход
 Airtime TX / RX	Эфирное время TX / RX
+Fewest hops	Меньше всего хопов
+
+# Mesh Deck keyboard module strings
+module attached	модуль подключён
+not attached	не подключён
+
+# Orientation choices (#698 / #701)
+Portrait	Портретная
+Portrait 180	Портретная 180
+Landscape	Альбомная
+Landscape 180	Альбомная 180
+
+# Trackball off switch (T-Deck) + T-Display P4 keyboard light
+Use the trackball	Использовать трекбол
+Turn off a damaged trackball that moves or clicks by itself. While it is off, Enter unlocks the lock screen.	Отключает повреждённый трекбол, который сам двигается или нажимается. Пока он выключен, Enter снимает блокировку экрана.
+Trackball on	Трекбол вкл
+Trackball off	Трекбол выкл
+press Enter to unlock	нажмите Enter для разблокировки
+Locks when screen off\n(press Enter to unlock)	Блокируется при выкл. экране\n(нажмите Enter для разблокировки)
+Powering off… press reset to wake	Выключение… нажмите reset для пробуждения
+Low	Low
+F11 on the keyboard steps through these too.	Клавиша F11 на клавиатуре тоже переключает эти уровни.
+Wi-Fi was switched off because the device crashed while it was on. Turn it on in Settings > Wi-Fi to try again.	Wi-Fi was switched off because the device crashed while it was on. Turn it on in Settings > Wi-Fi to try again.
