@@ -125,7 +125,9 @@ inline int toBase36(uint32_t v, char* out) {
   return n;
 }
 
-// Parses a VE3 / VM1 / VI1 envelope (surrounding whitespace allowed).
+// Parses a VE3 / VM1 / VI1 envelope (surrounding whitespace allowed). Text
+// after it, past whitespace, is a caption sent with the photo or clip
+// ("VI1:79e6a5:14:10:46 Look at this"); envelopeCaption() finds it.
 inline bool parseEnvelope(const char* text, Envelope* env) {
   if (!text) return false;
   while (*text == ' ' || *text == '\t' || *text == '\n' || *text == '\r') text++;
@@ -142,8 +144,8 @@ inline bool parseEnvelope(const char* text, Envelope* env) {
     if (!parseBase36(start, (size_t)(p - start), &f[k])) return false;
     if (k < 3) { if (*p != ':') return false; p++; }
   }
-  while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
-  if (*p) return false;
+  // The last field ends at whitespace (a caption follows) or the end.
+  if (*p && *p != ' ' && *p != '\t' && *p != '\n' && *p != '\r') return false;
   // The mode must belong to the prefix, as voice_wire.dart checks.
   if (kind == kImage && f[1] != (uint32_t)kImageModeId) return false;
   if (kind == kMimi && f[1] != (uint32_t)kMimiModeId) return false;
@@ -156,6 +158,23 @@ inline bool parseEnvelope(const char* text, Envelope* env) {
   env->mode = (uint8_t)f[1];
   env->kind = kind;
   return true;
+}
+
+// The caption sent with a photo or clip: where it starts in `text` and, in
+// `len`, how long it is without trailing whitespace. Null when `text` isn't an
+// envelope; an empty string (len 0) when it has no caption.
+inline const char* envelopeCaption(const char* text, size_t* len) {
+  Envelope e;
+  if (len) *len = 0;
+  if (!parseEnvelope(text, &e)) return nullptr;
+  const char* p = text;
+  while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+  while (*p && *p != ' ' && *p != '\t' && *p != '\n' && *p != '\r') p++;
+  while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+  size_t n = strlen(p);
+  while (n && (p[n - 1] == ' ' || p[n - 1] == '\t' || p[n - 1] == '\n' || p[n - 1] == '\r')) n--;
+  if (len) *len = n;
+  return p;
 }
 
 // True for a well-formed VI1 photo envelope.

@@ -43787,14 +43787,18 @@ static void chatParseMessageDisplay(const UITask::UIMessage& m, bool channel_mod
     }
   }
   // A MeshCore Open TAK photo announcement reads as a photo and its download
-  // state, not as the "VI1:..." envelope it is on the wire.
-  char vox_line[120];
+  // state, not as the "VI1:..." envelope it is on the wire. A caption sent
+  // with it ("VI1:... Look at this") goes on the line below, in the same bubble.
+  char vox_line[sizeof d.san_text];
   VoxWire::Envelope vox_env;
   if (VoxPhotos::parse(d.show_text, &vox_env)) {
     char st[104];
     voxBubbleText(vox_env, m.outgoing, st, sizeof st);
-    snprintf(vox_line, sizeof vox_line, "%s  %s",
-             vox_env.kind == VoxWire::kImage ? LV_SYMBOL_IMAGE : LV_SYMBOL_AUDIO, st);
+    size_t cap_len = 0;
+    const char* cap = VoxWire::envelopeCaption(d.show_text, &cap_len);
+    snprintf(vox_line, sizeof vox_line, "%s  %s%s%.*s",
+             vox_env.kind == VoxWire::kImage ? LV_SYMBOL_IMAGE : LV_SYMBOL_AUDIO, st,
+             cap_len ? "\n" : "", (int)cap_len, cap ? cap : "");
     d.show_text = vox_line;
   }
   // The label is the sender's nickname when it has one; show_sender (its colour, its
