@@ -11065,6 +11065,26 @@ static void channelLongSheetShareDo() {
 static void channelLongSheetShareCb(lv_event_t* e) {
   if (lv_event_get_code(e) == LV_EVENT_CLICKED) channelLongSheetShareDo();
 }
+#if CAP_SOUND_LINK
+// "Play by sound": the channel's share link over the speaker, for Sound link
+// (SoundLinkUI.inc, defined far below) on a radio or MeshCore Open TAK nearby.
+namespace soundui { static void playChannel(int idx); }
+static void channelLongSheetSoundDo() {
+  const int t = s_channel_long_idx;
+  closeChannelLongSheet();
+  bool ch; uint16_t unread; uint32_t ts;
+  char tname[UITask::MAX_THREAD_NAME + 1];
+  if (t < 0 || !g_lv.task || !g_lv.task->getThreadInfo(t, ch, unread, ts, tname, sizeof(tname)) || !ch) return;
+  ChannelDetails cd{};
+  for (int i = 0; i < MAX_GROUP_CHANNELS; ++i) {
+    if (the_mesh.getChannel(i, cd) && cd.name[0] && strncmp(cd.name, tname, sizeof(cd.name)) == 0) {
+      soundui::playChannel(i);
+      return;
+    }
+  }
+  g_lv.task->showAlert(TR("Channel not found"), 1200);
+}
+#endif
 
 static void channelLongSheetDeleteDo() {
   closeChannelLongSheet();
@@ -11341,6 +11361,9 @@ static void openThreadActionSheet(int thread_idx, const char* name, bool is_chan
                      (mute & TOUCH_CHMUTE_MEN) ? TR("Unmute mentions") : TR("Mute mentions"),
                      []{ channelMuteToggle(TOUCH_CHMUTE_MEN); }, false };
       items[n++] = { LV_SYMBOL_SHUFFLE, TR("Share secret"), channelLongSheetShareDo, false };
+#if CAP_SOUND_LINK
+      items[n++] = { LV_SYMBOL_VOLUME_MAX, TR("Play by sound"), channelLongSheetSoundDo, false };
+#endif
     } else {
       if (is_room_thread) {
         items[n++] = { LV_SYMBOL_REFRESH, TR("Log in again"), threadSheetRoomLoginDo, false };
