@@ -19,7 +19,8 @@ The **Link** tab:
 - **Send a message.** Plays a Wavest message from your callsign.
 - **Play my contact.** Plays your contact card, the same link as the
   share-my-contact QR. Whoever hears it gets a **Tap to add** card.
-- **Play a channel.** Pick one of your channels. Whoever hears it gets a
+- **Play a channel.** Pick one of your channels (or long-press a channel in
+  Chats › **Play by sound**). Whoever hears it gets a
   **Tap to join** card. Anyone in earshot can join, so mind where you play a
   private channel.
 - Below that, what was heard, newest first. Tap a channel or contact card to
