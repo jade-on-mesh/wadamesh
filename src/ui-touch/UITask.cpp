@@ -31230,6 +31230,12 @@ static lv_color_t  s_spec_heat_lut[64];
 // the_mesh.loop() (so the mesh stays off the radio while we sweep). Set true on
 // open, cleared in closeSpectrumPage() ONLY AFTER the mesh params are restored.
 static bool s_spectrum_active = false;
+// The same for the Drone Detector's 900 MHz sweep (DroneUI.inc): true only
+// while one sweep runs, cleared once the mesh params are back.
+static bool s_drone_scan_owns = false;
+#if CAP_FLOCK_YOU
+static void droneScanYield();   // DroneUI.inc: end a sweep now and hand the radio back
+#endif
 
 // dBm -> RGB565 colour ramp (deep blue floor -> cyan -> green -> yellow -> red).
 // The ramp auto-scales to the LIVE noise floor (s_spec_floor) so the floor always
@@ -33297,6 +33303,9 @@ static void openRemotePage() {
 #endif  // !HAS_TANMATSU
 
 static void openSpectrumPage() {
+#if CAP_FLOCK_YOU
+  droneScanYield();   // the Drone Detector's 900 MHz sweep lets go of the radio first
+#endif
   closeSpectrumPage();
 #if defined(HAS_THINKNODE_M9)
   // A mesh transmit may be ON AIR right now: sends are asynchronous (startSendRaw
@@ -33778,7 +33787,7 @@ static void openSpectrumPage() {
 
 // Read by main.cpp's loop(): true while the Spectrum app owns the radio, so the
 // mesh is paused (the_mesh.loop() skipped) and never re-tunes mid-sweep.
-bool spectrumOwnsRadio() { return s_spectrum_active; }
+bool spectrumOwnsRadio() { return s_spectrum_active || s_drone_scan_owns; }
 
 // Status-bar unread badge (✉ N) → Chats inbox. Wired on the bar's left_label;
 // only fires while updateGlobalStatusBar has flagged the badge state CLICKABLE,
@@ -57559,6 +57568,7 @@ enum AppDrawerAction {
   APPACT_TEAM,
   APPACT_FLOCK,
   APPACT_SOUND,
+  APPACT_DRONE,
   APPACT_LUA_BASE = 100,   // APPACT_LUA_BASE + i = installed Lua app s_lua_inst[i]
 };
 // OTP Messenger (app drawer -> APPACT_OTP): the screens; protocol in OtpCore.cpp.
@@ -57567,6 +57577,8 @@ enum AppDrawerAction {
 #include "TeamUI.inc"
 // Flock You (app drawer -> APPACT_FLOCK): Flock ALPR detection + known cameras; rules in FlockCore.h.
 #include "FlockYouUI.inc"
+// Drone Detector (app drawer -> APPACT_DRONE): Remote ID on Flock You's radios; glue in DroneCore.h.
+#include "DroneUI.inc"
 #if CAP_SOUND_LINK
 // Sound link (app drawer -> APPACT_SOUND): SoundLinkUI.inc, included further down,
 // after the audio sink it plays through.
@@ -57593,6 +57605,7 @@ static const AppTileDef k_app_tiles[] = {
   { UI_ICON_USERS,              "Team",      APPACT_TEAM,      HUE_PLACE },   // teammates, SOS, pins, Bloodhound
 #if CAP_FLOCK_YOU
   { UI_ICON_EYE,                "Flock You", APPACT_FLOCK,     HUE_RADIO },   // Flock ALPR detector + known cameras
+  { UI_ICON_CROSSHAIR,          "Drones",    APPACT_DRONE,     HUE_RADIO },   // Remote ID drone detector
 #endif
 #if CAP_SOUND_LINK
   { UI_ICON_WAVES,              "Sound link", APPACT_SOUND,    HUE_MSG },     // channels, contacts, Wavest over sound
@@ -57994,6 +58007,7 @@ static void appLaunch(int act, lv_event_t* e) {
     case APPACT_TEAM:      teamui::pageOpen();    return;   // team awareness
 #if CAP_FLOCK_YOU
     case APPACT_FLOCK:     flockui::pageOpen();   return;   // Flock ALPR detector
+    case APPACT_DRONE:     droneui::pageOpen();   return;   // Remote ID drone detector
 #endif
 #if CAP_SOUND_LINK
     case APPACT_SOUND:     soundui::pageOpen();   return;   // share and chat by sound (ggwave)
@@ -81655,6 +81669,7 @@ void UITask::loop() {
     teamui::loopTick();     // beacons, alert repeats, alarm, Bloodhound, map refresh
 #if CAP_FLOCK_YOU
     flockui::loopTick();    // Flock You: radios, detections, nearby cameras, channel alerts
+    droneui::loopTick();    // Drone Detector: Remote ID tracks, the map, channel alerts
 #endif
 #if CAP_SOUND_LINK
     soundui::loopTick();    // Sound link: mic, player, heard messages, the bridge

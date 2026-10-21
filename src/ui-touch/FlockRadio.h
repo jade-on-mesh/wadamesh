@@ -6,6 +6,10 @@
 // is idle. Detections queue up here (from the Wi-Fi and NimBLE tasks) and the
 // UI loop drains them with pop(). The rules are in FlockCore.h.
 //
+// The Drone Detector shares it: while it wants the radios, Remote ID payloads
+// (Wi-Fi beacons, NAN, BLE service data 0xFFFA) queue up separately and are
+// drained with popRemoteId(). Either app keeps the radios listening.
+//
 // Who owns what:
 //   Wi-Fi  Flock You sniffs only while the station is NOT connected, no AP is
 //          up and no system scan runs. It lets go the moment any of that
@@ -33,11 +37,30 @@ struct Diag {
   uint32_t queue_drops = 0;    // hits lost to a full queue
   uint32_t wifi_yield = 0;     // times Wi-Fi was handed back
   uint32_t ble_yield = 0;      // times BLE was handed back
+  uint32_t rid_wifi = 0;       // Remote ID payloads from Wi-Fi
+  uint32_t rid_ble = 0;        // Remote ID payloads from BLE
+  uint32_t rid_drops = 0;      // Remote ID payloads lost to a full queue
 };
 
-// Scan or stop. Idempotent; the work happens in tick().
+// One captured Remote ID payload (DroneCore.h parses it).
+struct RidRaw {
+  uint8_t data[264];
+  uint16_t len;
+  uint8_t transport;           // RID_TRANSPORT_*
+  int8_t rssi;
+  uint8_t mac[6];              // the sender's address
+};
+
+// Scan or stop for Flock You. Idempotent; the work happens in tick().
 void setWanted(bool on);
 bool wanted();
+
+// The same for the Drone Detector.
+void setDroneWanted(bool on);
+bool droneWanted();
+
+// Next queued Remote ID payload; false when none.
+bool popRemoteId(RidRaw& out);
 
 // From the UI loop, every pass: takes and releases the radios, hops channels,
 // restarts the BLE window.

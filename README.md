@@ -53,7 +53,8 @@ Region discovery, known-region management, and per-channel flood scopes are
 described in [REGIONS.md](REGIONS.md). MeshCore Open TAK photos and voice are
 covered in [VOX_PHOTOS.md](VOX_PHOTOS.md), and sending them on a second LoRa
 frequency (MediaMesh, `radio2`) in [MEDIAMESH.md](MEDIAMESH.md). Updating a repeater's firmware over LoRa from
-the SD card (Mike Carper's LoRa OTA) is in [LORA_UPDATE.md](LORA_UPDATE.md).
+the SD card (Mike Carper's LoRa OTA) is in [LORA_UPDATE.md](LORA_UPDATE.md). The Remote ID
+drone detector (app drawer > Drones) is in [DRONES.md](DRONES.md).
 
 ## Offline map tiles
 
