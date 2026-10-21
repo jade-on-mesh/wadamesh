@@ -74,7 +74,7 @@ jobs:
           mkdir -p /tmp/ed && (cd /tmp/ed && gcc -c -O1 -I$GITHUB_WORKSPACE/lib/ed25519 $GITHUB_WORKSPACE/lib/ed25519/{verify,ge,fe,sc,sha512}.c)
           g++ -std=c++17 -Wall -I src -I test test/test_fork_update.cpp /tmp/ed/*.o -o /tmp/fork_update_test && /tmp/fork_update_test
       - name: Team wire golden bytes and core rules (shared with Open TAK)
-        run: g++ -std=c++17 -Wall -I src test/test_team_wire.cpp src/ui-touch/TeamCore.cpp -o /tmp/team_test && /tmp/team_test
+        run: g++ -std=c++17 -Wall -Wextra -fsanitize=address,undefined -I src test/test_team_wire.cpp src/ui-touch/TeamCore.cpp -o /tmp/team_test && /tmp/team_test
       - name: Watched channels on the map (host test)
         run: g++ -std=c++17 -Wall -I src test/test_watch_feed.cpp -o /tmp/watch_test && /tmp/watch_test
       - name: Flock You signatures, log, cameras, downloads and channel alerts (host test)
