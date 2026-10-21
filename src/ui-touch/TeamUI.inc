@@ -596,12 +596,22 @@ static bool toScreen(double lat, double lon, double cwx, double cwy, int* sx, in
 // Shared routes as lines, the followed one thicker. lv_line keeps a pointer to
 // its points, so they live here (PSRAM) until the next redraw.
 static auto& s_route_pts = psramStatic<lv_point_t[team::kMaxRoutes][TeamWire::kMaxShapePoints]>();
-static auto& s_route_shape = psramStatic<TeamWire::Shape>();
+// A route parsed for drawing or listing (about 1 KB, in PSRAM, made once).
+static TeamWire::Shape* routeScratch() {
+  static TeamWire::Shape* p = nullptr;
+  if (!p) {
+    void* m = heap_caps_malloc(sizeof(TeamWire::Shape), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (m) p = new (m) TeamWire::Shape();
+  }
+  return p;
+}
 static void drawRoutes(lv_obj_t* parent, double cwx, double cwy) {
   team::Core* c = s_core;
   if (!c) return;
+  TeamWire::Shape* scratch = routeScratch();
+  if (!scratch) return;
   for (int i = 0; i < team::kMaxRoutes; i++) {
-    TeamWire::Shape& sh = s_route_shape;
+    TeamWire::Shape& sh = *scratch;
     if (!c->routeShape(i, sh) || sh.n < 2) continue;
     lv_point_t* pts = s_route_pts[i];
     bool any = false;
@@ -844,8 +854,9 @@ static void memberSheet(int i) {
 }
 
 static void routeSheet(int i) {
-  TeamWire::Shape& sh = s_route_shape;
-  if (!s_core || !s_core->routeShape(i, sh)) return;
+  TeamWire::Shape* scratch = routeScratch();
+  if (!scratch || !s_core || !s_core->routeShape(i, *scratch)) return;
+  TeamWire::Shape& sh = *scratch;
   s_sel_kind = 4;
   s_sel_idx = i;
   double len = 0;
@@ -869,10 +880,10 @@ static void routeSheet(int i) {
     renderMapMarkers();
   });
   sheetBtn(card, TR("Map"), [](lv_event_t*) {
-    TeamWire::Shape& x = s_route_shape;
-    const bool ok = s_core && s_core->routeShape(s_sel_idx, x);
+    TeamWire::Shape* x = routeScratch();
+    const bool ok = x && s_core && s_core->routeShape(s_sel_idx, *x);
     sheetClose();
-    if (ok) showOnMap(x.lat5[0] / 1e5, x.lon5[0] / 1e5);
+    if (ok) showOnMap(x->lat5[0] / 1e5, x->lon5[0] / 1e5);
   });
   sheetBtn(card, TR("Close"), [](lv_event_t*) { sheetClose(); });
 }
@@ -1226,8 +1237,9 @@ static void buildPins(lv_obj_t* b) {
   // team) and routes drawn there. Follow one for turn-by-turn cues.
   lbl(b, TR("Routes"), &g_font_14, COLOR_TEXT);
   int rn = 0;
-  for (int i = 0; i < team::kMaxRoutes; i++) {
-    TeamWire::Shape& sh = s_route_shape;
+  TeamWire::Shape* scratch = routeScratch();
+  for (int i = 0; scratch && i < team::kMaxRoutes; i++) {
+    TeamWire::Shape& sh = *scratch;
     if (!c->routeShape(i, sh)) continue;
     rn++;
     lv_obj_t* card = rowCard(b, [](lv_event_t* e) { routeSheet((int)(intptr_t)lv_event_get_user_data(e)); },
