@@ -32,6 +32,8 @@
 #if defined(ESP32) && defined(HAS_TOUCH_UI)
 #include "helpers/esp32/TouchPrefsStore.h"
 #include "helpers/MediaMesh.h"   // MediaMesh: photos/voice on the radio2 profile
+#include "helpers/LoraUpdate.h"  // LoRa Update: serve .mota firmware to a repeater
+#include "helpers/ota/OtaFormat.h"
 #endif
 #ifdef ESP32
 #if defined(WIFI_SSID) || defined(MULTI_TRANSPORT_COMPANION)
@@ -4336,6 +4338,9 @@ void MyMesh::begin(bool has_display) {
   s_mm_self = this;
   mediamesh::setContactPolicyResolver(mmResolveContactPolicy);
   mediamesh::begin(savedPrimaryParams);   // radio2 profiles, once the main radio settings are known
+  loraupdate::begin(self_id.pub_key, +[](const uint8_t* msg, uint16_t len) {
+    return s_mm_self && s_mm_self->sendLoraUpdatePacket(msg, len);
+  });
   mediamesh::setClientRepeat(_prefs.client_repeat != 0);   // Client Repeat: radio2 off
 #if defined(DISPLAY_CLASS)
   // Boot diag: identity prefix + radio config so we can confirm the touch
@@ -5872,6 +5877,13 @@ uint8_t MyMesh::rxViaFrameTag(uint8_t none) const {
 }
 
 mesh::DispatcherAction MyMesh::onRecvPacket(mesh::Packet* pkt) {
+  // LoRa Update (OTA, type 0x0C): the engine takes a neighbour's packets while
+  // a session is open. Never relayed: the core drops unknown types anyway.
+  if (pkt->getPayloadType() == loraupdate::kPayloadType) {
+    if (loraupdate::active() && pkt->isRouteFlood())
+      loraupdate::onPacket(pkt->payload, pkt->payload_len, pkt->getPathHashCount());
+    return ACTION_RELEASE;
+  }
   const uint8_t prev = mediamesh::beginRx(pkt);
   const uint8_t prev_origin = _rx_origin;
   _rx_origin = mediamesh::rxOrigin();
@@ -5896,6 +5908,39 @@ mesh::DispatcherAction MyMesh::onRecvPacket(mesh::Packet* pkt) {
   _rx_origin = prev_origin;
   mediamesh::endRx(prev);
   return a;
+}
+
+// One LoRa Update engine message as a zero-path flood (Mike's Mesh::otaSendAdapter):
+// transfer traffic first, discovery last. Paced replies (manifest, data, proof)
+// get two queue slots and leave four packets free, so false here is backpressure
+// and the engine sends the reply later.
+bool MyMesh::sendLoraUpdatePacket(const uint8_t* msg, uint16_t len) {
+  using namespace mesh::ota;
+  if (!msg || !len || len > MAX_PACKET_PAYLOAD) return false;
+  const bool paced = msg[0] == OTA_DATA || msg[0] == OTA_PROOF || msg[0] == OTA_LEAVES || msg[0] == OTA_MANIFEST;
+  if (paced) {
+    int queued = 0;
+    for (int i = 0; i < _mgr->getOutboundTotal(); i++) {
+      const mesh::Packet* q = _mgr->getOutboundByIdx(i);
+      if (q && q->getPayloadType() == loraupdate::kPayloadType && q->payload_len
+          && (q->payload[0] == OTA_DATA || q->payload[0] == OTA_PROOF || q->payload[0] == OTA_LEAVES
+              || q->payload[0] == OTA_MANIFEST)) {
+        queued++;
+      }
+    }
+    if (queued >= 2 || _mgr->getFreeCount() <= 4) return false;
+  } else if (_mgr->getFreeCount() <= 2) {
+    return false;
+  }
+  mesh::Packet* p = obtainNewPacket();
+  if (!p) return false;
+  p->header = (loraupdate::kPayloadType << PH_TYPE_SHIFT) | ROUTE_TYPE_FLOOD;
+  p->setPathHashSizeAndCount(1, 0);
+  memcpy(p->payload, msg, len);
+  p->payload_len = len;
+  getTables()->markSeen(p);   // our own flood coming back is not news
+  sendPacket(p, ota_is_transfer_message(msg[0]) ? 0 : 250, 0);
+  return true;
 }
 
 // The forward the core gave the first copy of `pkt`, for its copy on the other
@@ -6945,6 +6990,7 @@ void MyMesh::loop() {
   BaseChatMesh::loop();
   mediamesh::setClientRepeat(_prefs.client_repeat != 0);   // radio2 off while Client Repeat is on, back after
   mediamesh::loop();           // temporary radio profiles ending, schedules starting
+  loraupdate::loop();          // a LoRa Update session's retries and paced replies
   companionRetryService();
   drainPendingBlobDeletes();   // evicted contacts' blobs, off the packet path (#222)
 
