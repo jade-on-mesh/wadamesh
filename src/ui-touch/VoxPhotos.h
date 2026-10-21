@@ -56,8 +56,12 @@ uint32_t version();
 // Stores a clip (taking ownership of `bits`, a malloc'd buffer), makes it
 // available to anyone who asks for it, and writes its VE3 envelope (the text
 // to post in the chat) to `envelope`. False if it couldn't be stored.
+// `want_sid` keeps a session id already used on the air (push-to-talk); 0 picks one.
 bool addRecording(uint8_t wire_mode, uint8_t* bits, size_t len, uint32_t ms, char* envelope, size_t cap,
-                  uint32_t* sid_out = nullptr);
+                  uint32_t* sid_out = nullptr, uint32_t want_sid = 0);
+// Keeps a talk heard live in full (push-to-talk), so its voice message plays at
+// once when it's announced, with nothing to download. False if not stored.
+bool storeHeard(uint32_t sid, uint8_t wire_mode, const uint8_t* bits, size_t len);
 // Deletes a recording made with addRecording that was never sent.
 void discardRecording(uint32_t sid);
 // Whether a voice clip with this session id is stored here (recorded or

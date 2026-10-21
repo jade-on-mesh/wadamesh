@@ -41,6 +41,10 @@ State state();
 const char* error();
 // Length of audio captured so far (or of the finished clip).
 uint32_t elapsedMs();
+// While recording (or stopped, before take()): the Codec2 encoded so far, for
+// push-to-talk, which sends each second as soon as it's there. Bytes below
+// `len` don't change any more. Loop task only.
+bool liveBits(const uint8_t** bits, size_t* len);
 // Input level for a meter, 0..100 (decays between reads).
 int level();
 

@@ -1,7 +1,8 @@
 #include "MyMesh.h"
 #ifdef DISPLAY_CLASS
 #include "ui-touch/VoxPhotos.h"   // MeshCore Open TAK photo fetches
-#include "ui-touch/TeamCore.h"   // Open TAK team positions/alerts/pins (GRP_DATA 0x5654)
+#include "ui-touch/TeamCore.h"
+#include "ui-touch/WalkieWire.h"   // push-to-talk channel data (0x5643, 0x53/0x54)   // Open TAK team positions/alerts/pins (GRP_DATA 0x5654)
 #include "ui-touch/SoundLinkCore.h"   // Sound link: the channel bridge (SoundLinkUI.inc)
 #include "ui-touch/OtpMessenger.h"   // OTP Messenger: one-time-pad DMs/channels, handled in the background
 #endif
@@ -3617,7 +3618,9 @@ void MyMesh::onChannelDataRecv(const mesh::GroupChannel &channel, mesh::Packet *
   if (data_type == VoxWire::kChannelDataType) noteFetchRequest(data, data_len);   // mediamesh.share
 
 #ifdef DISPLAY_CLASS
-  if (data_type == VoxWire::kChannelDataType)
+  if (data_type == VoxWire::kChannelDataType && WalkieWire::isLive(data, data_len))
+    walkieOnChannelData(resolved_idx, data, data_len);   // push-to-talk (WALKIE.md)
+  else if (data_type == VoxWire::kChannelDataType)
     VoxPhotos::onPayload(data, data_len, resolved_idx, rxVia(), pkt->isRouteFlood() ? (int)pkt->getPathHashCount() : 0);
   if (data_type == TeamWire::kDataType) teamOnChannelData(resolved_idx, data, data_len);   // Open TAK team
   if (_ui) _ui->onChannelData((uint8_t)resolved_idx, data_type, data, data_len, pkt->isRouteFlood());

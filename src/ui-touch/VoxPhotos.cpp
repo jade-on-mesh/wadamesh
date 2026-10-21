@@ -316,12 +316,12 @@ bool loadFile(uint32_t sid, bool voice, uint8_t** data, size_t* len) {
 uint32_t version() { return g_version; }
 
 bool addRecording(uint8_t wire_mode, uint8_t* bits, size_t len, uint32_t ms, char* envelope, size_t cap,
-                  uint32_t* sid_out) {
+                  uint32_t* sid_out, uint32_t want_sid) {
   const int pb = VoxWire::packetBytes(wire_mode);
   if (!g_fs || !bits || len == 0 || pb <= 0) { free(bits); return false; }
   const int total = (int)((len + (size_t)pb - 1) / (size_t)pb);
   const int seconds = (int)((ms + 999) / 1000);
-  uint32_t sid = 0;
+  uint32_t sid = want_sid;
   while (!sid) sid = esp_random();
   if (total > VoxWire::kMaxClipPackets || !VoxWire::encodeVoiceEnvelope(sid, wire_mode, total, seconds, envelope, cap)) {
     free(bits);
@@ -348,6 +348,26 @@ bool addRecording(uint8_t wire_mode, uint8_t* bits, size_t len, uint32_t ms, cha
   if (sid_out) *sid_out = sid;
   Serial.printf("[VOX] recorded clip %08lx: %u bytes, %d packets, %d s\n", (unsigned long)sid, (unsigned)len, total,
                 seconds);
+  return true;
+}
+
+bool storeHeard(uint32_t sid, uint8_t wire_mode, const uint8_t* bits, size_t len) {
+  if (!g_fs || !sid || !bits || len == 0) return false;
+  char path[32];
+  storePath(sid, true, path, sizeof path);
+  if (g_fs->exists(path)) return true;
+  File f = g_fs->open(path, "w");
+  if (!f) return false;
+  const bool ok = f.write(&wire_mode, 1) == 1 && f.write(bits, len) == len;
+  f.close();
+  if (!ok) { g_fs->remove(path); return false; }
+  VoxWire::Envelope env;
+  env.sid = sid;
+  env.kind = VoxWire::kCodec2;
+  env.mode = wire_mode;
+  remember(env);
+  g_version++;
+  Serial.printf("[VOX] talk %08lx heard live, kept: %u bytes\n", (unsigned long)sid, (unsigned)len);
   return true;
 }
 
