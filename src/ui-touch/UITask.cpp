@@ -11065,6 +11065,25 @@ static void channelLongSheetShareDo() {
 static void channelLongSheetShareCb(lv_event_t* e) {
   if (lv_event_get_code(e) == LV_EVENT_CLICKED) channelLongSheetShareDo();
 }
+#if CAP_LUA_AUDIO
+// "Walkie-talkie": push-to-talk on the channel (WalkieUI.inc, defined far below).
+namespace walkie { static void cardOpen(int ch); }
+static void channelLongSheetWalkieDo() {
+  const int t = s_channel_long_idx;
+  closeChannelLongSheet();
+  bool ch; uint16_t unread; uint32_t ts;
+  char tname[UITask::MAX_THREAD_NAME + 1];
+  if (t < 0 || !g_lv.task || !g_lv.task->getThreadInfo(t, ch, unread, ts, tname, sizeof(tname)) || !ch) return;
+  ChannelDetails cd{};
+  for (int i = 0; i < MAX_GROUP_CHANNELS; ++i) {
+    if (the_mesh.getChannel(i, cd) && cd.name[0] && strncmp(cd.name, tname, sizeof(cd.name)) == 0) {
+      walkie::cardOpen(i);
+      return;
+    }
+  }
+  g_lv.task->showAlert(TR("Channel not found"), 1200);
+}
+#endif
 #if CAP_SOUND_LINK
 // "Play by sound": the channel's share link over the speaker, for Sound link
 // (SoundLinkUI.inc, defined far below) on a radio or MeshCore Open TAK nearby.
@@ -11348,7 +11367,7 @@ static void openThreadActionSheet(int thread_idx, const char* name, bool is_chan
     snprintf(s_title, sizeof s_title, "%s", nm[0] ? nm : (is_channel ? TR("Channel") : TR("Chat")));
     char emoji[20] = "";
     const bool has_icon = touchPrefsGetChannelEmoji(name ? name : "", emoji, sizeof emoji) && emoji[0];
-    ActItem items[12];
+    ActItem items[13];
     int n = 0;
     items[n++] = { LV_SYMBOL_OK, TR("Mark as read"), threadSheetMarkReadDo, false };
     if (is_channel) {
@@ -11361,6 +11380,9 @@ static void openThreadActionSheet(int thread_idx, const char* name, bool is_chan
                      (mute & TOUCH_CHMUTE_MEN) ? TR("Unmute mentions") : TR("Mute mentions"),
                      []{ channelMuteToggle(TOUCH_CHMUTE_MEN); }, false };
       items[n++] = { LV_SYMBOL_SHUFFLE, TR("Share secret"), channelLongSheetShareDo, false };
+#if CAP_LUA_AUDIO
+      items[n++] = { LV_SYMBOL_AUDIO, TR("Walkie-talkie"), channelLongSheetWalkieDo, false };
+#endif
 #if CAP_SOUND_LINK
       items[n++] = { LV_SYMBOL_VOLUME_MAX, TR("Play by sound"), channelLongSheetSoundDo, false };
 #endif
@@ -71917,6 +71939,13 @@ static void voxVoiceStop() { if (s_vox_voice_sid) s_vox_voice_stop = true; }
 
 // Sound link: ggwave through the audio sink above and VoxMic's raw capture.
 #include "SoundLinkUI.inc"
+// Walkie-talkie: push-to-talk on a channel over MediaMesh (WALKIE.md). Needs
+// the audio sink; elsewhere talks just arrive as voice messages.
+#if CAP_LUA_AUDIO
+#include "WalkieUI.inc"
+#else
+void walkieOnChannelData(int, const uint8_t*, size_t) {}
+#endif
 
 #if (defined(HAS_TDECK_GT911) || defined(HAS_TDISPLAY_P4)) && CAP_LUA_AUDIO
 // ---- Recording voice messages: hold the send button ------------------------------

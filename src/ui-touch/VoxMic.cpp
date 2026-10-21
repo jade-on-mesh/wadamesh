@@ -213,6 +213,7 @@ volatile bool s_stop = false;
 volatile bool s_cancel = false;
 volatile bool s_task_running = false;
 volatile uint32_t s_frames = 0;       // codec frames captured
+volatile int s_bpf = 6;               // bytes in one of them
 int s_mode = kVoxRecordWireMode;      // VE3 wire mode of the recording
 uint32_t s_frame_ms = 40;             // 40 ms frames, 20 ms at 2400/3200
 volatile int s_level = 0;
@@ -250,6 +251,7 @@ void captureJob(void*) {
   if (!ok) s_error = "Codec2 couldn't start";
   const int spf = ok ? enc.samplesPerFrame() : 320;
   const int bpf = ok ? enc.bytesPerFrame() : 6;
+  s_bpf = bpf;
   const size_t max_frames = ok ? (size_t)kVoxMaxRecordSeconds * 8000 / (size_t)spf : 0;
   s_frame_ms = (uint32_t)spf / 8;
   static int16_t rx[2 * 256];         // 256 stereo frames = 16 ms
@@ -294,7 +296,8 @@ void captureJob(void*) {
         have = 0;
         if (s_frames < max_frames && (s_frames + 1) * (size_t)bpf <= kMaxBits) {
           enc.encode(frame, s_bits + (size_t)s_frames * (size_t)bpf);
-          s_frames = s_frames + 1;
+          // Published after the bytes, for liveBits() on the loop task.
+          __atomic_store_n(&s_frames, s_frames + 1, __ATOMIC_RELEASE);
         }
       }
     }
@@ -447,6 +450,14 @@ const char* error() { return s_error; }
 
 uint32_t elapsedMs() { return s_frames * s_frame_ms; }
 
+bool liveBits(const uint8_t** bits, size_t* len) {
+  if (!bits || !len || !s_bits || (s_state != kRecording && s_state != kReady)) return false;
+  const uint32_t frames = __atomic_load_n(&s_frames, __ATOMIC_ACQUIRE);
+  *bits = s_bits;
+  *len = (size_t)frames * (size_t)s_bpf;
+  return true;
+}
+
 int level() {
   const int v = s_level;
   s_level = v * 3 / 4;
@@ -578,6 +589,7 @@ void cancel() {}
 State state() { return kIdle; }
 const char* error() { return ""; }
 uint32_t elapsedMs() { return 0; }
+bool liveBits(const uint8_t**, size_t*) { return false; }
 int level() { return 0; }
 bool take(uint8_t*, uint8_t**, size_t*, uint32_t*, uint32_t) { return false; }
 bool rawStart(const char** err) { *err = "This radio has no microphone"; return false; }
