@@ -16,6 +16,10 @@
 //            [labelLen][label][noteLen][note][attachMode u8][sid4][packets u8][extra u16]
 //   role     [0x4C][key4][roleId u8][op u8 (1 = back to default / removed)][time u32]
 //            [icon u16 (app icon library id)][nameLen][name]
+//   shape    [0x44][key4][id u32][op u8 (1 = deleted)][kind u8][colour u8][time u32]
+//            [labelLen][label <= 24][geofence u8][param varint (route method; a
+//            circle's radius)][n u8][first lat i32][first lon i32 (degrees x 1e5)]
+//            [n-1 x (dlat, dlon) zigzag varints]   (app: team_shape_wire.dart)
 //
 // Roles 0-9 are the defaults, 10-24 roles a team added. A position's role is the
 // high nibble; 15 and up write 15 there, set flag 0x20 and put the role id in
@@ -34,6 +38,12 @@ namespace TeamWire {
 
 constexpr uint16_t kDataType = 0x5654;
 constexpr uint8_t kPosition = 0x50, kAlert = 0x53, kMarker = 0x4D, kReport = 0x52, kRole = 0x4C;
+constexpr uint8_t kShape = 0x44;
+// Shapes: line freehand polygon rectangle circle route (the app's ShapeKind).
+constexpr int kShapeRoute = 5;
+constexpr size_t kMaxShapeLabel = 24;
+constexpr int kMaxShapePoints = 120;
+constexpr int kRouteWalking = 0, kRouteDriving = 1;   // RouteMethod: walking driving flying swimming watercraft
 constexpr size_t kMaxPayload = 163;
 constexpr size_t kMaxCallsign = 20, kMaxLabel = 32, kMaxNote = 60, kMaxAlertNote = 80;
 
@@ -140,6 +150,20 @@ struct Marker {
   uint16_t att_extra = 0;
 };
 
+// A drawing, route or geofence. Points on a 1e-5 degree grid (about a metre).
+struct Shape {
+  uint8_t key4[4] = {0};
+  uint32_t id = 0;
+  bool deleted = false;
+  uint8_t kind = 0, color = 0, geofence = 0;
+  uint32_t time = 0;     // unix seconds
+  uint32_t param = 0;    // route method, or a circle's radius in metres
+  char label[kMaxShapeLabel + 1] = {0};
+  int n = 0;
+  int32_t lat5[kMaxShapePoints] = {0}, lon5[kMaxShapePoints] = {0};
+  bool isRoute() const { return kind == kShapeRoute; }
+};
+
 // ---- bytes ------------------------------------------------------------------
 struct W {
   uint8_t* p;
@@ -150,6 +174,8 @@ struct W {
   void u16(uint32_t v) { u8(v >> 8); u8(v); }
   void u32(uint32_t v) { u16(v >> 16); u16(v); }
   void raw(const uint8_t* b, size_t k) { for (size_t i = 0; i < k; i++) u8(b[i]); }
+  void varint(uint32_t v) { while (v >= 0x80) { u8((v & 0x7F) | 0x80); v >>= 7; } u8(v); }
+  void svarint(int32_t v) { varint(v >= 0 ? (uint32_t)v << 1 : ((uint32_t)(-(int64_t)v) << 1) - 1); }
   // Trimmed, cut to `max` bytes on a UTF-8 character boundary.
   void str(const char* s, size_t max) {
     while (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r') s++;
@@ -173,6 +199,22 @@ struct R {
   uint32_t u32() { const uint32_t a = u16(); return (a << 16) | u16(); }
   int32_t i32() { return (int32_t)u32(); }
   int16_t i16() { return (int16_t)u16(); }
+  bool varint(uint32_t* v) {   // unsigned LEB128
+    uint32_t x = 0;
+    for (int shift = 0; shift <= 28; shift += 7) {
+      if (!has(1)) return false;
+      const uint32_t b = u8();
+      x |= (b & 0x7F) << shift;
+      if (b < 0x80) { *v = x; return true; }
+    }
+    return false;
+  }
+  bool svarint(int32_t* v) {   // zigzag
+    uint32_t z;
+    if (!varint(&z)) return false;
+    *v = (z & 1) ? -(int32_t)((z + 1) >> 1) : (int32_t)(z >> 1);
+    return true;
+  }
   bool str(char* out, size_t cap) {
     if (!has(1)) return false;
     const size_t k = u8();
@@ -357,6 +399,62 @@ inline bool parse(const uint8_t* p, size_t n, RoleDef& x) {
 }
 
 // ---- geometry (as the app) -----------------------------------------------------
+inline size_t encode(const Shape& x, uint8_t* out, size_t cap) {
+  W w(out, cap);
+  w.u8(kShape);
+  w.raw(x.key4, 4);
+  w.u32(x.id);
+  w.u8(x.deleted ? 1 : 0);
+  w.u8(x.kind);
+  w.u8(x.color);
+  w.u32(x.time);
+  w.str(x.label, kMaxShapeLabel);
+  w.u8(x.geofence);
+  w.varint(x.param);
+  const int n = x.n < 0 ? 0 : x.n > kMaxShapePoints ? kMaxShapePoints : x.n;
+  w.u8((uint32_t)n);
+  for (int i = 0; i < n; i++) {
+    if (i == 0) { w.u32((uint32_t)x.lat5[0]); w.u32((uint32_t)x.lon5[0]); }
+    else { w.svarint(x.lat5[i] - x.lat5[i - 1]); w.svarint(x.lon5[i] - x.lon5[i - 1]); }
+  }
+  return w.ok ? w.n : 0;
+}
+
+inline bool parse(const uint8_t* p, size_t n, Shape& x) {
+  R r(p, n);
+  if (!r.has(17) || r.u8() != kShape) return false;
+  memcpy(x.key4, p + 1, 4);
+  r.o = 5;
+  x.id = r.u32();
+  const uint32_t op = r.u8();
+  x.deleted = op == 1;
+  x.kind = (uint8_t)r.u8();
+  x.color = (uint8_t)r.u8();
+  if (x.color >= kColors) x.color = 0;
+  x.time = r.u32();
+  if (!r.str(x.label, sizeof x.label) || !r.has(1)) return false;
+  x.geofence = (uint8_t)r.u8();
+  if (!r.varint(&x.param) || !r.has(1)) return false;
+  const int k = (int)r.u8();
+  x.n = 0;
+  int32_t la = 0, lo = 0;
+  for (int i = 0; i < k; i++) {
+    if (i == 0) {
+      if (!r.has(8)) return false;
+      la = r.i32();
+      lo = r.i32();
+    } else {
+      int32_t dl, dn;
+      if (!r.svarint(&dl) || !r.svarint(&dn)) return false;
+      la += dl;
+      lo += dn;
+    }
+    if (la > 9000000 || la < -9000000 || lo > 18000000 || lo < -18000000) return false;
+    if (x.n < kMaxShapePoints) { x.lat5[x.n] = la; x.lon5[x.n] = lo; x.n++; }
+  }
+  return x.n > 0 || x.deleted;
+}
+
 inline double distanceM(double lat1, double lon1, double lat2, double lon2) {
   const double rr = 6371000.0, k = M_PI / 180;
   const double p1 = lat1 * k, p2 = lat2 * k, dp = (lat2 - lat1) * k, dl = (lon2 - lon1) * k;

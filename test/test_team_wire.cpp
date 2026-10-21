@@ -4,6 +4,7 @@
 // TeamCore's rules (beacons, alert repeats, pin merge) on a simulated clock.
 //
 //   g++ -std=c++17 -I src test/test_team_wire.cpp src/ui-touch/TeamCore.cpp -o /tmp/t && /tmp/t
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -357,7 +358,109 @@ static void roles() {
   CHECK(!strcmp(nm, "Role 20"));
 }
 
+// Routes: the app's shape message (golden bytes shared with
+// test/team/team_wire_golden_test.dart), kept by TeamCore and followed with
+// turn cues (TeamRoute.h).
+static const char* kS1 =
+    "44010203041234abcd00050368e778000a546f20416c7068612d310001030048a1c0ff4556d8008a17920e00";
+static const char* kS2 = "440a0b0c0d0000000701050068e7786400000000";
+static const char* kS3 = "44010203040000000900000268e77800046c696e6500000200000064000000c864c701";
+
+static void routes() {
+  // The wire: parse and re-encode byte for byte.
+  TeamWire::Shape s;
+  auto b = unhex(kS1);
+  CHECK(TeamWire::parse(b.data(), b.size(), s));
+  CHECK(s.isRoute() && !s.deleted && s.id == 0x1234abcd && s.color == 3 && s.time == 1760000000u);
+  CHECK(!strcmp(s.label, "To Alpha-1") && s.param == (uint32_t)TeamWire::kRouteDriving);
+  CHECK(s.n == 3 && s.lat5[0] == 4760000 && s.lon5[0] == -12233000 && s.lon5[1] == -12231523 && s.lat5[2] == 4760905);
+  uint8_t out[TeamWire::kMaxPayload];
+  CHECK(hex(out, TeamWire::encode(s, out, sizeof out)) == kS1);
+  TeamWire::Shape d;
+  b = unhex(kS2);
+  CHECK(TeamWire::parse(b.data(), b.size(), d) && d.deleted && d.n == 0 && d.id == 7);
+  TeamWire::Shape line;
+  b = unhex(kS3);
+  CHECK(TeamWire::parse(b.data(), b.size(), line) && !line.isRoute() && line.n == 2 && line.lat5[1] == 150 &&
+        line.lon5[1] == 100);
+  b = unhex(kS1);
+  CHECK(!TeamWire::parse(b.data(), 30, s));   // cut short
+
+  // The follower on that route: 1.1 km east, then left, 1 km north.
+  teamroute::Follower f;
+  TeamWire::parse(unhex(kS1).data(), unhex(kS1).size(), s);
+  f.start(s.lat5, s.lon5, s.n, false, true, 47.6, -122.33);
+  CHECK(f.count() == 3 && f.turnAt(1) == -90 && f.turnAt(0) == 0);
+  teamroute::Cue c = f.update(47.6, -122.325);   // ~380 m along
+  CHECK(c.next == 1 && c.turn_at == 1 && c.turn_deg == -90);
+  CHECK(c.to_turn_m > 700 && c.to_turn_m < 760 && c.remaining_m > 1700 && c.remaining_m < 1780 && c.off_m < 2);
+  char txt[80];
+  teamroute::cueText(c, txt, sizeof txt);
+  CHECK(!strcmp(txt, "Turn left in 750 m \xC2\xB7 1.7 km left"));
+  c = f.update(47.605, -122.31523);   // round the corner
+  CHECK(c.next == 2 && c.turn_at < 0 && c.to_turn_m > 400 && c.to_turn_m < 460);
+  teamroute::cueText(c, txt, sizeof txt);
+  CHECK(!strncmp(txt, "Arrive in", 9));
+  c = f.update(47.605, -122.3130);    // ~170 m east of the line
+  CHECK(c.off_m > 150);
+  teamroute::cueText(c, txt, sizeof txt);
+  CHECK(strstr(txt, "off the route") != nullptr);
+  c = f.update(47.60900, -122.31523);
+  CHECK(c.arrived);
+  f.start(s.lat5, s.lon5, s.n, true);   // backwards: a right turn
+  CHECK(f.turnAt(1) == 90 && fabs(f.lat(0) - 47.60905) < 1e-9);
+  CHECK(!strcmp(teamroute::turnWord(-40), "Slight left") && !strcmp(teamroute::turnWord(130), "Sharp right") &&
+        !strcmp(teamroute::turnWord(175), "U-turn") && !strcmp(teamroute::turnWord(10), "Continue"));
+
+  // TeamCore: a teammate's route arrives, is followed, survives a reboot, goes when deleted.
+  TestIo io;
+  io.f.lat = 47.6;
+  io.f.lon = -122.325;
+  io.f.gps = true;
+  {
+    team::Core core(&io);
+    core.begin();
+    core.cfg.enabled = true;
+    snprintf(core.cfg.channel, sizeof core.cfg.channel, "ops");
+    b = unhex(kS3);
+    core.onPayload("ops", b.data(), b.size());   // a plain line: not kept
+    CHECK(!core.route(0));
+    b = unhex(kS1);
+    core.onPayload("ops", b.data(), b.size());
+    CHECK(core.route(0) && core.route(0)->id == 0x1234abcd && !core.route(1));
+    core.onPayload("ops", b.data(), b.size());   // a repeat: still one
+    CHECK(!core.route(1));
+    CHECK(core.followRoute(0, false) && core.following() && core.followedRoute() == 0);
+    double la, lo;
+    char label[33];
+    CHECK(core.hound(&la, &lo, label, sizeof label) && !strcmp(label, "To Alpha-1"));
+    CHECK(fabs(la - 47.6) < 1e-6 && fabs(lo + 122.31523) < 1e-6);   // heading for the corner
+    CHECK(core.cue().turn_deg == -90);
+  }
+  {
+    team::Core core(&io);   // after a reboot
+    core.begin();
+    core.cfg.enabled = true;
+    snprintf(core.cfg.channel, sizeof core.cfg.channel, "ops");
+    CHECK(core.route(0) && core.route(0)->id == 0x1234abcd);
+    CHECK(core.followRoute(0, false));
+    // The author deletes it (a delete, with the same id, newer).
+    TeamWire::Shape del;
+    TeamWire::parse(unhex(kS1).data(), unhex(kS1).size(), del);
+    del.deleted = true;
+    del.time += 60;
+    uint8_t buf[TeamWire::kMaxPayload];
+    const size_t k = TeamWire::encode(del, buf, sizeof buf);
+    core.onPayload("ops", buf, k);
+    CHECK(!core.route(0) && !core.following());
+    b = unhex(kS1);   // the old copy arriving late doesn't bring it back
+    core.onPayload("ops", b.data(), b.size());
+    CHECK(!core.route(0));
+  }
+}
+
 int main() {
+  routes();
   golden();
   core();
   roles();

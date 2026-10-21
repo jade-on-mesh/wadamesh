@@ -9,6 +9,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "TeamRoute.h"
 #include "TeamWire.h"
 
 namespace team {
@@ -16,6 +17,7 @@ namespace team {
 constexpr int kMaxMembers = 32;
 constexpr int kMaxAlerts = 16;
 constexpr int kMaxMarkers = 64;
+constexpr int kMaxRoutes = 8;
 
 enum class Fresh : uint8_t { Live, Stale, Lost };   // < 12 min, < 30 min, older
 
@@ -30,6 +32,17 @@ struct AlertRec {
   TeamWire::Alert a;
   bool acked = false;   // dismissed here
   uint32_t heard_ms = 0;
+};
+
+// A route shared on the team channel (the app's road directions, or one drawn
+// there), kept as it arrived and parsed when used.
+struct RouteRec {
+  bool used = false;
+  bool deleted = false;   // kept, so a late copy doesn't bring it back
+  uint8_t key4[4] = {0};
+  uint32_t id = 0, time = 0;
+  uint8_t len = 0;
+  uint8_t raw[TeamWire::kMaxPayload] = {0};
 };
 
 struct Fix {
@@ -103,11 +116,24 @@ class Core {
                               const char* note);
   void deleteMarker(TeamWire::Marker& m);
 
-  // Bloodhound: a teammate (follows them) or a fixed point.
+  // Bloodhound: a teammate (follows them), a fixed point, or a shared route
+  // checkpoint by checkpoint with turn cues (teamroute::Follower).
   void houndMember(const uint8_t key4[4]);
   void houndPoint(double lat, double lon, const char* label);
   void stopHound() { hound_ = 0; io_->changed(); }
   bool hound(double* lat, double* lon, char* label, size_t cap);
+
+  // Routes shared by the team, newest first by index order of arrival.
+  const RouteRec* route(int i) const {
+    return (i >= 0 && i < kMaxRoutes && routes_[i].used && !routes_[i].deleted) ? &routes_[i] : nullptr;
+  }
+  bool routeShape(int i, TeamWire::Shape& out) const;
+  bool followRoute(int i, bool reverse);
+  bool following() const { return hound_ == 3; }
+  int followedRoute() const { return hound_ == 3 ? follow_idx_ : -1; }
+  const teamroute::Cue& cue() const { return cue_; }
+  // After the position changed (tick does it too).
+  void updateFollow();
 
   // Roles: the team's names for the defaults and its added roles (edited in
   // the app; the radio follows them).
@@ -148,6 +174,17 @@ class Core {
   uint8_t hound_key_[4] = {0};
   double hound_lat_ = 0, hound_lon_ = 0;
   char hound_label_[33] = {0};
+
+  RouteRec routes_[kMaxRoutes];
+  teamroute::Follower follow_;
+  teamroute::Cue cue_;
+  int follow_idx_ = -1;
+  uint32_t follow_id_ = 0;
+  uint8_t follow_key_[4] = {0};
+  bool loading_routes_ = false;
+  void onShape(const uint8_t* p, size_t n);
+  void saveRoutes();
+  void loadRoutes();
 
   bool sendRaw(const uint8_t* p, size_t n);
   void onPosition(const TeamWire::Position& p);

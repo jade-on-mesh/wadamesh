@@ -372,7 +372,8 @@ static void houndRefresh() {
     lv_obj_add_flag(s_hound, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_clear_flag(s_hound, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(s_hound, [](lv_event_t*) {
-      showConfirm(TR("Stop Bloodhound?"), TR("Stop"), +[]() { if (s_core) s_core->stopHound(); houndRefresh(); });
+      showConfirm(s_core && s_core->following() ? TR("Stop following the route?") : TR("Stop Bloodhound?"), TR("Stop"),
+                  +[]() { if (s_core) s_core->stopHound(); houndRefresh(); renderMapMarkers(); });
     }, LV_EVENT_CLICKED, nullptr);
     s_hound_arrow = lv_line_create(s_hound);
     lv_obj_set_style_line_width(s_hound_arrow, 3, LV_PART_MAIN);
@@ -386,13 +387,25 @@ static void houndRefresh() {
     lv_obj_set_width(s_hound_lbl, 124);
     lv_label_set_long_mode(s_hound_lbl, LV_LABEL_LONG_DOT);
   }
-  char txt[96];
+  char txt[128];
   double rel = 0;
+  // Following a route: taller, with the next turn under the name.
+  const bool route = c->following();
+  lv_obj_set_size(s_hound, route ? 200 : 168, route ? 54 : 40);
+  lv_obj_set_width(s_hound_lbl, route ? 156 : 124);
+  lv_label_set_long_mode(s_hound_lbl, route ? LV_LABEL_LONG_WRAP : LV_LABEL_LONG_DOT);
   if (myFix(&ml, &mo)) {
     char rb[40];
     const double brg = TeamWire::bearingDeg(ml, mo, la, lo);
     TeamWire::rangeBearing(TeamWire::distanceM(ml, mo, la, lo), brg, rb, sizeof rb);
-    snprintf(txt, sizeof txt, "%s\n%s", label, rb);
+    if (route) {
+      char cue[72];
+      c->updateFollow();
+      teamroute::cueText(c->cue(), cue, sizeof cue);
+      snprintf(txt, sizeof txt, "%s\n%s", label, cue);
+    } else {
+      snprintf(txt, sizeof txt, "%s\n%s", label, rb);
+    }
     rel = brg;   // relative to north: only the M9 has a compass
 #if defined(HAS_GPS_MOTION)
     float spd = NAN, crs = NAN;
@@ -580,6 +593,41 @@ static bool toScreen(double lat, double lon, double cwx, double cwy, int* sx, in
   return *sx >= -12 && *sx < k_map_canvas_w + 12 && *sy >= -12 && *sy < k_map_canvas_h + 12;
 }
 
+// Shared routes as lines, the followed one thicker. lv_line keeps a pointer to
+// its points, so they live here (PSRAM) until the next redraw.
+static auto& s_route_pts = psramStatic<lv_point_t[team::kMaxRoutes][TeamWire::kMaxShapePoints]>();
+static auto& s_route_shape = psramStatic<TeamWire::Shape>();
+static void drawRoutes(lv_obj_t* parent, double cwx, double cwy) {
+  team::Core* c = s_core;
+  if (!c) return;
+  for (int i = 0; i < team::kMaxRoutes; i++) {
+    TeamWire::Shape& sh = s_route_shape;
+    if (!c->routeShape(i, sh) || sh.n < 2) continue;
+    lv_point_t* pts = s_route_pts[i];
+    bool any = false;
+    for (int k = 0; k < sh.n; k++) {
+      int sx, sy;
+      any |= toScreen(sh.lat5[k] / 1e5, sh.lon5[k] / 1e5, cwx, cwy, &sx, &sy);
+      pts[k].x = (lv_coord_t)(sx < -4000 ? -4000 : sx > 4000 ? 4000 : sx);
+      pts[k].y = (lv_coord_t)(sy < -4000 ? -4000 : sy > 4000 ? 4000 : sy);
+    }
+    if (!any && sh.n < 3) continue;
+    const bool followed = c->followedRoute() == i;
+    lv_obj_t* l = lv_line_create(parent);
+    lv_line_set_points(l, pts, (uint16_t)sh.n);
+    lv_obj_set_style_line_width(l, followed ? 6 : 4, LV_PART_MAIN);
+    lv_obj_set_style_line_color(l, lv_color_hex(followed ? 0x2979FF : TeamWire::colorRgb(sh.color)), LV_PART_MAIN);
+    lv_obj_set_style_line_opa(l, followed ? LV_OPA_COVER : LV_OPA_80, LV_PART_MAIN);
+    lv_obj_set_style_line_rounded(l, true, LV_PART_MAIN);
+    lv_obj_set_pos(l, 0, 0);
+    lv_obj_clear_flag(l, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    mapTrack(l);
+    if (sh.label[0] && s_map_zoom >= 12 && pts[0].x > -12 && pts[0].x < k_map_canvas_w && pts[0].y > -12 &&
+        pts[0].y < k_map_canvas_h)
+      mapLabel(parent, pts[0].x, pts[0].y, sh.label, 0xFFFFFF);
+  }
+}
+
 }  // namespace teamui
 
 // Called from renderMapMarkers: pins under people, people on top, alerts ringed.
@@ -592,6 +640,7 @@ static void teamDrawMapOverlay(lv_obj_t* parent, double cwx, double cwy) {
   s_hl_active = false;   // recomputed as the points are drawn
   uint8_t self4[4];
   s_io.selfKey4(self4);
+  drawRoutes(parent, cwx, cwy);
   // Watched reports underneath everything: a dot in the report's colour, a
   // drone as an orange square with its label, its operator as a small grey dot.
   if (watchfeed::Store* w = s_watch) {
@@ -790,6 +839,40 @@ static void memberSheet(int i) {
     team::Member* x = s_core ? s_core->member(s_sel_idx) : nullptr;
     sheetClose();
     if (x) showOnMap(x->pos.lat, x->pos.lon);
+  });
+  sheetBtn(card, TR("Close"), [](lv_event_t*) { sheetClose(); });
+}
+
+static void routeSheet(int i) {
+  TeamWire::Shape& sh = s_route_shape;
+  if (!s_core || !s_core->routeShape(i, sh)) return;
+  s_sel_kind = 4;
+  s_sel_idx = i;
+  double len = 0;
+  for (int k = 1; k < sh.n; k++)
+    len += TeamWire::distanceM(sh.lat5[k - 1] / 1e5, sh.lon5[k - 1] / 1e5, sh.lat5[k] / 1e5, sh.lon5[k] / 1e5);
+  char body[160], dist[16];
+  teamroute::distanceText(len, dist, sizeof dist);
+  snprintf(body, sizeof body, "%s, %d %s. %s", dist, sh.n, TR("points"),
+           TR("Follow it for turn cues; the arrow points to the next corner."));
+  lv_obj_t* card = sheetOpen(sh.label[0] ? sh.label : TR("Route"), body);
+  sheetBtn(card, TR("Follow"), [](lv_event_t*) {
+    if (s_core && !s_core->followRoute(s_sel_idx, false)) toast(TR("Out of memory"));
+    sheetClose();
+    houndRefresh();
+    renderMapMarkers();
+  }, nullptr, 0x2979FF);
+  sheetBtn(card, TR("Follow back"), [](lv_event_t*) {
+    if (s_core && !s_core->followRoute(s_sel_idx, true)) toast(TR("Out of memory"));
+    sheetClose();
+    houndRefresh();
+    renderMapMarkers();
+  });
+  sheetBtn(card, TR("Map"), [](lv_event_t*) {
+    TeamWire::Shape& x = s_route_shape;
+    const bool ok = s_core && s_core->routeShape(s_sel_idx, x);
+    sheetClose();
+    if (ok) showOnMap(x.lat5[0] / 1e5, x.lon5[0] / 1e5);
   });
   sheetBtn(card, TR("Close"), [](lv_event_t*) { sheetClose(); });
 }
@@ -1138,6 +1221,34 @@ static void buildPins(lv_obj_t* b) {
     lbl(card, line, &g_font_12, COLOR_SUB);
   }
   if (!n) lbl(b, TR("No pins yet."), &g_font_12, COLOR_SUB);
+
+  // Routes the team shared: MeshCore Open TAK's road directions (Share with
+  // team) and routes drawn there. Follow one for turn-by-turn cues.
+  lbl(b, TR("Routes"), &g_font_14, COLOR_TEXT);
+  int rn = 0;
+  for (int i = 0; i < team::kMaxRoutes; i++) {
+    TeamWire::Shape& sh = s_route_shape;
+    if (!c->routeShape(i, sh)) continue;
+    rn++;
+    lv_obj_t* card = rowCard(b, [](lv_event_t* e) { routeSheet((int)(intptr_t)lv_event_get_user_data(e)); },
+                             (void*)(intptr_t)i);
+    lv_obj_set_style_border_color(card, lv_color_hex(c->followedRoute() == i ? 0x2979FF : TeamWire::colorRgb(sh.color)),
+                                  LV_PART_MAIN);
+    lv_obj_set_style_border_width(card, 2, LV_PART_MAIN);
+    double len = 0;
+    for (int k = 1; k < sh.n; k++)
+      len += TeamWire::distanceM(sh.lat5[k - 1] / 1e5, sh.lon5[k - 1] / 1e5, sh.lat5[k] / 1e5, sh.lon5[k] / 1e5);
+    char dist[16], rb[40];
+    teamroute::distanceText(len, dist, sizeof dist);
+    rangeTo(sh.lat5[0] / 1e5, sh.lon5[0] / 1e5, rb, sizeof rb);
+    snprintf(line, sizeof line, "%s  %s", sh.label[0] ? sh.label : TR("Route"), dist);
+    lbl(card, line, &g_font_14, COLOR_TEXT);
+    snprintf(line, sizeof line, "%s %s%s", TR("Starts"), rb, c->followedRoute() == i ? TR(" \xC2\xB7 following") : "");
+    lbl(card, line, &g_font_12, COLOR_SUB);
+  }
+  if (!rn)
+    lbl(b, TR("No routes yet. In MeshCore Open TAK, start Bloodhound's Directions and tap Share with team."), &g_font_12,
+        COLOR_SUB);
 }
 
 static void setupCycle(lv_event_t* e) {

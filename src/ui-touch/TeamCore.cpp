@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "TeamCore.h"
 
+#include <new>
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -79,6 +81,127 @@ void Core::begin() {
   loadSettings();
   loadMarkers();
   loadRoles();
+  loadRoutes();
+}
+
+// ---- routes -----------------------------------------------------------------------
+// "/teamroutes": [len u8][payload as it arrived] ...
+static constexpr size_t kRoutesFileMax = kMaxRoutes * (TeamWire::kMaxPayload + 1);
+
+void Core::saveRoutes() {
+  uint8_t* buf = (uint8_t*)malloc(kRoutesFileMax);
+  if (!buf) return;
+  size_t n = 0;
+  for (auto& r : routes_) {
+    if (!r.used || !r.len) continue;
+    buf[n++] = r.len;
+    memcpy(buf + n, r.raw, r.len);
+    n += r.len;
+  }
+  io_->writeFile("teamroutes", buf, n);
+  free(buf);
+}
+
+void Core::loadRoutes() {
+  uint8_t* buf = (uint8_t*)malloc(kRoutesFileMax);
+  if (!buf) return;
+  size_t n = 0;
+  if (io_->readFile("teamroutes", buf, kRoutesFileMax, &n)) {
+    loading_routes_ = true;
+    size_t o = 0;
+    while (o < n) {
+      const size_t k = buf[o++];
+      if (o + k > n) break;
+      onShape(buf + o, k);
+      o += k;
+    }
+    loading_routes_ = false;
+  }
+  free(buf);
+}
+
+// Only routes are kept (lines and areas are the app's for now).
+void Core::onShape(const uint8_t* p, size_t n) {
+  if (n > TeamWire::kMaxPayload) return;
+  TeamWire::Shape* s = (TeamWire::Shape*)malloc(sizeof(TeamWire::Shape));
+  if (!s) return;
+  new (s) TeamWire::Shape();
+  const bool ok = TeamWire::parse(p, n, *s) && (s->isRoute() || s->deleted);
+  int slot = -1;
+  if (ok) {
+    for (int i = 0; i < kMaxRoutes && slot < 0; i++)
+      if (routes_[i].used && keyEq(routes_[i].key4, s->key4) && routes_[i].id == s->id) slot = i;
+    if (slot >= 0) {
+      RouteRec& r = routes_[slot];
+      // A newer edit wins; a delete wins over the same time.
+      if (s->time < r.time || (s->time == r.time && (r.deleted || !s->deleted))) slot = -2;
+    } else if (!s->deleted) {
+      for (int i = 0; i < kMaxRoutes && slot < 0; i++) if (!routes_[i].used) slot = i;
+      if (slot < 0) {   // full: the oldest goes (tombstones first)
+        slot = 0;
+        for (int i = 1; i < kMaxRoutes; i++) {
+          const RouteRec& a = routes_[i];
+          const RouteRec& b = routes_[slot];
+          if ((a.deleted && !b.deleted) || (a.deleted == b.deleted && a.time < b.time)) slot = i;
+        }
+      }
+    } else {
+      slot = -2;   // a delete for a route never seen: nothing to do
+    }
+  }
+  if (ok && slot >= 0) {
+    RouteRec& r = routes_[slot];
+    r.used = true;
+    r.deleted = s->deleted;
+    memcpy(r.key4, s->key4, 4);
+    r.id = s->id;
+    r.time = s->time;
+    r.len = (uint8_t)n;
+    memcpy(r.raw, p, n);
+    if (hound_ == 3 && follow_idx_ == slot) {
+      if (r.deleted) hound_ = 0;
+      else followRoute(slot, false);   // an edit: follow the new one from where we are
+    }
+  }
+  free(s);
+  if (ok && slot >= 0 && !loading_routes_) {
+    saveRoutes();
+    io_->changed();
+  }
+}
+
+bool Core::routeShape(int i, TeamWire::Shape& out) const {
+  const RouteRec* r = route(i);
+  return r && TeamWire::parse(r->raw, r->len, out) && out.n > 0;
+}
+
+bool Core::followRoute(int i, bool reverse) {
+  TeamWire::Shape* s = (TeamWire::Shape*)malloc(sizeof(TeamWire::Shape));
+  if (!s) return false;
+  new (s) TeamWire::Shape();
+  const bool ok = routeShape(i, *s);
+  if (ok) {
+    Fix f;
+    const bool pos = io_->fix(f);
+    follow_.start(s->lat5, s->lon5, s->n, reverse, pos, f.lat, f.lon);
+    hound_ = 3;
+    follow_idx_ = i;
+    follow_id_ = s->id;
+    memcpy(follow_key_, s->key4, 4);
+    snprintf(hound_label_, sizeof hound_label_, "%s", s->label[0] ? s->label : "Route");
+    cue_ = teamroute::Cue();
+    updateFollow();
+    io_->changed();
+  }
+  free(s);
+  return ok;
+}
+
+void Core::updateFollow() {
+  if (hound_ != 3) return;
+  Fix f;
+  if (!io_->fix(f)) return;
+  cue_ = follow_.update(f.lat, f.lon);
 }
 
 // ---- roles --------------------------------------------------------------------
@@ -241,6 +364,7 @@ void Core::cancelAlert() {
 void Core::tick() {
   const uint32_t now = io_->nowMs();
   if (!active()) return;
+  updateFollow();
   // Own alert: three sends (radio collisions happen), then it rides on every position.
   if (own_active_ && own_sends_ < 3 && (int32_t)(now - own_next_ms_) >= 0) {
     uint8_t buf[TeamWire::kMaxPayload];
@@ -283,6 +407,7 @@ void Core::onPayload(const char* channel, const uint8_t* p, size_t n) {
     case TeamWire::kAlert: { TeamWire::Alert x; if (TeamWire::parse(p, n, x)) onAlert(x); break; }
     case TeamWire::kMarker: { TeamWire::Marker x; if (TeamWire::parse(p, n, x)) onMarker(x); break; }
     case TeamWire::kRole: { TeamWire::RoleDef x; if (TeamWire::parse(p, n, x)) onRoleDef(x); break; }
+    case TeamWire::kShape: onShape(p, n); break;
     default: break;   // reports: not on this radio yet
   }
 }
@@ -429,6 +554,14 @@ void Core::houndPoint(double lat, double lon, const char* label) {
   io_->changed();
 }
 bool Core::hound(double* lat, double* lon, char* label, size_t cap) {
+  if (hound_ == 3) {
+    const int k = cue_.next < follow_.count() ? cue_.next : follow_.count() - 1;
+    if (k < 0) return false;
+    *lat = follow_.lat(k);
+    *lon = follow_.lon(k);
+    snprintf(label, cap, "%s", hound_label_);
+    return true;
+  }
   if (hound_ == 2) {
     *lat = hound_lat_;
     *lon = hound_lon_;
