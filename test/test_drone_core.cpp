@@ -2,7 +2,7 @@
 // Drone Detector glue (src/ui-touch/DroneCore.h) around GridDown's Remote ID
 // parser: Wi-Fi frames, BLE adverts one message at a time, and the channel post
 // read back by the Watch feed. The post strings are the ones MeshCore Open TAK's
-// test/vox/remote_id_test.dart expects.
+// test/team/remote_id_test.dart expects.
 //   g++ -std=c++17 -Wall -Wextra -I src test/test_drone_core.cpp src/ui-touch/remoteid.cpp -o /tmp/d && /tmp/d
 #include <math.h>
 #include <stdio.h>
