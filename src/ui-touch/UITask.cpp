@@ -15898,6 +15898,139 @@ static void mmTempCb(lv_event_t* e) {
   mediaMeshInfoRefresh();
 }
 
+// ---- Find MediaMesh: which preset the MediaMesh here uses -------------------------
+// radio2 listens (a 2-minute tempradio2, rx only) on each preset in turn while a
+// repeater discovery request goes out on the main mesh. MediaMesh repeaters
+// answer on both of their radios, so packets heard on radio2 mean that preset.
+// The saved radio2 comes back at the end (tempradio2 off). Runs on its own timer,
+// so leaving the page doesn't stop it halfway.
+static lv_obj_t*   s_mm_find_val = nullptr;
+static lv_obj_t*   s_mm_find_btn = nullptr;
+static lv_timer_t* s_mm_find_timer = nullptr;
+static int         s_mm_find_preset = 0;     // 0 fast, 1 range
+static int         s_mm_find_phase = 0;      // 0 settling, 1 listening
+static uint32_t    s_mm_find_until = 0;
+static uint32_t    s_mm_find_before = 0;
+static uint32_t    s_mm_find_heard[2] = {0, 0};
+static uint8_t     s_mm_find_answers = 0;    // repeaters that answered at all
+static float       s_mm_find_freq = mediamesh::kDefaultFreq;
+static int         s_mm_find_pick = -1;
+
+static void mmFindStatus(const char* text) {
+  if (s_mm_find_val && lv_obj_is_valid(s_mm_find_val)) lv_label_set_text(s_mm_find_val, text);
+}
+
+static bool mmFindTune(int preset) {
+  char cmd[96];
+  snprintf(cmd, sizeof cmd, "set tempradio2 %.3f,%g,7,5,rx,2", s_mm_find_freq,
+           preset ? mediamesh::kRangeBw : mediamesh::kDefaultBw);
+  char reply[160];
+  return mediamesh::runCli(cmd, reply, sizeof reply) && strncmp(reply, "OK", 2) == 0;
+}
+
+// The preset found: radio2 set to it (turned on for photos and voice if it was off).
+static void mmFindUse() {
+  if (s_mm_find_pick < 0) return;
+  NodePrefs* np = the_mesh.getNodePrefs();
+  mediamesh::Config c = mediamesh::config();
+  c.p.bw = s_mm_find_pick ? mediamesh::kRangeBw : mediamesh::kDefaultBw;
+  c.p.sf = 7;
+  c.p.cr = 5;
+  c.p.freq = s_mm_find_freq;
+  if (c.mode == mediamesh::MODE_OFF && !(np && np->client_repeat)) {
+    c.mode = mediamesh::MODE_RXTX;
+    if (c.media == mediamesh::TX_AUTO && c.cross == mediamesh::CROSS_AUTO) {
+      c.media = mediamesh::TX_RADIO2;
+      c.cross = mediamesh::CROSS_OFF;
+    }
+  }
+  mediamesh::set(c);
+  char buf[24];
+  if (s_mm_bw_ta && lv_obj_is_valid(s_mm_bw_ta)) { snprintf(buf, sizeof buf, "%g", c.p.bw); lv_textarea_set_text(s_mm_bw_ta, buf); }
+  if (s_mm_sf_ta && lv_obj_is_valid(s_mm_sf_ta)) lv_textarea_set_text(s_mm_sf_ta, "7");
+  if (s_mm_cr_ta && lv_obj_is_valid(s_mm_cr_ta)) lv_textarea_set_text(s_mm_cr_ta, "5");
+  if (s_mm_preset_row && lv_obj_is_valid(s_mm_preset_row)) setChoicePick(s_mm_preset_row, mmPresetIndex(c));
+  mediaMeshRefreshChoices();
+  mediaMeshInfoRefresh();
+  if (g_lv.task) g_lv.task->showAlert(s_mm_find_pick ? TR("radio2: 125 kHz range") : TR("radio2: 250 kHz fast"), 1500);
+}
+
+static void mmFindEnd(const char* why) {
+  if (s_mm_find_timer) { lv_timer_del(s_mm_find_timer); s_mm_find_timer = nullptr; }
+  char reply[160];
+  mediamesh::runCli("set tempradio2 off", reply, sizeof reply);   // the saved radio2 again
+  if (s_mm_find_btn && lv_obj_is_valid(s_mm_find_btn)) lv_obj_clear_state(s_mm_find_btn, LV_STATE_DISABLED);
+  if (why) {
+    mmFindStatus(why);
+    if (g_lv.task) g_lv.task->showAlert(why, 2200);
+    return;
+  }
+  s_mm_find_pick = mediamesh::findPick(s_mm_find_heard[0], s_mm_find_heard[1]);
+  char line[96];
+  snprintf(line, sizeof line, "250 kHz: %lu, 125 kHz: %lu %s", (unsigned long)s_mm_find_heard[0],
+           (unsigned long)s_mm_find_heard[1], TR("heard"));
+  mmFindStatus(line);
+  static char msg[220];
+  if (s_mm_find_pick < 0) {
+    snprintf(msg, sizeof msg, "%s %.3f MHz. %s", TR("No MediaMesh answered on 250 or 125 kHz at"), s_mm_find_freq,
+             s_mm_find_answers ? TR("Repeaters nearby answered on the main mesh, but none on radio2.")
+                               : TR("No repeaters answered at all (out of range, or asked too often: try in 2 minutes)."));
+    if (g_lv.task) g_lv.task->showAlert(msg, 4000);
+    return;
+  }
+  snprintf(msg, sizeof msg, "%s %s (%lu %s). %s", TR("MediaMesh found:"),
+           s_mm_find_pick ? TR("125 kHz range") : TR("250 kHz fast"),
+           (unsigned long)s_mm_find_heard[s_mm_find_pick], TR("packets heard"), TR("Use this preset?"));
+  showConfirm(msg, TR("Use it"), mmFindUse);
+}
+
+static void mmFindTimerCb(lv_timer_t*) {
+  const uint32_t now = millis();
+  if ((int32_t)(now - s_mm_find_until) < 0) return;
+  if (s_mm_find_phase == 0) {   // settled: ask the repeaters
+    s_mm_find_before = mediamesh::status().rx[1];
+    if (the_mesh.uiStartDiscoverScan((uint8_t)(1u << ADV_TYPE_REPEATER)) == 0) { mmFindEnd(TR("Couldn't send the request")); return; }
+    s_mm_find_phase = 1;
+    s_mm_find_until = now + mediamesh::kFindListenMs;
+    return;
+  }
+  s_mm_find_heard[s_mm_find_preset] = mediamesh::status().rx[1] - s_mm_find_before;
+  for (int i = 0; i < the_mesh.discoverCount(); i++) {
+    MyMesh::DiscoverHit h;
+    if (the_mesh.discoverGet((uint8_t)i, h) && h.node_type == ADV_TYPE_REPEATER && s_mm_find_answers < 255) s_mm_find_answers++;
+  }
+  the_mesh.discoverClear();
+  if (s_mm_find_preset == 1) { mmFindEnd(nullptr); return; }
+  s_mm_find_preset = 1;
+  if (!mmFindTune(1)) { mmFindEnd(TR("The radio refused the 125 kHz preset")); return; }
+  mmFindStatus(TR("Listening on 125 kHz (2/2)..."));
+  s_mm_find_phase = 0;
+  s_mm_find_until = now + mediamesh::kFindSettleMs;
+}
+
+static void mmFindCb(lv_event_t* e) {
+  if (lv_event_get_code(e) != LV_EVENT_CLICKED || s_mm_find_timer || !g_lv.task) return;
+  NodePrefs* np = the_mesh.getNodePrefs();
+  if (np && np->client_repeat) { g_lv.task->showAlert(TR("Turn Client repeat off to use radio2"), 1800); return; }
+  if (mediamesh::status().temp2) { g_lv.task->showAlert(TR("Stop the temporary radio2 first"), 1800); return; }
+  if (the_mesh.getRemainingTxBudget() < 300) { g_lv.task->showAlert(TR("Airtime budget used up: try again soon"), 1800); return; }
+  // The frequency in the form (911.150 unless changed).
+  float f = 0;
+  s_mm_find_freq = (s_mm_freq_ta && lv_obj_is_valid(s_mm_freq_ta) && parseFloatField(s_mm_freq_ta, f) && f > 100) ? f
+                                                                                                                 : mediamesh::config().p.freq;
+  s_mm_find_heard[0] = s_mm_find_heard[1] = 0;
+  s_mm_find_answers = 0;
+  s_mm_find_pick = -1;
+  s_mm_find_preset = 0;
+  s_mm_find_phase = 0;
+  if (!mmFindTune(0)) { g_lv.task->showAlert(TR("The radio refused the 250 kHz preset"), 2000); return; }
+  the_mesh.discoverClear();
+  s_mm_find_until = millis() + mediamesh::kFindSettleMs;
+  s_mm_find_timer = lv_timer_create(mmFindTimerCb, 200, nullptr);
+  if (s_mm_find_btn && lv_obj_is_valid(s_mm_find_btn)) lv_obj_add_state(s_mm_find_btn, LV_STATE_DISABLED);
+  mmFindStatus(TR("Listening on 250 kHz (1/2)..."));
+}
+
 static void mmTimerCb(lv_timer_t* t) {
   if (!s_mm_scan_val || !lv_obj_is_valid(s_mm_scan_val)) {
     lv_timer_del(t);
@@ -15992,6 +16125,11 @@ static void buildMediaMeshCard() {
                                    "farther. Both SF7, CR 4/5. Everyone on radio2 must use the same.",
                                    opts, 2, mmPresetIndex(cfg), mmPresetCb);
   }
+  s_mm_find_btn = setButton(c, LV_SYMBOL_GPS, "Find MediaMesh", mmFindCb);
+  if (s_mm_find_timer) lv_obj_add_state(s_mm_find_btn, LV_STATE_DISABLED);
+  s_mm_find_val = setInfoRow(c, "Found", s_mm_find_timer ? TR("Listening...") : "");
+  setNote(c, "Find MediaMesh listens on each preset for about 10 s while nearby repeaters are asked to answer. "
+             "MediaMesh repeaters answer on radio2 too, so the preset they're heard on is the one in use here.");
   lv_obj_t* r1 = setFieldRow(c);
   s_mm_freq_ta = setField(r1, "Frequency (MHz)", "MHz", 15, setFieldW(2));
   s_mm_bw_ta   = setField(r1, "Bandwidth (kHz)", "kHz", 10, setFieldW(2));

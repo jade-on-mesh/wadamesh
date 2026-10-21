@@ -29,6 +29,7 @@ The **radio2 (MediaMesh)** card:
 - **Preset**: *250 kHz fast* (the default) or *125 kHz range*. Picking one
   fills in bandwidth, SF7 and CR 4/5 and leaves the frequency alone; it shows
   as picked whenever the fields match one.
+- **Find MediaMesh**: finds which preset the MediaMesh here uses (below).
 - **Frequency, Bandwidth, SF, CR**: the radio2 profile. A field applies when you
   leave it. It must differ from the main radio and stay clear of every listed
   community mesh (see *Presets and community meshes*).
@@ -39,6 +40,26 @@ The **radio2 (MediaMesh)** card:
 The **Temporary radio2** card: its own Frequency/Bandwidth/SF/CR, then
 *15 min / 1 hour / 2 hours* (`set tempradio2 ...,rxtx,mins`) or *Stop*
 (`set tempradio2 off`). *Running now* shows the frequency and time left.
+
+### Find MediaMesh
+
+**Find MediaMesh** (under *Preset*) tells you whether the MediaMesh where you
+are runs the *250 kHz fast* or the *125 kHz range* preset, in about 20 seconds:
+
+1. radio2 listens on the 250 kHz preset, at the frequency in the form, with a
+   2-minute temporary radio2 (`set tempradio2 <MHz>,250,7,5,rx,2`, listen only).
+2. A repeater discovery request goes out on the main mesh. MediaMesh repeaters
+   (keymindCascade, `tx.reply both`) answer on both of their radios, so their
+   radio2 answer is only heard if this radio listens on the same preset.
+3. After about 9 seconds, the same on 125 kHz.
+4. `set tempradio2 off` puts the saved radio2 back. The preset that heard
+   packets on radio2 is offered (a tie goes to 250 kHz). **Use it** sets it,
+   turning radio2 on for photos and voice if it was off.
+
+It needs a MediaMesh repeater in direct range. Repeaters answer at most four
+discovery requests every two minutes, so running it again right away may
+find nothing. It refuses while a temporary radio2 runs or Client Repeat is on.
+MeshCore Open TAK has the same button in its MediaMesh settings.
 
 Per contact: the contact menu's **⇄ Radio** button cycles Auto → Main → radio2 →
 Both → Off (`tx.user`). Per channel: **Send on** in the channel's settings
