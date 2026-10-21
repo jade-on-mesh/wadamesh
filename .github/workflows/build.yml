@@ -86,6 +86,10 @@ jobs:
         run: >-
           g++ -std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined -I src test/test_drone_core.cpp
           src/ui-touch/remoteid.cpp -o /tmp/drone_core && /tmp/drone_core
+      - name: 900 MHz drone scanner classifier (GridDown's, on simulated sweeps)
+        run: >-
+          g++ -std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined -I src test/test_scan900.cpp
+          src/ui-touch/Scan900.cpp -o /tmp/scan900 && /tmp/scan900
       - name: Team wire golden bytes and core rules (shared with Open TAK)
         run: g++ -std=c++17 -Wall -Wextra -fsanitize=address,undefined -I src test/test_team_wire.cpp src/ui-touch/TeamCore.cpp -o /tmp/team_test && /tmp/team_test
       - name: Watched channels on the map (host test)

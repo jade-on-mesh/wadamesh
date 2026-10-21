@@ -31121,6 +31121,12 @@ static lv_color_t  s_spec_heat_lut[64];
 // the_mesh.loop() (so the mesh stays off the radio while we sweep). Set true on
 // open, cleared in closeSpectrumPage() ONLY AFTER the mesh params are restored.
 static bool s_spectrum_active = false;
+// The same for the Drone Detector's 900 MHz sweep (DroneUI.inc): true only
+// while one sweep runs, cleared once the mesh params are back.
+static bool s_drone_scan_owns = false;
+#if CAP_FLOCK_YOU
+static void droneScanYield();   // DroneUI.inc: end a sweep now and hand the radio back
+#endif
 
 // dBm -> RGB565 colour ramp (deep blue floor -> cyan -> green -> yellow -> red).
 // The ramp auto-scales to the LIVE noise floor (s_spec_floor) so the floor always
@@ -33188,6 +33194,9 @@ static void openRemotePage() {
 #endif  // !HAS_TANMATSU
 
 static void openSpectrumPage() {
+#if CAP_FLOCK_YOU
+  droneScanYield();   // the Drone Detector's 900 MHz sweep lets go of the radio first
+#endif
   closeSpectrumPage();
 #if defined(HAS_THINKNODE_M9)
   // A mesh transmit may be ON AIR right now: sends are asynchronous (startSendRaw
@@ -33669,7 +33678,7 @@ static void openSpectrumPage() {
 
 // Read by main.cpp's loop(): true while the Spectrum app owns the radio, so the
 // mesh is paused (the_mesh.loop() skipped) and never re-tunes mid-sweep.
-bool spectrumOwnsRadio() { return s_spectrum_active; }
+bool spectrumOwnsRadio() { return s_spectrum_active || s_drone_scan_owns; }
 
 // Status-bar unread badge (✉ N) → Chats inbox. Wired on the bar's left_label;
 // only fires while updateGlobalStatusBar has flagged the badge state CLICKABLE,

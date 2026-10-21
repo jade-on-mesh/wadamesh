@@ -11,7 +11,16 @@
 #if CAP_FLOCK_YOU
 
 #include "DroneCore.h"
+#include "Scan900.h"
 #include "remoteid.h"
+
+// The 900 MHz sweep drives the radio directly, as the Spectrum app does: SX126x
+// boards only (the LR11x0 on the M9 and the LR1121 Pager behave differently).
+#if defined(RADIO_CLASS) && (defined(USE_SX1262) || defined(USE_SX1268)) && !defined(HAS_THINKNODE_M9)
+#define DRONE_SCAN900 1
+#else
+#define DRONE_SCAN900 0
+#endif
 
 namespace droneui {
 
@@ -22,6 +31,7 @@ struct Cfg {
   bool armed = false;
   bool share = false;
   bool sound = true;
+  bool scan900 = false;   // the 900 MHz control-link sweep (off unless turned on)
   char channel[32] = "";
 };
 
@@ -50,6 +60,7 @@ static void loadCfg() {
   s_cfg.armed = p.getBool("armed", false);
   s_cfg.share = p.getBool("share", false);
   s_cfg.sound = p.getBool("sound", true);
+  s_cfg.scan900 = p.getBool("s900", false);
   snprintf(s_cfg.channel, sizeof s_cfg.channel, "%s", p.getString("channel", "").c_str());
   p.end();
 }
@@ -60,6 +71,7 @@ static void saveCfg() {
   p.putBool("armed", s_cfg.armed);
   p.putBool("share", s_cfg.share);
   p.putBool("sound", s_cfg.sound);
+  p.putBool("s900", s_cfg.scan900);
   p.putString("channel", s_cfg.channel);
   p.end();
 }
@@ -154,6 +166,209 @@ static void heard(int i, uint32_t now) {
   s_ver++;
 }
 
+// ---- the 900 MHz control-link sweep (GridDown's scanner, Scan900.h) --------------------
+// One sweep of 52 channels takes about a second and runs every kSweepEveryMs.
+// For that second the mesh is paused (s_drone_scan_owns, read by main.cpp
+// through spectrumOwnsRadio()): this standalone neither hears nor sends on the
+// mesh, and its queued sends wait. The sweep only starts while the radio is
+// receiving (not sending, not mid-packet), never during Spectrum, a temporary
+// radio or a LoRa Update, and gives the radio back after every sweep with the
+// mesh settings put back, as the Spectrum app does. CAD and the RSSI reads run
+// with nothing routed to DIO1, so the mesh driver's interrupt never fires.
+namespace s900 {
+
+constexpr uint32_t kSweepEveryMs = 4000;   // start to start: about a quarter of the time
+constexpr uint32_t kChunkUs = 40000;       // per UI-loop pass, then the UI runs
+constexpr uint32_t kCadTimeoutUs = 80000;  // SF10/BW125 CAD is ~30 ms; never wait forever
+
+enum Phase : uint8_t { kIdle, kCal, kSweep };
+static scan900::State* st = nullptr;      // PSRAM
+static Phase phase = kIdle;
+static int pos = 0;
+static bool calibrated = false;
+static float cal[scan900::kChannels];
+static uint32_t next_ms = 0;
+static const char* why = "";
+static uint32_t sweeps = 0, refused = 0;
+
+static bool inBand() {
+  NodePrefs* p = the_mesh.getNodePrefs();
+  return p && p->freq >= 902.0f && p->freq <= 928.0f;
+}
+
+bool supported() { return DRONE_SCAN900 && inBand(); }
+
+#if DRONE_SCAN900
+static float median(float* v, int n) {
+  for (int i = 1; i < n; i++) {
+    const float k = v[i];
+    int j = i - 1;
+    while (j >= 0 && v[j] > k) { v[j + 1] = v[j]; j--; }
+    v[j + 1] = k;
+  }
+  return v[n / 2];
+}
+
+// RSSI at the current setting: arm RX (nothing on DIO1), settle, median of n.
+static float rssiMedian(int n) {
+  radio.startReceive(RADIOLIB_SX126X_RX_TIMEOUT_INF, RADIOLIB_IRQ_RX_DEFAULT_FLAGS, 0, 0);
+  delay(5);   // GridDown: AGC settle (the T-Deck's switching noise needs >3 ms)
+  float v[5];
+  if (n > 5) n = 5;
+  for (int i = 0; i < n; i++) {
+    v[i] = radio.getRSSI(false);
+    delayMicroseconds(600);
+  }
+  radio.standby();
+  return median(v, n);
+}
+
+// CAD at the current setting, polled over SPI (DIO1 left alone).
+static bool cad() {
+  ChannelScanConfig_t cfg;
+  cfg.cad.symNum = RADIOLIB_SX126X_CAD_PARAM_DEFAULT;
+  cfg.cad.detPeak = RADIOLIB_SX126X_CAD_PARAM_DEFAULT;
+  cfg.cad.detMin = RADIOLIB_SX126X_CAD_PARAM_DEFAULT;
+  cfg.cad.exitMode = RADIOLIB_SX126X_CAD_PARAM_DEFAULT;
+  cfg.cad.timeout = 0;
+  cfg.cad.irqFlags = RADIOLIB_IRQ_CAD_DEFAULT_FLAGS;
+  cfg.cad.irqMask = 0;
+  if (radio.startChannelScan(cfg) != RADIOLIB_ERR_NONE) return false;
+  const uint32_t t0 = micros();
+  uint32_t f = 0;
+  while (!((f = radio.getIrqFlags()) & RADIOLIB_SX126X_IRQ_CAD_DONE)) {
+    if (micros() - t0 > kCadTimeoutUs) { radio.standby(); return false; }
+    delayMicroseconds(200);
+  }
+  radio.standby();
+  return (f & RADIOLIB_SX126X_IRQ_CAD_DETECTED) != 0;
+}
+
+// One channel, as GridDown's All Drone profile: a CAD (SF6/BW500 or
+// SF10/BW125, alternating), wide RSSI, narrow RSSI when it looks active.
+static void step(int i) {
+  radio.standby();
+  if (radio.setFrequency(scan900::channelMHz(i)) != RADIOLIB_ERR_NONE) return;
+  if (phase == kCal) {
+    radio.setBandwidth(500.0f);
+    radio.setSpreadingFactor(6);
+    cal[i] = rssiMedian(3);
+    return;
+  }
+  const bool low = scan900::nextCadLowSF(*st);
+  radio.setBandwidth(low ? 500.0f : 125.0f);
+  radio.setSpreadingFactor(low ? 6 : 10);
+  const bool hit = cad();
+  radio.setBandwidth(500.0f);
+  radio.setSpreadingFactor(6);
+  const float wide = rssiMedian(5);
+  float narrow = 0;
+  const bool nar = scan900::wantNarrow(*st, wide, hit);
+  if (nar) {
+    radio.setBandwidth(125.0f);
+    narrow = rssiMedian(3);
+  }
+  scan900::sample(*st, i, hit, low, wide, nar, narrow);
+}
+
+static bool take() {
+  if (s_spectrum_active) { why = "Spectrum is open"; return false; }
+  if (mediamesh::status().temp1) { why = "temporary radio on"; return false; }
+  if (!radio_driver.isInRecvMode() || radio_driver.isReceiving()) { refused++; why = "mesh busy"; return false; }
+  radio_driver.rxQueueSuspend(true);
+  s_drone_scan_owns = true;   // from here the mesh is off the radio
+  radio.standby();
+  why = "";
+  return true;
+}
+#endif
+
+// The mesh's settings back on the radio, receiving; then the mesh runs again.
+void release() {
+#if DRONE_SCAN900
+  if (!s_drone_scan_owns) return;
+  NodePrefs* p = the_mesh.getNodePrefs();
+  radio.standby();
+  if (p) {
+    radio_driver.setParams(p->freq, p->bw, p->sf, p->cr);
+    radio_driver.setTxPower(p->tx_power_dbm);
+    radio_driver.setRxBoostedGainMode(p->rx_boosted_gain != 0);
+  }
+  radio.startReceive();   // the wrapper still says RX: make the chip match
+  s_drone_scan_owns = false;
+  radio_driver.rxQueueSuspend(false);
+#endif
+  if (phase != kIdle) next_ms = millis() + kSweepEveryMs;   // a cut sweep is retried later
+  phase = kIdle;
+}
+
+void restart() { calibrated = false; }
+
+// Called from the UI loop. Returns true when a new drone link was found.
+bool tick(uint32_t now, bool wanted) {
+#if DRONE_SCAN900
+  if (!wanted || !supported()) {
+    release();
+    why = !DRONE_SCAN900 ? "not on this radio" : !inBand() ? "only on 902-928 MHz" : "off";
+    return false;
+  }
+  if (!st) {
+    void* m = heap_caps_malloc(sizeof(scan900::State), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!m) { why = "out of memory"; return false; }
+    st = new (m) scan900::State();
+  }
+  if (phase == kIdle) {
+    if ((int32_t)(now - next_ms) < 0) return false;
+    if (!take()) { next_ms = now + 500; return false; }
+    phase = calibrated ? kSweep : kCal;
+    pos = 0;
+  }
+  const uint32_t t0 = micros();
+  while (pos < scan900::kChannels && (pos == 0 || micros() - t0 < kChunkUs)) step(pos++);
+  if (pos < scan900::kChannels) return false;   // the rest on the next pass (the mesh stays paused)
+  bool fresh = false;
+  if (phase == kCal) {
+    float own[2];
+    int n = 0;
+    NodePrefs* p = the_mesh.getNodePrefs();
+    if (p) own[n++] = p->freq;
+    const mediamesh::Config& mc = mediamesh::config();
+    if (mc.mode != mediamesh::MODE_OFF) own[n++] = mc.p.freq;
+    scan900::begin(*st, cal, own, n, now);
+    calibrated = true;
+  } else {
+    fresh = scan900::endSweep(*st, now);
+    sweeps++;
+  }
+  release();
+  return fresh;
+#else
+  (void)now;
+  (void)wanted;
+  why = "not on this radio";
+  return false;
+#endif
+}
+
+const scan900::State* state() { return calibrated ? st : nullptr; }
+bool sweeping() { return s_drone_scan_owns; }
+
+}  // namespace s900
+
+static void scan900Alert() {
+  const scan900::State* st = s900::state();
+  if (!st) return;
+  const scan900::Detection* best = nullptr;
+  for (const scan900::Detection& d : st->det)
+    if (d.valid && scan900::isDroneClass(d.classification) && (!best || d.firstSeen > best->firstSeen)) best = &d;
+  if (!best) return;
+  char m[96];
+  snprintf(m, sizeof m, "900 MHz: %s, %.0f dBm", scan900::classLabel(best->classification), best->peakRSSI);
+  toast(m, 3500);
+  if (s_cfg.sound && g_lv.task && !g_lv.task->isBuzzerQuiet()) uiPlaySlot(TOUCH_SND_MEN);
+  s_ver++;
+}
+
 // ---- the page ------------------------------------------------------------------------------
 static void pageBuild();
 
@@ -235,6 +450,34 @@ static void buildLive(lv_obj_t* b) {
     snprintf(line, sizeof line, "%s %s: %s", TR("Alerts to"), s_cfg.channel, s_share_err);
     lbl(b, line, &g_font_12, 0xF2A33A);
   }
+  if (s_cfg.scan900) {
+    const scan900::State* st = s900::state();
+    if (st) {
+      snprintf(line, sizeof line, "900 MHz: %s \xC2\xB7 %lu %s \xC2\xB7 %s %.0f dBm",
+               s900::sweeping() ? TR("sweeping") : TR("between sweeps"), (unsigned long)st->sweeps, TR("sweeps"),
+               TR("noise"), st->noiseFloor);
+    } else {
+      snprintf(line, sizeof line, "900 MHz: %s", *s900::why ? s900::why : TR("first sweep..."));
+    }
+    lbl(b, line, &g_font_12, COLOR_SUB);
+    if (st) {
+      for (const scan900::Detection& d : st->det) {
+        if (!d.valid) continue;
+        const bool drone = scan900::isDroneClass(d.classification);
+        lv_obj_t* card = rowCard(b, [](lv_event_t*) {}, nullptr);   // information only
+        lv_obj_set_style_border_color(card, lv_color_hex(drone ? 0xE53935 : 0x6B7280), LV_PART_MAIN);
+        lv_obj_set_style_border_width(card, 2, LV_PART_MAIN);
+        snprintf(line, sizeof line, "%s", scan900::classLabel(d.classification));
+        lbl(card, line, &g_font_14, drone ? COLOR_TEXT : COLOR_SUB);
+        const float km = scan900::estimateRangeM(d.peakRSSI, d.classification == scan900::kGfskFhss ? 20.0f : 24.0f) / 1000.0f;
+        const char* trend = d.trendSlope > 0.5f ? TR(" \xC2\xB7 closer") : d.trendSlope < -0.5f ? TR(" \xC2\xB7 farther") : "";
+        snprintf(line, sizeof line, "%.1f MHz \xC2\xB7 %.0f dBm \xC2\xB7 ~%.1f km \xC2\xB7 %u ch%s%s%s", d.peakFreq,
+                 d.peakRSSI, km, (unsigned)d.channelCount, trend, d.rateCategory ? " \xC2\xB7 " : "",
+                 scan900::rateLabel(d.rateCategory));
+        lbl(card, line, &g_font_12, COLOR_SUB);
+      }
+    }
+  }
   const uint32_t now = millis();
   int shown = 0;
   for (int i = 0; i < RID_MAX_TRACKS; i++) {
@@ -282,6 +525,28 @@ static void setupToggle(lv_event_t* e) {
       s_cfg.share = !s_cfg.share;
       break;
     case 1: s_cfg.sound = !s_cfg.sound; break;
+    case 3:
+      if (s_cfg.scan900) {
+        s_cfg.scan900 = false;
+        s900::release();
+        break;
+      }
+      if (!s900::supported()) {
+        toast(DRONE_SCAN900 ? TR("The 900 MHz scan is only for the 902-928 MHz band") : TR("This radio can't run the 900 MHz scan"), 2600);
+        return;
+      }
+      // Turning it on costs mesh reception: say so and ask first.
+      showConfirm(TR("Scan 902-928 MHz for drone control links (ELRS, Crossfire, SiK)?\n\n"
+                     "This affects your mesh reception: while it sweeps, about 1 second in every 4, this "
+                     "standalone can't hear or send on the mesh. Messages sent to it then can be missed, and "
+                     "its own messages wait. Turn it on only while you need it."),
+                  TR("Turn on"), +[]() {
+                    s_cfg.scan900 = true;
+                    s900::restart();
+                    saveCfg();
+                    pageBuild();
+                  });
+      return;
     case 2: {   // others' drones on this channel on the map: Team's watched channels
       watchfeed::Store* w = teamui::watch();
       if (!w || !s_cfg.channel[0]) return;
@@ -299,6 +564,14 @@ static void buildSetup(lv_obj_t* b) {
   auto onoff = [](bool v) { return v ? TR("on") : TR("off"); };
   snprintf(line, sizeof line, "%s: %s", TR("Sound when a new drone appears"), onoff(s_cfg.sound));
   wideBtn(b, line, setupToggle, (void*)1);
+
+  snprintf(line, sizeof line, "%s: %s", TR("900 MHz control-link scan"), onoff(s_cfg.scan900));
+  wideBtn(b, line, setupToggle, (void*)3, s_cfg.scan900 ? 0x7F1D1D : 0);
+  lbl(b, s_cfg.scan900
+             ? TR("On: the mesh is paused about a quarter of the time. Turn it off when you're done.")
+             : TR("Finds ELRS, Crossfire and SiK drone links without Remote ID, using the LoRa radio. "
+                  "Affects mesh reception while on."),
+      &g_font_12, s_cfg.scan900 ? 0xF2A33A : COLOR_SUB);
 
   lbl(b, TR("Alert channel (e.g. #dronewatch; never Public):"), &g_font_12, COLOR_SUB);
   lv_obj_t* row = lv_obj_create(b);
@@ -433,6 +706,7 @@ static void loopTick() {
       else s_cfg.armed = false;
     }
   }
+  if (s900::tick(now, s_cfg.armed && s_cfg.scan900)) scan900Alert();
   if (!s_cfg.armed || !s_ids) return;
   // FlockRadio::tick() runs in flockui::loopTick(), for both apps.
   FlockRadio::RidRaw raw;
@@ -462,5 +736,8 @@ static void loopTick() {
 }
 
 }  // namespace droneui
+
+// Spectrum is opening: end a sweep now (the radio goes back to the mesh first).
+static void droneScanYield() { droneui::s900::release(); }
 
 #endif  // CAP_FLOCK_YOU

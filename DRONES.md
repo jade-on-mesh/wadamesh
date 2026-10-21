@@ -47,6 +47,53 @@ suite runs in CI. The Wadamesh glue is `src/ui-touch/DroneCore.h`.
    others on the map** watches the channel from here. A drone's sheet also has
    **Post to the alert channel** for posting one by hand.
 
+## 900 MHz control-link scan (optional, off by default)
+
+Drones without Remote ID still talk to their pilot. **Setup > 900 MHz
+control-link scan** looks for those links with the standalone's LoRa radio,
+using GridDown's 900 MHz drone scanner (BlackAtlas LLC, GPL-3.0, its logic in
+`src/ui-touch/Scan900.cpp`):
+
+- 52 channels, 902-928 MHz in 500 kHz steps. Each gets a channel-activity check
+  (SF6/BW500 for ELRS and Crossfire, SF10/BW125 for LoRaWAN-style LoRa) and
+  signal-strength readings.
+- After every sweep, a classifier sorts what it heard: **LoRa FHSS
+  (ELRS/Crossfire)**, **GFSK telemetry (SiK/RFD900)**, **Fixed LoRa**,
+  **LoRaWAN infrastructure** or **Unknown ISM**. It looks at which part of the
+  band is busy (915.0-923.2 MHz carries no LoRaWAN), the spreading-factor mix,
+  how widely the activity spreads, and how often each channel lights up.
+- Each detection shows its strongest frequency, signal, a rough distance
+  (free-space, assuming a 250 mW ELRS or 100 mW SiK transmitter), how many
+  channels it uses, whether it's getting closer or farther, and for ELRS its hop
+  rate. A new LoRa FHSS or GFSK telemetry link alerts like a new drone.
+- The standalone's own mesh and radio2 frequencies, ±1.25 MHz, are left out, so
+  its neighbours don't count. Board noise is measured in a first calibration
+  sweep and left out too.
+
+**It affects your mesh reception.** The LoRa radio can't sweep and listen to
+the mesh at once. While this is on, the standalone sweeps for about a second in
+every four, and for that second it can't hear or send on the mesh: messages
+sent to it can be missed, and its own messages wait their turn. That's why it's
+off by default, and turning it on asks you to confirm. Turn it off when you're
+done.
+
+It only runs on standalones with an SX1262 radio (T-Deck, the SX1262 T-LoRa
+Pager, the P4 boards), and only when the mesh is on the US 902-928 MHz band. It
+waits while Spectrum is open, a temporary radio is on, or the radio is busy
+sending or receiving. These detections have no position, so they aren't posted
+to the channel or put on the map.
+
+Changes from GridDown:
+
+- Its saved RF baseline survey isn't carried over, so ambiguous LoRa is always
+  treated as infrastructure.
+- Detections last 15 seconds instead of 10, since sweeps take turns with the
+  mesh.
+- Its telemetry rule also needs activity spread over at least 5 MHz, as its
+  second rule already did. This stops a gateway's sub-band being called
+  telemetry.
+- Only drone links alert, not fixed LoRa.
+
 ## Limits
 
 - **Cooperative only.** It hears drones that broadcast Remote ID. A drone
