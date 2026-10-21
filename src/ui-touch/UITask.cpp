@@ -22591,7 +22591,7 @@ static void openAdminConsole(const ContactInfo& c) {
     }, LV_EVENT_CLICKED, nullptr);
   }
   // LoRa Update: serve this repeater new firmware from the SD card (LoraUpdate.inc).
-  {
+  if (LORA_UPDATE) {
     lv_obj_t* up = lv_btn_create(hdr);
     lv_obj_set_size(up, 34, 28);
     lv_obj_align(up, LV_ALIGN_RIGHT_MID, -76, 0);

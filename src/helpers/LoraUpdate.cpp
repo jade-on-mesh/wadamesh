@@ -3,7 +3,7 @@
 
 #include "LoraUpdate.h"
 
-#if defined(ESP32)
+#if LORA_UPDATE
 
 #include <Arduino.h>
 #include <FS.h>
@@ -162,7 +162,7 @@ uint32_t packetsSent() { return s_mgr ? s_mgr->packetsSent() : 0; }
 
 }  // namespace loraupdate
 
-#else   // not ESP32: nothing to serve from
+#else   // no LoRa Update on this build: nothing to serve from
 
 namespace loraupdate {
 void begin(const uint8_t*, SendFn) {}

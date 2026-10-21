@@ -16,8 +16,9 @@ OTA** in MeshCore Open TAK. The engine is his, vendored in `src/helpers/ota`
 - An admin login to that repeater on this standalone.
 - The repeater in **direct range** of the standalone. During the update both
   move to a temporary radio that other repeaters don't relay.
-- A standalone with an SX1262 radio: T-Deck, T-LoRa Pager (SX1262) or ThinkNode
-  M9. The LR1121 Pager can't run a temporary radio.
+- A standalone with an SX1262 radio and room in its flash: T-Deck or T-LoRa
+  Pager (SX1262). The LR1121 Pager can't run a temporary radio, and the
+  ThinkNode M9's flash is full, so it has no LoRa Update.
 - A `.mota` file built for the repeater's board, in the `/mota` folder of the
   standalone's SD card. You can build one with Mike's `motatool`, or download it
   with MeshCore Open TAK's LoRa OTA screen and copy it to the card. Up to eight

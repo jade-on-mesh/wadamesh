@@ -13,6 +13,16 @@
 
 #include "LoraUpdateCore.h"
 
+// Built on ESP32 boards with room for the engine. The ThinkNode M9's flash is
+// full, so it gets the inert stubs below and no button.
+#ifndef LORA_UPDATE
+#if defined(ESP32) && !defined(HAS_THINKNODE_M9)
+#define LORA_UPDATE 1
+#else
+#define LORA_UPDATE 0
+#endif
+#endif
+
 namespace fs { class FS; }
 
 namespace loraupdate {
