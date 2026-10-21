@@ -1,7 +1,7 @@
 # wadamesh language file
 # canonical source - translators: edit this file and PR it
 # code: el
-# ver: 28
+# ver: 29
 # name: Ελληνικά
 # base: el
  (device behind)	 (συσκευή πίσω)
@@ -2160,3 +2160,26 @@ you	εσείς
 Flood in / out	Flood εισ. / εξ.
 Direct in / out	Άμεσα εισ. / εξ.
 Airtime TX / RX	Χρόνος εκπομπής TX / RX
+Fewest hops	Λιγότερα άλματα
+
+# Mesh Deck keyboard module strings
+module attached	μονάδα συνδεδεμένη
+not attached	μη συνδεδεμένη
+
+# Orientation choices (#698 / #701)
+Portrait	Κατακόρυφα
+Portrait 180	Κατακόρυφα 180
+Landscape	Οριζόντια
+Landscape 180	Οριζόντια 180
+
+# Trackball off switch (T-Deck) + T-Display P4 keyboard light
+Use the trackball	Χρήση του trackball
+Turn off a damaged trackball that moves or clicks by itself. While it is off, Enter unlocks the lock screen.	Απενεργοποιεί ένα χαλασμένο trackball που κινείται ή κάνει κλικ μόνο του. Όσο είναι ανενεργό, το Enter ξεκλειδώνει την οθόνη κλειδώματος.
+Trackball on	Trackball ναι
+Trackball off	Trackball όχι
+press Enter to unlock	πατήστε Enter για ξεκλείδωμα
+Locks when screen off\n(press Enter to unlock)	Κλειδώνει με κλειστή οθόνη\n(πατήστε Enter για ξεκλείδωμα)
+Powering off… press reset to wake	Απενεργοποίηση… πατήστε reset για αφύπνιση
+Low	Low
+F11 on the keyboard steps through these too.	Το F11 στο πληκτρολόγιο εναλλάσσει επίσης αυτά τα επίπεδα.
+Wi-Fi was switched off because the device crashed while it was on. Turn it on in Settings > Wi-Fi to try again.	Wi-Fi was switched off because the device crashed while it was on. Turn it on in Settings > Wi-Fi to try again.

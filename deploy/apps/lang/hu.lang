@@ -1,7 +1,7 @@
 # wadamesh language file
 # canonical source - translators: edit this file and PR it
 # code: hu
-# ver: 28
+# ver: 29
 # name: Magyar
 # base: hu
  (device behind)	 (készülék hátulján)
@@ -2170,3 +2170,26 @@ you	te
 Flood in / out	Flood be / ki
 Direct in / out	Direkt be / ki
 Airtime TX / RX	Adásidő TX / RX
+Fewest hops	Legkevesebb ugrás
+
+# Mesh Deck keyboard module strings
+module attached	modul csatlakoztatva
+not attached	nincs csatlakoztatva
+
+# Orientation choices (#698 / #701)
+Portrait	Álló
+Portrait 180	Álló 180
+Landscape	Fekvő
+Landscape 180	Fekvő 180
+
+# Trackball off switch (T-Deck) + T-Display P4 keyboard light
+Use the trackball	Trackball használata
+Turn off a damaged trackball that moves or clicks by itself. While it is off, Enter unlocks the lock screen.	Kikapcsolja a sérült trackballt, amely magától mozog vagy kattint. Amíg ki van kapcsolva, az Enter feloldja a zárolási képernyőt.
+Trackball on	Trackball bekapcsolva
+Trackball off	Trackball kikapcsolva
+press Enter to unlock	a feloldáshoz nyomja meg az Entert
+Locks when screen off\n(press Enter to unlock)	Lezár, ha a képernyő ki van kapcsolva\n(a feloldáshoz nyomja meg az Entert)
+Powering off… press reset to wake	Kikapcsolás… az ébresztéshez nyomja meg a reset gombot
+Low	Low
+F11 on the keyboard steps through these too.	A billentyűzet F11 gombja is végiglépked ezeken.
+Wi-Fi was switched off because the device crashed while it was on. Turn it on in Settings > Wi-Fi to try again.	Wi-Fi was switched off because the device crashed while it was on. Turn it on in Settings > Wi-Fi to try again.

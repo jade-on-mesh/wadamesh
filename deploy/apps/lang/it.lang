@@ -1,7 +1,7 @@
 # wadamesh language file
 # canonical source - translators: edit this file and PR it
 # code: it
-# ver: 28
+# ver: 29
 # name: Italiano
 # base: it
  (device behind)	 (dispositivo indietro)
@@ -2159,3 +2159,26 @@ you	tu
 Flood in / out	Flood in / out
 Direct in / out	Diretti in / out
 Airtime TX / RX	Tempo in onda TX / RX
+Fewest hops	Meno salti
+
+# Mesh Deck keyboard module strings
+module attached	modulo collegato
+not attached	non collegato
+
+# Orientation choices (#698 / #701)
+Portrait	Verticale
+Portrait 180	Verticale 180
+Landscape	Orizzontale
+Landscape 180	Orizzontale 180
+
+# Trackball off switch (T-Deck) + T-Display P4 keyboard light
+Use the trackball	Usa la trackball
+Turn off a damaged trackball that moves or clicks by itself. While it is off, Enter unlocks the lock screen.	Disattiva una trackball danneggiata che si muove o clicca da sola. Finché è spenta, Invio sblocca la schermata di blocco.
+Trackball on	Trackball accesa
+Trackball off	Trackball spenta
+press Enter to unlock	premi Invio per sbloccare
+Locks when screen off\n(press Enter to unlock)	Si blocca a schermo spento\n(premi Invio per sbloccare)
+Powering off… press reset to wake	Spegnimento… premi reset per riattivare
+Low	Low
+F11 on the keyboard steps through these too.	Anche F11 sulla tastiera scorre questi livelli.
+Wi-Fi was switched off because the device crashed while it was on. Turn it on in Settings > Wi-Fi to try again.	Wi-Fi was switched off because the device crashed while it was on. Turn it on in Settings > Wi-Fi to try again.

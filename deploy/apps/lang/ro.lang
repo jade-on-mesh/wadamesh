@@ -1,7 +1,7 @@
 # wadamesh language file
 # canonical source - translators: edit this file and PR it
 # code: ro
-# ver: 28
+# ver: 29
 # name: Română
 # base: ro
  (device behind)	 (dispozitiv în urmă)
@@ -2161,3 +2161,26 @@ you	tu
 Flood in / out	Flood intrare / ieșire
 Direct in / out	Direct intrare / ieșire
 Airtime TX / RX	Timp în aer TX / RX
+Fewest hops	Cele mai puține salturi
+
+# Mesh Deck keyboard module strings
+module attached	modul atașat
+not attached	neatașat
+
+# Orientation choices (#698 / #701)
+Portrait	Portret
+Portrait 180	Portret 180
+Landscape	Peisaj
+Landscape 180	Peisaj 180
+
+# Trackball off switch (T-Deck) + T-Display P4 keyboard light
+Use the trackball	Folosește trackball-ul
+Turn off a damaged trackball that moves or clicks by itself. While it is off, Enter unlocks the lock screen.	Oprește un trackball deteriorat care se mișcă sau apasă singur. Cât timp e oprit, Enter deblochează ecranul de blocare.
+Trackball on	Trackball pornit
+Trackball off	Trackball oprit
+press Enter to unlock	apasă Enter pentru deblocare
+Locks when screen off\n(press Enter to unlock)	Se blochează când ecranul e stins\n(apasă Enter pentru deblocare)
+Powering off… press reset to wake	Se opreşte… apasă reset pentru trezire
+Low	Low
+F11 on the keyboard steps through these too.	Tasta F11 de pe tastatură trece și ea prin aceste niveluri.
+Wi-Fi was switched off because the device crashed while it was on. Turn it on in Settings > Wi-Fi to try again.	Wi-Fi was switched off because the device crashed while it was on. Turn it on in Settings > Wi-Fi to try again.
