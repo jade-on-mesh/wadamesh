@@ -2,6 +2,7 @@
 #ifdef DISPLAY_CLASS
 #include "ui-touch/VoxPhotos.h"   // MeshCore Open TAK photo fetches
 #include "ui-touch/TeamCore.h"   // Open TAK team positions/alerts/pins (GRP_DATA 0x5654)
+#include "ui-touch/SoundLinkCore.h"   // Sound link: the channel bridge (SoundLinkUI.inc)
 #include "ui-touch/OtpMessenger.h"   // OTP Messenger: one-time-pad DMs/channels, handled in the background
 #endif
 #include <esp_heap_caps.h>
@@ -3574,6 +3575,7 @@ void MyMesh::onChannelMessageRecv(const mesh::GroupChannel &channel, mesh::Packe
 #ifdef DISPLAY_CLASS
   if (resolved_idx >= 0) VoxPhotos::onChannelText(text, resolved_idx);
   if (resolved_idx >= 0) teamOnChannelText(resolved_idx, text, timestamp);   // watched channels on the map
+  if (resolved_idx >= 0) soundLinkOnChannelText(resolved_idx, text);   // Sound link: play the bridged channel
   // One-time-pad posts on a channel we hold a pad for go to OTP Messenger only.
   if (resolved_idx >= 0 && OtpMessenger::onChannelText(text, resolved_idx)) return;
   // Get the channel name from the channel index

@@ -362,6 +362,14 @@ void reap() {
   }
 }
 
+// ---- raw capture, for Sound link (ggwave) -----------------------------------------
+volatile bool s_raw = false;     // the mic is Sound link's
+bool s_raw_settling = true;
+bool s_raw_mono = false;
+size_t s_raw_bytes = 0;
+int64_t s_raw_t0 = 0;
+int s_raw_drain = 0;
+
 }  // namespace
 
 namespace VoxMic {
@@ -370,6 +378,7 @@ bool available() { return true; }
 
 bool start(int wire_mode, const char** err) {
   reap();
+  if (s_raw) { *err = "Sound link is listening: turn it off first"; return false; }
   if (s_task_running || s_state == kRecording) { *err = "Already recording"; return false; }
   dropClip();
   s_error = "";
@@ -464,6 +473,68 @@ bool take(uint8_t* mode, uint8_t** bits, size_t* len, uint32_t* ms, uint32_t min
   return true;
 }
 
+bool rawStart(const char** err) {
+  reap();
+  if (s_raw) return true;
+  if (s_task_running || s_state == kRecording) { *err = "The microphone is recording"; return false; }
+  if (heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) < kDriverBytes + kHeadroom) {
+    memError("low");
+    *err = s_mem_err;
+    return false;
+  }
+  if (!hwStart(err)) return false;
+  s_raw_settling = true;
+  s_raw_mono = false;
+  s_raw_bytes = 0;
+  s_raw_t0 = 0;
+  s_raw_drain = 64;
+  s_raw = true;
+  return true;
+}
+
+bool rawRead(int16_t* mono, size_t max, size_t* got, uint32_t timeout_ms) {
+  *got = 0;
+  if (!s_raw) return false;
+  static int16_t rx[2 * 256];
+  // Drain what the DMA held before, then measure what arrives (as captureJob does).
+  while (s_raw_drain > 0) {
+    size_t n = 0;
+    s_raw_drain--;
+    if (!hwRead(rx, sizeof rx, &n, 0)) { s_raw_drain = 0; break; }
+  }
+  size_t want = s_raw_settling || !s_raw_mono ? max * 2 : max;
+  if (want > sizeof rx / sizeof rx[0]) want = sizeof rx / sizeof rx[0];
+  size_t bytes = 0;
+  if (!hwRead(rx, want * sizeof(int16_t), &bytes, timeout_ms)) return false;
+  if (s_raw_settling) {
+    const int64_t t = esp_timer_get_time();
+    if (!s_raw_t0) { s_raw_t0 = t; return true; }
+    s_raw_bytes += bytes;
+    if (t - s_raw_t0 < (int64_t)kSettleMs * 1000) return true;
+    s_raw_mono = (int64_t)s_raw_bytes * 1000000 / (t - s_raw_t0) < 48000;
+    s_raw_settling = false;
+    Serial.printf("[VOX] sound link mic: %s\n", s_raw_mono ? "mono" : "stereo");
+    return true;
+  }
+  const size_t n = bytes / sizeof(int16_t);
+  if (s_raw_mono) {
+    memcpy(mono, rx, n * sizeof(int16_t));
+    *got = n;
+  } else {
+    for (size_t i = 0; i + 1 < n; i += 2) mono[i / 2] = (int16_t)(((int32_t)rx[i] + rx[i + 1]) / 2);
+    *got = n / 2;
+  }
+  return true;
+}
+
+void rawStop() {
+  if (!s_raw) return;
+  hwStop();
+  s_raw = false;
+}
+
+bool rawActive() { return s_raw; }
+
 }  // namespace VoxMic
 
 namespace VoxAudioTask {
@@ -509,6 +580,10 @@ const char* error() { return ""; }
 uint32_t elapsedMs() { return 0; }
 int level() { return 0; }
 bool take(uint8_t*, uint8_t**, size_t*, uint32_t*, uint32_t) { return false; }
+bool rawStart(const char** err) { *err = "This radio has no microphone"; return false; }
+bool rawRead(int16_t*, size_t, size_t* got, uint32_t) { *got = 0; return false; }
+void rawStop() {}
+bool rawActive() { return false; }
 }  // namespace VoxMic
 
 #endif

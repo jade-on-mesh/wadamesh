@@ -56505,6 +56505,7 @@ enum AppDrawerAction {
   APPACT_OTP,
   APPACT_TEAM,
   APPACT_FLOCK,
+  APPACT_SOUND,
   APPACT_LUA_BASE = 100,   // APPACT_LUA_BASE + i = installed Lua app s_lua_inst[i]
 };
 // OTP Messenger (app drawer -> APPACT_OTP): the screens; protocol in OtpCore.cpp.
@@ -56513,6 +56514,14 @@ enum AppDrawerAction {
 #include "TeamUI.inc"
 // Flock You (app drawer -> APPACT_FLOCK): Flock ALPR detection + known cameras; rules in FlockCore.h.
 #include "FlockYouUI.inc"
+#if CAP_SOUND_LINK
+// Sound link (app drawer -> APPACT_SOUND): SoundLinkUI.inc, included further down,
+// after the audio sink it plays through.
+namespace soundui { static void pageOpen(); static void loopTick(); }
+#else
+#include "SoundLinkCore.h"
+void soundLinkOnChannelText(int, const char*) {}   // MyMesh's bridge hook: nothing to do here
+#endif
 static uint32_t otpUnreadSig() {
   return OtpMessenger::ready() ? ((uint32_t)(OtpMessenger::core().unreadTotal() & 0xFF) << 8) * 0x9E37u : 0u;
 }
@@ -56531,6 +56540,9 @@ static const AppTileDef k_app_tiles[] = {
   { UI_ICON_USERS,              "Team",      APPACT_TEAM,      HUE_PLACE },   // teammates, SOS, pins, Bloodhound
 #if CAP_FLOCK_YOU
   { UI_ICON_EYE,                "Flock You", APPACT_FLOCK,     HUE_RADIO },   // Flock ALPR detector + known cameras
+#endif
+#if CAP_SOUND_LINK
+  { UI_ICON_WAVES,              "Sound link", APPACT_SOUND,    HUE_MSG },     // channels, contacts, Wavest over sound
 #endif
   { UI_ICON_RADIO,              "Advertise", APPACT_ADVERT,    HUE_RADIO },
   { UI_ICON_SIGNAL,             "Signal",    APPACT_SIGNAL,    HUE_RADIO },
@@ -56927,6 +56939,9 @@ static void appLaunch(int act, lv_event_t* e) {
     case APPACT_TEAM:      teamui::pageOpen();    return;   // team awareness
 #if CAP_FLOCK_YOU
     case APPACT_FLOCK:     flockui::pageOpen();   return;   // Flock ALPR detector
+#endif
+#if CAP_SOUND_LINK
+    case APPACT_SOUND:     soundui::pageOpen();   return;   // share and chat by sound (ggwave)
 #endif
     case APPACT_CMDCENTER: setHomeDrawer(false);  return;   // back to the Home widgets
     case APPACT_SIGNAL:    openSignalInfoPopup(); return;   // signal/traffic + auto-discover settings
@@ -71814,6 +71829,10 @@ static void voxVoiceTask(void* arg) {   // when the audio worker is busy or miss
 static bool voxVoicePlay(uint32_t sid, const char** err) {
   if (s_vox_voice_sid) { *err = "Already playing"; return false; }
   if (luaAudioActive() || s_notify_playing) { *err = "Audio is busy"; return false; }
+#if defined(HAS_TDISPLAY_P4)
+  // The P4's mic and speaker share one lock: playing would wait for Sound link to stop.
+  if (VoxMic::rawActive()) { *err = "Sound link is listening - stop it to play"; return false; }
+#endif
   if (!g_lv.task || g_lv.task->isBuzzerQuiet() || touchPrefsGetSoundVolume() == 0) {
     *err = "Sound is off - turn it on in Settings > Sound";
     return false;
@@ -71848,6 +71867,9 @@ static bool voxVoicePlay(uint32_t, const char** err) {
 }
 #endif
 static void voxVoiceStop() { if (s_vox_voice_sid) s_vox_voice_stop = true; }
+
+// Sound link: ggwave through the audio sink above and VoxMic's raw capture.
+#include "SoundLinkUI.inc"
 
 #if (defined(HAS_TDECK_GT911) || defined(HAS_TDISPLAY_P4)) && CAP_LUA_AUDIO
 // ---- Recording voice messages: hold the send button ------------------------------
@@ -80518,6 +80540,9 @@ void UITask::loop() {
     teamui::loopTick();     // beacons, alert repeats, alarm, Bloodhound, map refresh
 #if CAP_FLOCK_YOU
     flockui::loopTick();    // Flock You: radios, detections, nearby cameras, channel alerts
+#endif
+#if CAP_SOUND_LINK
+    soundui::loopTick();    // Sound link: mic, player, heard messages, the bridge
 #endif
     static uint32_t s_vox_voice_seen = 0;   // repaint the bubble when playback starts or ends
     if (s_vox_voice_sid != s_vox_voice_seen) { s_vox_voice_seen = s_vox_voice_sid; g_lv.dirty_timeline = true; }

@@ -48,6 +48,16 @@ int level();
 // its length. False (and the recording dropped) if it's shorter than `min_ms`.
 bool take(uint8_t* mode, uint8_t** bits, size_t* len, uint32_t* ms, uint32_t min_ms = 600);
 
+// Raw capture for Sound link (ggwave): 16 kHz mono, whatever the board's mic
+// delivers. rawStart()/rawStop() on the loop task (the T-Deck's mic ADC is on
+// the I2C bus), rawRead() on one other task. Recording refuses while it runs,
+// and rawStart() while recording. rawRead() gives up to `max` samples (none
+// for the first 150 ms, while the ADC settles); false when the mic stopped.
+bool rawStart(const char** err);
+bool rawRead(int16_t* mono, size_t max, size_t* got, uint32_t timeout_ms);
+void rawStop();
+bool rawActive();
+
 }  // namespace VoxMic
 
 // A task for recording and voice playback, created once at boot (begin()) so

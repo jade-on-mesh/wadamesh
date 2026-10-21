@@ -550,6 +550,20 @@
   #endif
 #endif
 
+// ---- Sound link (SOUND_LINK.md) --------------------------------------------
+// Channels, contacts and short messages over sound (ggwave, lib/ggwave), in
+// Wavest's format so MeshCore Open TAK and Wavest's web page hear it too, and a
+// bridge between Wavest and a channel. Needs a microphone (VoxMic: the T-Deck's
+// ES7210, the T-Display P4's ES8311) and the audio sink Lua apps use. ~40 KB
+// of flash; ~1.4 MB of PSRAM only while listening or playing.
+#ifndef CAP_SOUND_LINK
+  #if (defined(HAS_TDECK_GT911) || defined(HAS_TDISPLAY_P4)) && CAP_LUA_AUDIO
+    #define CAP_SOUND_LINK 1
+  #else
+    #define CAP_SOUND_LINK 0
+  #endif
+#endif
+
 // ---- Extended Lua SDK ------------------------------------------------------
 // The BASE SDK (drawing, timers, key/value store, read-only mesh + radio stats,
 // http_get) is board-agnostic and ships everywhere CAP_LUA_APPS is on.
