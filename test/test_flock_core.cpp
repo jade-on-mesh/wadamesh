@@ -309,7 +309,86 @@ static void settings() {
   CHECK(b.radius == 1 && b.share_conf == kConfHigh && !b.armed);
 }
 
+// Downloading on the radio: the query, the rows Overpass sends, when it's due.
+static void download() {
+  // A row's tags pick the direction and label as scripts/flock_cameras.py does
+  // (the same cases are run through the script below, in test_flock_dl.py).
+  struct { const char* row; const char* want; } rows[] = {
+      {"47.6100120|-122.3398710|270|||Flock Safety|", "47.610012,-122.339871,270,Flock Safety"},
+      {"47.61|-122.33||NW|Motorola|Vigilant|City", "47.610000,-122.330000,315,Motorola"},
+      {"47.61|-122.33|45-90|||Flock Safety|", "47.610000,-122.330000,68,Flock Safety"},
+      {"47.61|-122.33|350-10||||", "47.610000,-122.330000,0,ALPR"},
+      {"47.61|-122.33|90;270|||City of Seattle|", "47.610000,-122.330000,90,City of Seattle"},
+      {"47.61|-122.33|bogus|180|Flock, Inc.||", "47.610000,-122.330000,180,Flock  Inc."},
+      {"47.61|-122.33|-90||||", "47.610000,-122.330000,270,ALPR"},
+      {"47.61|-122.33", "47.610000,-122.330000,,ALPR"},
+      {"47.61|-122.33|||  Flock Safety Falcon With A Very Long Name Indeed  ||",
+       "47.610000,-122.330000,,Flock Safety Falcon With A Very"},
+  };
+  char out[160];
+  for (auto& r : rows) {
+    CHECK(osmRowToCamLine(r.row, out, sizeof out));
+    CHECK_STR(out, r.want);
+    Cam c;
+    CHECK(parseCamLine(out, c));   // and the radio reads it back
+  }
+  CHECK(!osmRowToCamLine("", out, sizeof out));
+  CHECK(!osmRowToCamLine("runtime error: Query timed out", out, sizeof out));
+  CHECK(!osmRowToCamLine("0|0||||", out, sizeof out));
+  CHECK(!osmRowToCamLine("95|10||||", out, sizeof out));
+  // A label is never cut inside a character.
+  CHECK(osmRowToCamLine("1|2||||\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9|", out, sizeof out));
+  CHECK(strlen(strrchr(out, ',') + 1) == 32);
+
+  CHECK(directionFromTag("w") == 270 && directionFromTag(" 12.6 ") == 13 && directionFromTag("") == -1 &&
+        directionFromTag("abc") == -1 && directionFromTag("400") == 40);
+
+  // The box and the query.
+  const Box b = areaBox(47.6, -122.3, 50);
+  CHECK(fabs(b.n - b.s - 100 / 111.32) < 1e-9);
+  CHECK(distanceM(47.6, b.w, 47.6, b.e) > 99000 && distanceM(47.6, b.w, 47.6, b.e) < 101000);
+  const Box polar = areaBox(89.9, 179.9, 200);
+  CHECK(polar.n == 90 && polar.e == 180);
+  char url[900];
+  CHECK(overpassUrl(b, url, sizeof url));
+  CHECK(!strncmp(url, "https://overpass-api.de/api/interpreter?data=%5Bout%3Acsv%28%3A%3Alat%2C%3A%3Alon%2C", 84));
+  CHECK(strstr(url, "%22surveillance%3Atype%22%3D%22ALPR%22") && strstr(url, "%2847.1508%2C-122.9661%2C48.0492%2C-121.6339%29"));
+  CHECK(!strchr(url + 8, ' ') && !strchr(url + 8, '"'));
+  CHECK(!overpassUrl(b, url, 100));
+
+  // When a download is due.
+  Settings s;
+  CHECK(!downloadDue(s, 47.6, -122.3, 0));   // off
+  s.auto_dl = true;
+  CHECK(!downloadDue(s, 0, 0, 0));           // nowhere
+  CHECK(downloadDue(s, 47.6, -122.3, 0));    // never done
+  s.dl_lat_e6 = 47600000;
+  s.dl_lon_e6 = -122300000;
+  s.dl_at = 1790000000;
+  CHECK(!downloadDue(s, 47.6, -122.3, 1790000000 + 3600));
+  CHECK(!downloadDue(s, 47.8, -122.3, 0));                           // 22 km: inside half of 50
+  CHECK(downloadDue(s, 47.9, -122.3, 0));                            // 33 km
+  CHECK(downloadDue(s, 47.6, -122.3, 1790000000 + 8 * 86400));       // a week on
+  CHECK(!downloadDue(s, 47.6, -122.3, 12345));                       // a clock not set yet
+  s.area = 3;
+  CHECK(!downloadDue(s, 47.9, -122.3, 0));                           // 33 km of 200
+
+  // They survive a reboot.
+  s.dl_lat_e6 = -33868800;
+  s.dl_lon_e6 = 151209300;
+  snprintf(s.channel, sizeof s.channel, "#flock watch=1;x");
+  char t[256];
+  saveSettings(s, t, sizeof t);
+  Settings r;
+  loadSettings(t, r);
+  CHECK(r.auto_dl && r.area == 3 && r.dl_lat_e6 == -33868800 && r.dl_lon_e6 == 151209300 && r.dl_at == 1790000000);
+  CHECK_STR(r.channel, "#flock watch=1");   // ';' ends it, as before
+  loadSettings("k=9", r);
+  CHECK(r.area == 1 && !r.auto_dl);
+}
+
 int main() {
+  download();
   wifi();
   ble();
   table();

@@ -466,6 +466,149 @@ inline size_t formatCamLine(const Cam& c, const char* label, char* out, size_t c
   return n < 0 ? 0 : ((size_t)n < cap ? (size_t)n : cap - 1);
 }
 
+// ---- downloading cameras on the radio ---------------------------------------------------------
+// The same cameras scripts/flock_cameras.py fetches, asked of OpenStreetMap's
+// Overpass API for a box around the radio, as CSV (far easier to stream than
+// JSON) with '|' between fields:
+//   lat|lon|direction|camera:direction|manufacturer|brand|operator
+// Each row becomes a cameras.csv line, chosen the way the script chooses.
+constexpr const char* kOverpassUrl = "https://overpass-api.de/api/interpreter";
+constexpr int kAreaChoices = 4;
+static const uint16_t kAreaKm[kAreaChoices] = {25, 50, 100, 200};   // half the box's side
+constexpr uint32_t kDownloadMaxAgeS = 7UL * 86400;                    // refresh after a week
+
+struct Box { double s, w, n, e; };
+
+inline Box areaBox(double lat, double lon, int km) {
+  const double dla = km / 111.32;
+  const double cl = cos(lat * M_PI / 180.0);
+  const double dlo = km / (111.32 * (cl > 0.05 ? cl : 0.05));
+  Box b{lat - dla, lon - dlo, lat + dla, lon + dlo};
+  if (b.s < -90) b.s = -90;
+  if (b.n > 90) b.n = 90;
+  if (b.w < -180) b.w = -180;
+  if (b.e > 180) b.e = 180;
+  return b;
+}
+
+inline size_t overpassQuery(const Box& b, char* out, size_t cap) {
+  const int n = snprintf(out, cap,
+                         "[out:csv(::lat,::lon,direction,\"camera:direction\",manufacturer,brand,operator;false;\"|\")]"
+                         "[timeout:120];node[\"man_made\"=\"surveillance\"][\"surveillance:type\"=\"ALPR\"]"
+                         "(%.4f,%.4f,%.4f,%.4f);out body;",
+                         b.s, b.w, b.n, b.e);
+  return n < 0 || (size_t)n >= cap ? 0 : (size_t)n;
+}
+
+// "<kOverpassUrl>?data=<query, URL-encoded>". 0 when it doesn't fit.
+inline size_t overpassUrl(const Box& b, char* out, size_t cap) {
+  char q[400];
+  if (!overpassQuery(b, q, sizeof q)) return 0;
+  int o = snprintf(out, cap, "%s?data=", kOverpassUrl);
+  if (o < 0 || (size_t)o >= cap) return 0;
+  static const char* const hex = "0123456789ABCDEF";
+  for (const char* p = q; *p; p++) {
+    const unsigned char c = (unsigned char)*p;
+    const bool plain = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' ||
+                       c == '_' || c == '.' || c == '~';
+    if ((size_t)o + (plain ? 1 : 3) >= cap) return 0;
+    if (plain) out[o++] = (char)c;
+    else { out[o++] = '%'; out[o++] = hex[c >> 4]; out[o++] = hex[c & 15]; }
+  }
+  out[o] = 0;
+  return (size_t)o;
+}
+
+// Degrees a direction tag means, or -1: "270", "W", "45-90" (its middle),
+// "90;270" (the first). As flock_cameras.py's direction().
+inline int directionFromTag(const char* v) {
+  char t[24];
+  size_t n = 0;
+  while (*v == ' ') v++;
+  for (; *v && *v != ';' && n + 1 < sizeof t; v++) t[n++] = *v;
+  while (n && t[n - 1] == ' ') n--;
+  t[n] = 0;
+  if (!n) return -1;
+  static const char* const card[16] = {"N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
+                                       "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"};
+  static const int16_t deg[16] = {0, 22, 45, 67, 90, 112, 135, 157, 180, 202, 225, 247, 270, 292, 315, 337};
+  char up[24];
+  for (size_t i = 0; i <= n; i++) up[i] = (t[i] >= 'a' && t[i] <= 'z') ? (char)(t[i] - 32) : t[i];
+  for (int i = 0; i < 16; i++)
+    if (!strcmp(up, card[i])) return deg[i];
+  char* e;
+  const double a = strtod(t, &e);
+  if (e == t || a != a) return -1;
+  const char* r = e;
+  while (*r == ' ') r++;
+  if (*r == '-' && t[0] != '-') {   // a range
+    const char* bs = r + 1;
+    while (*bs == ' ') bs++;
+    char* e2;
+    double b = strtod(bs, &e2);
+    if (e2 == bs || *e2) return -1;
+    if (b < a) b += 360;
+    return (int)lround((a + b) / 2) % 360;
+  }
+  if (*r) return -1;
+  int d = (int)lround(a) % 360;
+  return d < 0 ? d + 360 : d;
+}
+
+// One Overpass CSV row as a cameras.csv line. False for anything else (a
+// blank line, an error message).
+inline bool osmRowToCamLine(const char* row, char* out, size_t cap) {
+  // Up to 7 fields; a row with fewer (no tags at all) leaves the rest empty.
+  const char* f[7];
+  size_t len[7];
+  const char* p = row;
+  for (int i = 0; i < 7; i++) {
+    if (!p) { f[i] = ""; len[i] = 0; continue; }
+    const char* bar = i < 6 ? strchr(p, '|') : nullptr;
+    f[i] = p;
+    len[i] = bar ? (size_t)(bar - p) : strlen(p);
+    p = bar ? bar + 1 : nullptr;
+  }
+  char num[32];
+  copyStr(num, sizeof num, f[0], len[0]);
+  char* e;
+  const double la = strtod(num, &e);
+  if (e == num || *e) return false;
+  copyStr(num, sizeof num, f[1], len[1]);
+  const double lo = strtod(num, &e);
+  if (e == num || *e || fabs(la) > 90 || fabs(lo) > 180 || (la == 0 && lo == 0)) return false;
+  Cam c;
+  c.lat_e6 = (int32_t)lround(la * 1e6);
+  c.lon_e6 = (int32_t)lround(lo * 1e6);
+  char tag[48];
+  for (int k = 2; k <= 3 && c.dir < 0; k++) {
+    copyStr(tag, sizeof tag, f[k], len[k]);
+    const int d = directionFromTag(tag);
+    if (d >= 0) c.dir = (int16_t)d;
+  }
+  char label[48] = "ALPR";
+  for (int k = 4; k <= 6; k++) {
+    if (!len[k]) continue;
+    copyStr(tag, sizeof tag, f[k], len[k]);
+    size_t o = 0;
+    for (const char* q = tag; *q; q++) label[o++] = (*q == ',' || *q == '\r' || *q == '\n') ? ' ' : *q;
+    label[o] = 0;
+    break;
+  }
+  // Trim, then cut to 32 bytes without splitting a character.
+  char* l = label;
+  while (*l == ' ') l++;
+  size_t ln = strlen(l);
+  while (ln && l[ln - 1] == ' ') ln--;
+  if (ln > 32) {
+    ln = 32;
+    while (ln && ((uint8_t)l[ln] & 0xC0) == 0x80) ln--;
+    while (ln && l[ln - 1] == ' ') ln--;
+  }
+  l[ln] = 0;
+  return formatCamLine(c, ln ? l : "ALPR", out, cap) > 0;
+}
+
 // The cameras, in a buffer the caller owns (PSRAM on the radio).
 class CamDb {
  public:
@@ -597,12 +740,30 @@ struct Settings {
   uint8_t share_conf = kConfHigh;
   bool share_marked = true;    // post cameras marked by hand too
   char channel[32] = {0};      // e.g. "#flockwatch"
+  // Downloading cameras on the radio (kAreaKm around it, over Wi-Fi).
+  bool auto_dl = false;        // keep them current by itself
+  uint8_t area = 1;            // kAreaKm index
+  int32_t dl_lat_e6 = 0, dl_lon_e6 = 0;   // the last download's centre (0,0: none yet)
+  uint32_t dl_at = 0;          // and when (epoch; 0 when the clock wasn't set)
 };
 
-// "a=1;c=1;h=1;p=1;r=1;s=0;q=3;m=1;ch=#flockwatch"
+// Whether the cameras around (lat, lon) want downloading now: never done, the
+// radio has moved more than half the area away, or a week has passed.
+inline bool downloadDue(const Settings& s, double lat, double lon, uint32_t now_epoch) {
+  if (!s.auto_dl || (lat == 0 && lon == 0)) return false;
+  if (!s.dl_lat_e6 && !s.dl_lon_e6) return true;
+  const double km = kAreaKm[s.area % kAreaChoices];
+  if (distanceM(lat, lon, s.dl_lat_e6 / 1e6, s.dl_lon_e6 / 1e6) > km * 500.0) return true;
+  return now_epoch > 1700000000UL && s.dl_at && now_epoch > s.dl_at && now_epoch - s.dl_at > kDownloadMaxAgeS;
+}
+
+// "a=1;c=1;h=1;p=1;r=1;s=0;q=3;m=1;d=1;k=1;dla=47610000;dlo=-122330000;dlt=1790000000;ch=#flockwatch"
+// (ch last: a channel name may hold anything but a ';')
 inline size_t saveSettings(const Settings& s, char* out, size_t cap) {
-  const int n = snprintf(out, cap, "a=%d;c=%d;h=%d;p=%d;r=%u;s=%d;q=%u;m=%d;ch=%s", s.armed, s.show_cams,
-                         s.show_hits, s.proximity, s.radius, s.share, s.share_conf, s.share_marked, s.channel);
+  const int n = snprintf(out, cap, "a=%d;c=%d;h=%d;p=%d;r=%u;s=%d;q=%u;m=%d;d=%d;k=%u;dla=%ld;dlo=%ld;dlt=%lu;ch=%s",
+                         s.armed, s.show_cams, s.show_hits, s.proximity, s.radius, s.share, s.share_conf,
+                         s.share_marked, s.auto_dl, s.area, (long)s.dl_lat_e6, (long)s.dl_lon_e6,
+                         (unsigned long)s.dl_at, s.channel);
   return n < 0 ? 0 : ((size_t)n < cap ? (size_t)n : cap - 1);
 }
 inline void loadSettings(const char* t, Settings& s) {
@@ -617,6 +778,9 @@ inline void loadSettings(const char* t, Settings& s) {
       const char* v = eq + 1;
       const int iv = atoi(v);
       if (kl == 2 && !strncmp(p, "ch", 2)) copyStr(s.channel, sizeof s.channel, v, (size_t)(e - v));
+      else if (kl == 3 && !strncmp(p, "dla", 3)) s.dl_lat_e6 = (int32_t)strtol(v, nullptr, 10);
+      else if (kl == 3 && !strncmp(p, "dlo", 3)) s.dl_lon_e6 = (int32_t)strtol(v, nullptr, 10);
+      else if (kl == 3 && !strncmp(p, "dlt", 3)) s.dl_at = (uint32_t)strtoul(v, nullptr, 10);
       else if (kl == 1) {
         switch (*p) {
           case 'a': s.armed = iv != 0; break;
@@ -627,6 +791,8 @@ inline void loadSettings(const char* t, Settings& s) {
           case 's': s.share = iv != 0; break;
           case 'q': s.share_conf = (uint8_t)(iv >= kConfLow && iv <= kConfHigh ? iv : kConfHigh); break;
           case 'm': s.share_marked = iv != 0; break;
+          case 'd': s.auto_dl = iv != 0; break;
+          case 'k': s.area = (uint8_t)(iv >= 0 && iv < kAreaChoices ? iv : 1); break;
         }
       }
     }

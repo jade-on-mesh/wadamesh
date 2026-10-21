@@ -19,8 +19,9 @@ It does three things:
 1. **Listens.** Wi-Fi probe requests (promiscuous mode, hopping channels 1-13)
    and BLE advertisements are matched against Flock camera and Raven sensor
    signatures. Hits are logged with your GPS position and drawn on the map.
-2. **Knows where cameras already are.** A `cameras.csv` exported from
-   OpenStreetMap (where [DeFlock](https://deflock.me) maps them) shows every
+2. **Knows where cameras already are.** Cameras from OpenStreetMap (where
+   [DeFlock](https://deflock.me) maps them), downloaded by the radio over Wi-Fi
+   or put there as a `cameras.csv`, show every
    known ALPR on the map, and the radio warns as you come within range of one.
 3. **Tells the mesh.** Confident detections, and cameras you mark by hand, can
    be posted to a channel you pick, e.g. `#flockwatch`. Other Wadamesh radios
@@ -67,6 +68,18 @@ Flock You only borrows what the rest of the firmware is not using:
 Listening survives a reboot; *Stop listening* hands both radios back.
 
 ## Known cameras
+
+**On the radio, over Wi-Fi.** Cameras > *Download cameras within 50 km now*
+fetches the ALPRs mapped around the radio (its GPS fix, else the position set
+in Settings) from OpenStreetMap's Overpass API. *Area* picks 25, 50, 100 or
+200 km. Turn on *Keep them current over Wi-Fi* and it downloads by itself
+whenever Wi-Fi is connected and the radio has moved half the area away from
+the last download, or a week has passed. A failed try waits 30 minutes. The
+download replaces `cameras.csv` only once it has arrived whole, and never
+touches `marked.csv`. Wi-Fi sniffing already steps aside while Wi-Fi is
+connected, so the two don't meet.
+
+**From a computer**, for a whole state or an exact box:
 
 ```
 scripts/flock_cameras.py --bbox 47.0,-123.0,48.2,-121.5 -o cameras.csv
