@@ -38,7 +38,20 @@ int main() {
   assert(!parseImageEnvelope("VI1:79e6a5:14:10", &env));          // missing field
   assert(!parseImageEnvelope("VI1:79e6a5:14:10:46:x", &env));     // extra field
   assert(!parseImageEnvelope("VI1:79E6A5:14:10:46", &env));       // uppercase isn't base36 here
-  assert(!parseImageEnvelope("VI1:79e6a5:14:10:46 hi", &env));    // trailing text
+  assert(!parseImageEnvelope("VI1:79e6a5:14:10:46x", &env));      // bad last field
+
+  // --- caption after the envelope (voice_wire.dart's VoxVoiceEnvelope.caption)
+  size_t cl = 99;
+  const char* cap = envelopeCaption("VI1:79e6a5:14:10:46", &cl);
+  assert(cap && cl == 0);                                         // none
+  assert(parseImageEnvelope("VI1:79e6a5:14:10:46 Look at this: T-Deck!", &env));
+  assert(env.sid == 0x1a2b3c4d && env.total == 36 && env.aspect == 150);
+  cap = envelopeCaption("VI1:79e6a5:14:10:46 Look at this: T-Deck!\n", &cl);
+  assert(cap && cl == 21 && strncmp(cap, "Look at this: T-Deck!", cl) == 0);
+  cap = envelopeCaption("VE3:79e6a5:1:6:7\ntwo\nlines", &cl);
+  assert(cap && cl == 9 && strncmp(cap, "two\nlines", cl) == 0);
+  assert(!parseEnvelope("VE3:79e6a5:1:6:7X hi", &env));        // a caption doesn't rescue a bad field
+  assert(!envelopeCaption("hello there", &cl) && cl == 0);
   assert(!parseImageEnvelope("VI1:zzzzzzzz:14:10:46", &env));     // sid too long
   assert(!parseImageEnvelope(nullptr, &env));
 
