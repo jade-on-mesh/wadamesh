@@ -3976,7 +3976,9 @@ void MyMesh::onControlDataRecv(mesh::Packet *packet) {
       uint8_t pklen        = (packet->payload_len >= 6 + 32) ? 32 : 8;
       int8_t  our_snr_q4   = (int8_t)(packet->getSNR() * 4.0f);
       int8_t  our_rssi     = (int8_t)_radio->getLastRSSI();
-      discoverUpsert(&packet->payload[6], pklen, node_type, our_snr_q4, our_rssi, their_snr_q4, packet->path_len);
+      const uint8_t extra = (uint8_t)(packet->payload_len - 6 - pklen);   // a radio2 profile, when asked
+      discoverUpsert(&packet->payload[6], pklen, node_type, our_snr_q4, our_rssi, their_snr_q4, packet->path_len,
+                     extra ? &packet->payload[6 + pklen] : nullptr, extra);
     }
   }
   if (packet->payload_len + 4 > sizeof(out_frame)) {
@@ -4002,7 +4004,8 @@ void MyMesh::onControlDataRecv(mesh::Packet *packet) {
 // append; a full table evicts the least-recently-heard. Both link directions + hop count are
 // refreshed on every reply. See DiscoverHit / uiStartDiscoverScan in MyMesh.h.
 void MyMesh::discoverUpsert(const uint8_t* pk, uint8_t pklen, uint8_t node_type,
-                            int8_t our_snr_q4, int8_t our_rssi, int8_t their_snr_q4, uint8_t path_len) {
+                            int8_t our_snr_q4, int8_t our_rssi, int8_t their_snr_q4, uint8_t path_len,
+                            const uint8_t* extra, uint8_t extra_len) {
   uint32_t now = millis();
   int slot = -1;
   for (uint8_t i = 0; i < _discover_cnt; i++) {
@@ -4028,6 +4031,10 @@ void MyMesh::discoverUpsert(const uint8_t* pk, uint8_t pklen, uint8_t node_type,
   h.path_len     = path_len;
   h.last_ms      = now;
   if (h.heard < 0xFFFF) h.heard++;
+  if (extra && extra_len) {
+    h.r2_len = extra_len > sizeof h.r2 ? (uint8_t)sizeof h.r2 : extra_len;
+    memcpy(h.r2, extra, h.r2_len);
+  }
 }
 
 void MyMesh::onRawDataRecv(mesh::Packet *packet) {

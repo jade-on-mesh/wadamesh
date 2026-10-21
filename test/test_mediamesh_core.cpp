@@ -9,6 +9,7 @@
 // crosses between profiles".
 
 #include <assert.h>
+#include <string>
 #include <initializer_list>
 #include <stdio.h>
 #include <string.h>
@@ -697,8 +698,67 @@ static void testFind() {
   assert(findPick(4, 4) == 0);   // a tie: the fast preset
 }
 
+// The same golden bytes as MeshCore Open TAK's test/connector/discover_radio2_test.dart.
+static std::string hexOf(const uint8_t* b, size_t n) {
+  std::string out;
+  char t[3];
+  for (size_t i = 0; i < n; i++) { snprintf(t, sizeof t, "%02x", b[i]); out += t; }
+  return out;
+}
+static size_t unhexTo(const char* h, uint8_t* out) {
+  size_t n = 0;
+  for (; h[0] && h[1]; h += 2) { unsigned v; sscanf(h, "%2x", &v); out[n++] = (uint8_t)v; }
+  return n;
+}
+
+static void testDiscoverRadio2() {
+  uint8_t b[16];
+  DiscoverRadio2 rxtx;
+  rxtx.configured = true; rxtx.mode = 2; rxtx.freq_khz = 910525; rxtx.bw_hz = 250000; rxtx.sf = 7; rxtx.cr = 5;
+  assert(encodeDiscoverRadio2(rxtx, b) == 12);
+  assert(hexOf(b, 12) == "0105bde40d0090d003000705");
+  DiscoverRadio2 temp;
+  temp.configured = true; temp.mode = 1; temp.temporary = true; temp.freq_khz = 911150; temp.bw_hz = 125000; temp.sf = 8; temp.cr = 6;
+  encodeDiscoverRadio2(temp, b);
+  assert(hexOf(b, 12) == "010b2ee70d0048e801000806");
+  DiscoverRadio2 off;
+  assert(encodeDiscoverRadio2(off, b) == 2 && hexOf(b, 2) == "0100");
+
+  DiscoverRadio2 p;
+  size_t n = unhexTo("010b2ee70d0048e801000806", b);
+  assert(parseDiscoverRadio2(b, n, p) && p.configured && p.mode == 1 && p.temporary && p.freq_khz == 911150
+         && p.bw_hz == 125000 && p.sf == 8 && p.cr == 6 && p.active());
+  n = unhexTo("0100", b);
+  assert(parseDiscoverRadio2(b, n, p) && !p.configured && !p.active());
+  assert(!parseDiscoverRadio2(b, 0, p));
+  n = unhexTo("0000", b);
+  assert(!parseDiscoverRadio2(b, n, p));   // version 0
+  n = unhexTo("0105bde40d00", b);
+  assert(!parseDiscoverRadio2(b, n, p));   // cut short
+  n = unhexTo("0205bde40d0090d003000705ffff", b);
+  assert(parseDiscoverRadio2(b, n, p) && p.freq_khz == 910525);   // a later version appends
+  n = unhexTo("0101bde40d0090d003000705", b);
+  assert(parseDiscoverRadio2(b, n, p) && p.configured && !p.active());   // mode off
+
+  // The pick: most repeaters, then the strongest; off and odd ones left out.
+  DiscoverRadio2 range = rxtx; range.freq_khz = 911150; range.bw_hz = 125000;
+  DiscoverRadio2 odd = rxtx; odd.bw_hz = 200000;
+  DiscoverRadio2 got; uint8_t count; float snr;
+  assert(!profilePick(nullptr, 0, got, count, snr));
+  Radio2Report none[] = {{off, 9}, {odd, 9}};
+  assert(!profilePick(none, 2, got, count, snr));
+  Radio2Report most[] = {{range, 10}, {rxtx, 2}, {rxtx, -3}, {off, 12}};
+  assert(profilePick(most, 4, got, count, snr) && got.bw_hz == 250000 && count == 2 && snr == 2.0f);
+  Radio2Report tie[] = {{range, 6.5f}, {rxtx, 4}};
+  assert(profilePick(tie, 2, got, count, snr) && got.bw_hz == 125000 && count == 1);
+  DiscoverRadio2 rx_only = range; rx_only.mode = 1;
+  Radio2Report listen[] = {{rx_only, 1}, {range, 1}, {rxtx, 9}};
+  assert(profilePick(listen, 3, got, count, snr) && got.bw_hz == 125000 && count == 2);
+}
+
 int main() {
   testFind();
+  testDiscoverRadio2();
   testSwitchTimes();
   testTiming();
   testAirtime();

@@ -29,7 +29,7 @@ The **radio2 (MediaMesh)** card:
 - **Preset**: *250 kHz fast* (the default) or *125 kHz range*. Picking one
   fills in bandwidth, SF7 and CR 4/5 and leaves the frequency alone; it shows
   as picked whenever the fields match one.
-- **Find MediaMesh**: finds which preset the MediaMesh here uses (below).
+- **Find MediaMesh**: finds the radio2 profile the MediaMesh here uses (below).
 - **Frequency, Bandwidth, SF, CR**: the radio2 profile. A field applies when you
   leave it. It must differ from the main radio and stay clear of every listed
   community mesh (see *Presets and community meshes*).
@@ -43,23 +43,54 @@ The **Temporary radio2** card: its own Frequency/Bandwidth/SF/CR, then
 
 ### Find MediaMesh
 
-**Find MediaMesh** (under *Preset*) tells you whether the MediaMesh where you
-are runs the *250 kHz fast* or the *125 kHz range* preset, in about 20 seconds:
+**Find MediaMesh** (under *Preset*) works like Discover Repeaters: it asks the
+repeaters in direct range which radio2 profile they run.
+
+- One zero-hop discovery request goes out on the main mesh with the radio2 flag
+  (byte 0 `0x82`). Repeaters that support it answer within about 12 seconds
+  with their radio2 profile after their key.
+- The answer lists them, strongest first: each repeater's frequency, bandwidth
+  and SF, *listen only* or *temporary* when so, *radio2 off*, or *didn't say*
+  (stock firmware). The profile most of them run is offered (the stronger
+  signal breaks a tie), and **Use it** sets it, turning radio2 on for photos and
+  voice if it was off.
+
+Answering with the profile is a proposed addition to keymindCascade; stock
+repeaters ignore the flag. **When no repeater says**, it falls back to
+listening, in about 20 more seconds:
 
 1. radio2 listens on the 250 kHz preset, at the frequency in the form, with a
    2-minute temporary radio2 (`set tempradio2 <MHz>,250,7,5,rx,2`, listen only).
 2. A repeater discovery request goes out on the main mesh. MediaMesh repeaters
    (keymindCascade, `tx.reply both`) answer on both of their radios, so their
-   radio2 answer is only heard if this radio listens on the same preset.
+   radio2 answer is only heard if this standalone listens on the same preset.
 3. After about 9 seconds, the same on 125 kHz.
 4. `set tempradio2 off` puts the saved radio2 back. The preset that heard
-   packets on radio2 is offered (a tie goes to 250 kHz). **Use it** sets it,
-   turning radio2 on for photos and voice if it was off.
+   packets on radio2 is offered (a tie goes to 250 kHz).
 
 It needs a MediaMesh repeater in direct range. Repeaters answer at most four
-discovery requests every two minutes, so running it again right away may
-find nothing. It refuses while a temporary radio2 runs or Client Repeat is on.
+discovery requests every two minutes (asking uses one, listening two more), so
+running it again right away may find nothing. It refuses while Client Repeat is
+on, and the listening fallback won't run while a temporary radio2 runs.
 MeshCore Open TAK has the same button in its MediaMesh settings.
+
+#### Discover reply: radio2 profile
+
+Requested by bit 1 of DISCOVER_REQ byte 0 (`0x80 | 0x02`, combinable with the
+prefix-only bit 0). The repeater appends 12 bytes after its key (after the
+8-byte prefix in prefix-only mode):
+
+```
+[ver=1][flags][freq u32 LE, MHz x1000][bw u32 LE, kHz x1000][sf][cr]
+flags: bit 0 radio2 configured, bits 1-2 mode (0 off, 1 rx, 2 rxtx),
+       bit 3 temporary profile (tempradio2)
+radio2 off: just [1][0]
+example: 910.525 MHz, 250 kHz, SF7, CR5, rxtx = 0105bde40d0090d003000705
+```
+
+Stock clients check only `len >= 6+32` and ignore what follows. The code is
+`mediamesh::DiscoverRadio2` in `src/helpers/MediaMeshCore.h`, with the same
+golden bytes as MeshCore Open TAK's tests.
 
 Per contact: the contact menu's **⇄ Radio** button cycles Auto → Main → radio2 →
 Both → Off (`tx.user`). Per channel: **Send on** in the channel's settings
