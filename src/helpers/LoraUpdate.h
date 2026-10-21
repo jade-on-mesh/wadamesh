@@ -36,6 +36,8 @@ uint8_t skipped();
 
 /** Start serving file `i` (alone) and announce it. False: no memory, no file. */
 bool start(uint8_t i);
+/** Announce the offer again (the first may have been missed). */
+void announce();
 /** Stop serving and free the engine. */
 void stop();
 bool active();

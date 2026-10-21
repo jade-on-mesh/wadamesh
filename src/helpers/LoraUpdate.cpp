@@ -127,6 +127,10 @@ bool start(uint8_t i) {
   return true;
 }
 
+void announce() {
+  if (s_mgr) s_mgr->announce();
+}
+
 void stop() {
   if (s_mgr) {
     s_mgr->clear_sources();
@@ -167,6 +171,7 @@ uint8_t fileCount() { return 0; }
 const FileInfo* file(uint8_t) { return nullptr; }
 uint8_t skipped() { return 0; }
 bool start(uint8_t) { return false; }
+void announce() {}
 void stop() {}
 bool active() { return false; }
 void onPacket(const uint8_t*, uint16_t, uint8_t) {}

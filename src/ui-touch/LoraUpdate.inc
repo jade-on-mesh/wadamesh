@@ -120,7 +120,7 @@ static bool sendNow() {
   return r == MSG_SEND_SENT_FLOOD || r == MSG_SEND_SENT_DIRECT;
 }
 
-static void send(const char* cmd, bool temp_route) {
+static void sendCmd(const char* cmd, bool temp_route) {
   snprintf(s->cmd, sizeof s->cmd, "%s", cmd);
   s->temp_route = temp_route;
   s->tries = 0;
@@ -226,7 +226,7 @@ static void advance(const char* reply) {
       tempArgs(a, sizeof a, s->minutes);
       snprintf(cmd, sizeof cmd, "tempradio %s", a);
       setLine(TR("Safety check passed. Extending the temporary radio..."));
-      send(cmd, true);
+      sendCmd(cmd, true);
       return;
     case S_EXTEND_TARGET: {
       if (!loraupdate::replyOk(reply)) { fail(TR("The repeater refused to extend the temporary radio")); return; }
@@ -241,7 +241,7 @@ static void advance(const char* reply) {
         s->step = S_PULL;
         snprintf(cmd, sizeof cmd, "ota pull %s flash", s->mid);
         setLine(TR("Starting the download..."));
-        send(cmd, true);
+        sendCmd(cmd, true);
         return;
       }
       if (++s->attempts >= 6) { fail(TR("The repeater never listed the file. Is it made for this repeater's board?")); return; }
@@ -309,8 +309,11 @@ static void timedOut() {
       fail(TR("The repeater did not answer on the temporary radio. Both go back to normal within 3 minutes."));
       return;
     case S_DISCOVER:
+      if (++s->attempts >= 6) { fail(TR("The repeater stopped answering")); return; }
+      s->wait_until = millis() + 5000;
+      return;
     case S_DOWNLOAD:
-      s->wait_until = millis() + 5000;   // keep asking
+      s->wait_until = millis() + 5000;   // keep asking: Stop ends it, and so does the window
       return;
     case S_INSTALL:
       finish(TR("No answer to install: it may already be rebooting. Check its version before trying again."));
@@ -331,14 +334,14 @@ static void timedOut() {
 static void kick() {
   if (s->busy || (int32_t)(millis() - s->wait_until) < 0) return;
   switch (s->step) {
-    case S_PROBE:     send("ota status", true); break;
+    case S_PROBE:     sendCmd("ota status", true); break;
     case S_DISCOVER:
-      if (s->attempts == 2) loraupdate::start(s->file);   // announce again
-      send("ota ls", true);
+      if (s->attempts == 2) loraupdate::announce();   // in case the first was missed
+      sendCmd("ota ls", true);
       break;
-    case S_DOWNLOAD:  send("ota status", true); break;
+    case S_DOWNLOAD:  sendCmd("ota status", true); break;
     case S_STOP_TARGET:
-      send("normalradio", true);
+      sendCmd("normalradio", true);
       break;
     default: break;
   }
@@ -399,7 +402,7 @@ static void startNow() {
   snprintf(cmd, sizeof cmd, "tempradio %s", a);
   s->step = S_TEST_TARGET;
   setLine(TR("Starting a three-minute safety window on the repeater..."));
-  send(cmd, false);
+  sendCmd(cmd, false);
   render();
 }
 
@@ -414,7 +417,7 @@ static void installNow() {
   if (!s || s->step != S_READY) return;
   s->step = S_INSTALL;
   setLine(TR("Installing..."));
-  send("ota install", true);
+  sendCmd("ota install", true);
   render();
 }
 
@@ -528,10 +531,30 @@ static void render() {
   showIf(w_stop, running && s->step != S_STOP_TARGET);
 }
 
+void openPage(const uint8_t* pub32, const char* nm);
+
+// Re-read the card and rebuild the page (the file rows), keeping what was typed.
+static void refreshNow() {
+  if (!s || sessionRunning()) return;
+  kbMirrorSyncToReal();
+  float f = 0, bw = 0;
+  int v = 0;
+  if (w_freq && parseFloatField(w_freq, f)) s->f = f;
+  if (w_bw && parseFloatField(w_bw, bw)) s->bw = bw;
+  if (w_sf && parseIntField(w_sf, v)) s->sf = v;
+  if (w_cr && parseIntField(w_cr, v)) s->cr = v;
+  if (w_min && parseIntField(w_min, v)) s->minutes = v;
+  s->line[0] = 0;
+  uint8_t key[32];
+  char nm[33];
+  memcpy(key, pub, 32);
+  snprintf(nm, sizeof nm, "%s", name);
+  openPage(key, nm);   // rescans, as the page opens
+}
+
 static void refreshCb(lv_event_t* e) {
-  if (lv_event_get_code(e) != LV_EVENT_CLICKED || !s || sessionRunning()) return;
-  rescan();
-  render();
+  if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+  lv_async_call([](void*) { refreshNow(); }, nullptr);   // the button is deleted with the page
 }
 
 void closePage() {
