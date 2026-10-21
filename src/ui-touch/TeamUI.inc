@@ -582,6 +582,15 @@ static bool toScreen(double lat, double lon, double cwx, double cwy, int* sx, in
 
 }  // namespace teamui
 
+// Bloodhound to a point from outside Team (a contact's sheet): works whether or
+// not team mode is set up.
+static void teamHoundPoint(double lat, double lon, const char* label) {
+  using namespace teamui;
+  if (!core()) { toast(TR("Out of memory")); return; }
+  s_core->houndPoint(lat, lon, label);
+  houndRefresh();
+}
+
 // Called from renderMapMarkers: pins under people, people on top, alerts ringed.
 static void teamDrawMapOverlay(lv_obj_t* parent, double cwx, double cwy) {
   using namespace teamui;

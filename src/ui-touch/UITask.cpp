@@ -22970,6 +22970,18 @@ static void actionSheetLosCb(lv_event_t* e) {
 #endif  // ESP32 && MULTI_TRANSPORT_COMPANION
 
 static void actionSheetShowOnMapCb(lv_event_t* e);   // defined with the map code (uses map statics)
+// Bloodhound to a node (repeater, room, sensor, chat node) at its advertised
+// position: range, bearing and the arrow (TeamUI.inc, included further down).
+static void teamHoundPoint(double lat, double lon, const char* label);
+static void actionSheetHoundCb(lv_event_t* e) {
+  if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+  ContactInfo c;
+  const bool ok = the_mesh.getContactByIdx(s_action_sheet_mesh_idx, c) && (c.gps_lat != 0 || c.gps_lon != 0);
+  closeActionSheet();
+  if (!ok) { if (g_lv.task) g_lv.task->showAlert(TR("No position for this contact"), 1400); return; }
+  const char* nick = nickFor(c.id.pub_key);
+  teamHoundPoint(c.gps_lat / 1e6, c.gps_lon / 1e6, nick ? nick : c.name);
+}
 static void openNicknameEditor(const ContactInfo& c);
 static void actionSheetNicknameCb(lv_event_t* e) {
   if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
@@ -23064,7 +23076,13 @@ static void openContactActionSheet(uint32_t mesh_idx, bool is_repeater, const ch
   // block + share contact (7), + trace/admin for repeaters (2), + Join for
   // rooms (1), + line-of-sight (1), + Show on map (1 when contact has GPS and
   // !from_map).
-  const int grid_items = (from_map ? 5 : 8) + (is_repeater ? 2 : 0) + (is_room ? 2 : 0) + (has_los ? 1 : 0) + (has_map_btn ? 1 : 0);
+  bool has_hound = false;   // Bloodhound: needs the contact's position
+  {
+    ContactInfo _hc;
+    has_hound = the_mesh.getContactByIdx(mesh_idx, _hc) && (_hc.gps_lat != 0 || _hc.gps_lon != 0);
+  }
+  const int grid_items = (from_map ? 5 : 8) + (is_repeater ? 2 : 0) + (is_room ? 2 : 0) + (has_los ? 1 : 0) +
+                         (has_map_btn ? 1 : 0) + (has_hound ? 1 : 0);
   // P4 portrait: the 2-column grid cut most labels off with "..." on the narrow
   // panel, so every action gets its own full-width row. The card grows to fit and
   // the body scrolls past the screen height like any tall sheet. Landscape and the
@@ -23223,6 +23241,8 @@ static void openContactActionSheet(uint32_t mesh_idx, bool is_repeater, const ch
   mk_btn(TR(LV_SYMBOL_BATTERY_3 "  Telemetry"), actionSheetTelemetryCb, 0);
   if (has_map_btn)
     mk_btn(TR(LV_SYMBOL_GPS "  Show on map"), actionSheetShowOnMapCb, 0);
+  if (has_hound)
+    mk_btn(TR(LV_SYMBOL_GPS "  Hound"), actionSheetHoundCb, 0xF2A33A);
   if (is_repeater) {
     mk_btn(TR(LV_SYMBOL_GPS      "  Trace SNR"), actionSheetTracePingCb, 0);
     mk_btn(TR(LV_SYMBOL_SETTINGS "  Admin"), actionSheetAdminCb, 0);
