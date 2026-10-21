@@ -80,6 +80,12 @@ jobs:
           g++ -std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined -I test/ota_shim -I src
           test/test_lora_update.cpp src/helpers/ota/OtaManager.cpp src/helpers/ota/OtaProtocol.cpp
           src/helpers/ota/MotaContainer.cpp src/helpers/ota/MerkleTree.cpp -o /tmp/lora_update && /tmp/lora_update
+      - name: Remote ID parser (GridDown's own tests, vendored)
+        run: g++ -std=c++17 -w -I src test/test_remoteid.cpp src/ui-touch/remoteid.cpp -lm -o /tmp/test_remoteid && /tmp/test_remoteid
+      - name: Drone Detector glue (Wi-Fi frames, BLE one message at a time, Watch posts)
+        run: >-
+          g++ -std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined -I src test/test_drone_core.cpp
+          src/ui-touch/remoteid.cpp -o /tmp/drone_core && /tmp/drone_core
       - name: Team wire golden bytes and core rules (shared with Open TAK)
         run: g++ -std=c++17 -Wall -Wextra -fsanitize=address,undefined -I src test/test_team_wire.cpp src/ui-touch/TeamCore.cpp -o /tmp/team_test && /tmp/team_test
       - name: Watched channels on the map (host test)

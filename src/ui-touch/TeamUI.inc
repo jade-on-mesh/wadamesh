@@ -166,6 +166,7 @@ static void watchSave() {
 
 static const char* channelName(int idx) {
   static ChannelDetails cd;
+  if (idx == 0xFF) return "this standalone";   // heard here (Drone Detector)
   return (idx >= 0 && the_mesh.getChannel(idx, cd) && cd.name[0]) ? cd.name : "?";
 }
 

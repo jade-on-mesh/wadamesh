@@ -57450,6 +57450,7 @@ enum AppDrawerAction {
   APPACT_TEAM,
   APPACT_FLOCK,
   APPACT_SOUND,
+  APPACT_DRONE,
   APPACT_LUA_BASE = 100,   // APPACT_LUA_BASE + i = installed Lua app s_lua_inst[i]
 };
 // OTP Messenger (app drawer -> APPACT_OTP): the screens; protocol in OtpCore.cpp.
@@ -57458,6 +57459,8 @@ enum AppDrawerAction {
 #include "TeamUI.inc"
 // Flock You (app drawer -> APPACT_FLOCK): Flock ALPR detection + known cameras; rules in FlockCore.h.
 #include "FlockYouUI.inc"
+// Drone Detector (app drawer -> APPACT_DRONE): Remote ID on Flock You's radios; glue in DroneCore.h.
+#include "DroneUI.inc"
 #if CAP_SOUND_LINK
 // Sound link (app drawer -> APPACT_SOUND): SoundLinkUI.inc, included further down,
 // after the audio sink it plays through.
@@ -57484,6 +57487,7 @@ static const AppTileDef k_app_tiles[] = {
   { UI_ICON_USERS,              "Team",      APPACT_TEAM,      HUE_PLACE },   // teammates, SOS, pins, Bloodhound
 #if CAP_FLOCK_YOU
   { UI_ICON_EYE,                "Flock You", APPACT_FLOCK,     HUE_RADIO },   // Flock ALPR detector + known cameras
+  { UI_ICON_CROSSHAIR,          "Drones",    APPACT_DRONE,     HUE_RADIO },   // Remote ID drone detector
 #endif
 #if CAP_SOUND_LINK
   { UI_ICON_WAVES,              "Sound link", APPACT_SOUND,    HUE_MSG },     // channels, contacts, Wavest over sound
@@ -57885,6 +57889,7 @@ static void appLaunch(int act, lv_event_t* e) {
     case APPACT_TEAM:      teamui::pageOpen();    return;   // team awareness
 #if CAP_FLOCK_YOU
     case APPACT_FLOCK:     flockui::pageOpen();   return;   // Flock ALPR detector
+    case APPACT_DRONE:     droneui::pageOpen();   return;   // Remote ID drone detector
 #endif
 #if CAP_SOUND_LINK
     case APPACT_SOUND:     soundui::pageOpen();   return;   // share and chat by sound (ggwave)
@@ -81546,6 +81551,7 @@ void UITask::loop() {
     teamui::loopTick();     // beacons, alert repeats, alarm, Bloodhound, map refresh
 #if CAP_FLOCK_YOU
     flockui::loopTick();    // Flock You: radios, detections, nearby cameras, channel alerts
+    droneui::loopTick();    // Drone Detector: Remote ID tracks, the map, channel alerts
 #endif
 #if CAP_SOUND_LINK
     soundui::loopTick();    // Sound link: mic, player, heard messages, the bridge
