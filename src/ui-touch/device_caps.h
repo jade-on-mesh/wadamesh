@@ -25,7 +25,40 @@
 // =============================================================================
 
 // ---- Per-board structural capabilities (factored out of the device names) ----
-#if defined(HAS_CROWPANEL_35)            // ===== Elecrow CrowPanel Advance 3.5 (ESP32-S3) =====
+#if defined(WADA_WEB)                    // ===== Browser / desktop host build (web/, WEB_BUILD.md) =====
+  // A virtual touch panel whose size the page picks at boot (WEB_BUILD.md "Phones and
+  // tablets"): 800x480 landscape on a computer, the large-screen layouts the CrowPanel 5.0
+  // and the Tanmatsu ship; on a phone or tablet the size of its screen below the page's
+  // bar, portrait or landscape (e.g. 390x616 on an iPhone 14), on the same layouts, which
+  // size themselves from the display (as on the portrait CrowPanel and the P4). Driven by
+  // a mouse or a finger. The mesh behind it is a backend (the demo or a companion node),
+  // so nothing radio- or hardware-bound is advertised.
+  #define CAP_TOUCH        1   // mouse / touch
+  #define CAP_ROTATABLE    0   // no rotation setting: the page follows the window, and a turn
+                               // of the phone restarts the UI in the other layout (data kept)
+  #define CAP_LARGE_SCREEN 1   // large-panel layouts and the UI-size fonts at every size
+  #define CAP_SD           0   // no card; storage is the host directory behind SPIFFS
+  #define CAP_FILESYSTEM   0
+  #define CAP_GPS          1   // the computer's / phone's location (web/platform/WebLocation.h)
+  #define CAP_GPS_RECEIVER 0   // ...not a serial receiver: no baud rate, no rest between checks
+  #define CAP_OTA          0   // updated by reloading the page
+  #define CAP_LOCK_SCREEN  0   // no unlock button
+  #define CAP_BATTERY      0
+  #define CAP_USB_FILES    0
+  #define CAP_RADIO_TOOLS  0   // no radio of its own: no Signal / Discover / Spectrum
+  #define CAP_SCREEN_MIRROR 0  // it IS the browser view: no Remote / VNC
+  #define CAP_WEB_BROWSER  0   // a page cannot fetch arbitrary sites (CORS)
+  #define CAP_WIFI_SETUP   0   // the page's bar picks the node and the link; the browser is online
+  #define CAP_BT_SETUP     0
+  #define CAP_USB_FLASH    0   // no bootloader to reboot into: no "Download mode"
+  #define CAP_FILE_HANDOFF 1   // a backup is downloaded by the browser, imported with its file picker
+  #define CAP_NATIVE_KEYBOARD 1   // on a phone the phone's own keyboard types (boardNativeKeyboard())
+  #define CAP_BUILTIN_LANGS    1   // the translations and the catalog's apps ship in the
+  #define CAP_BUILTIN_LUA_APPS 1   // build (offline, first load), and...
+  #define CAP_STORE_DOWNLOADS  1   // ...the Store still installs and updates (same-origin proxy)
+  #define CAP_FW_UPDATE_CHECK  0   // a reload is the update: no firmware check, no reports
+
+#elif defined(HAS_CROWPANEL_35)          // ===== Elecrow CrowPanel Advance 3.5 (ESP32-S3) =====
   #define CAP_TOUCH        1   // GT911 capacitive touch
   #define CAP_ROTATABLE    1   // ILI9488 native portrait, upright landscape = rotation 3
   #define CAP_LARGE_SCREEN 0   // native 480x320, no upscaling
@@ -62,8 +95,8 @@
 
 #elif defined(HAS_WIO_TRACKER_L2)        // ===== Seeed Wio Tracker L2 (ESP32-S3) =====
   #define CAP_TOUCH        1
-  #define CAP_ROTATABLE    0
-  #define CAP_LARGE_SCREEN 0   // fixed 320x240 landscape
+  #define CAP_ROTATABLE    1   // native 320x240 landscape = UI rotation 3, as on the CrowPanels (#698)
+  #define CAP_LARGE_SCREEN 0   // 320x240
   #define CAP_SD           0   // SD_MMC, not Arduino SD
   #define CAP_FILESYSTEM   1
   #define CAP_GPS          1
@@ -189,7 +222,8 @@
   // header, C6 Wi-Fi/BLE (esp-hosted; Elecrow documents 2.12.3, but V1.0 units have been seen with
   // 2.3.0, which still comes up: main.cpp logs the version), SD_MMC 1-bit. 32 MB PSRAM.
   #define CAP_TOUCH        1   // GT911 capacitive touch
-  #define CAP_ROTATABLE    0   // native 1024x600 landscape; the DSI panel cannot rotate in hardware
+  #define CAP_ROTATABLE    1   // native 1024x600 landscape = UI rotation 3; the DSI panel cannot rotate in
+                               // hardware, so LVGL turns it in software like the T-Display P4 (#701)
   #define CAP_LARGE_SCREEN 1   // large-panel layouts + the UI-size fonts, rendered at native resolution
   #define CAP_SD           0   // card is SD_MMC (slot 0), exposed through CAP_FILESYSTEM like the T-Display P4
   #define CAP_FILESYSTEM   1   // internal LittleFS 'storage' + SD_MMC
@@ -465,7 +499,7 @@
 #endif
 
 // Notification-chime hardware: T-Deck I2S speaker, Pager codec, Heltec V4 / M9 GPIO
-// piezo, T-Display P4 ES8311. Kept in step with the HAS_UI_SOUND definition in
+// piezo, T-Display P4 / T-Deck Max / Wio Tracker L2 ES8311. Kept in step with the HAS_UI_SOUND definition in
 // UITask.cpp, which now derives FROM this rather than duplicating the list.
 //
 // This used to read `#if defined(HAS_UI_SOUND)`, but HAS_UI_SOUND is defined inside
@@ -475,7 +509,8 @@
 // would have compiled sound out everywhere. Every macro tested here is a -D on the
 // compiler command line, so they are all genuinely visible at this point.
 #if defined(HAS_TDECK_GT911) || defined(HELTEC_V4_BUZZER_PIN) || defined(TLORA_PAGER) || \
-    defined(THINKNODE_M9_BUZZER_PIN) || defined(HAS_TDISPLAY_P4) || defined(HAS_TDECK_MAX)
+    defined(THINKNODE_M9_BUZZER_PIN) || defined(HAS_TDISPLAY_P4) || defined(HAS_TDECK_MAX) || \
+    defined(HAS_WIO_TRACKER_L2)
   #define CAP_SOUND 1
 #else
   #define CAP_SOUND 0
@@ -513,10 +548,55 @@
 // Tap) have that headroom; the 2 MB Heltec V4 TFT can't complete the handshake
 // (fetch returns -1), so the Web app is gated out there. Tapping a link in chat still
 // offers "Create QR" everywhere — only "Open in web" is gated to these boards.
-#if defined(HELTEC_LORA_V4_TFT) && !defined(HELTEC_LORA_V4_R8)
-  #define CAP_WEB_BROWSER 0   // 2 MB V4: TLS handshake can't fit
-#else
-  #define CAP_WEB_BROWSER 1   // 8 MB boards incl. the V4-R8
+#ifndef CAP_WEB_BROWSER
+  #if defined(HELTEC_LORA_V4_TFT) && !defined(HELTEC_LORA_V4_R8)
+    #define CAP_WEB_BROWSER 0   // 2 MB V4: TLS handshake can't fit
+  #else
+    #define CAP_WEB_BROWSER 1   // 8 MB boards incl. the V4-R8
+  #endif
+#endif
+
+// ---- Radio tools + screen mirror ----------------------------------------------
+// The drawer's Signal / Discover / Spectrum tiles drive the board's OWN LoRa radio,
+// and Remote / VNC serve this screen to a browser. Every radio board has both; a
+// board without its own radio (the browser build, WADA_WEB) opts out in its block.
+#ifndef CAP_RADIO_TOOLS
+  #define CAP_RADIO_TOOLS 1
+#endif
+#ifndef CAP_SCREEN_MIRROR
+  #define CAP_SCREEN_MIRROR 1
+#endif
+
+// ---- Links the board sets up itself ------------------------------------------
+// CAP_WIFI_SETUP / CAP_BT_SETUP: Settings > Wi-Fi and > Bluetooth configure the board's
+// own radios (networks, the pairing code). A board whose links are chosen elsewhere
+// (the browser build: the page's bar) shows what to do instead of switches that
+// change nothing. CAP_USB_FLASH: the Power menu's "Download mode" (reboot into the
+// ROM bootloader for a USB flash). CAP_GPS_RECEIVER: the GPS is a serial receiver
+// (Settings > GPS offers its baud rate and the rest-between-checks saver); a position
+// from elsewhere (the browser's location) has neither.
+#ifndef CAP_WIFI_SETUP
+  #define CAP_WIFI_SETUP 1
+#endif
+#ifndef CAP_BT_SETUP
+  #define CAP_BT_SETUP 1
+#endif
+#ifndef CAP_USB_FLASH
+  #define CAP_USB_FLASH 1
+#endif
+#ifndef CAP_GPS_RECEIVER
+  #define CAP_GPS_RECEIVER 1
+#endif
+// CAP_FILE_HANDOFF: files leave and enter through the host instead of a card (the
+// browser build: an exported backup is downloaded, an import is picked from the
+// computer). The board provides boardHandOffFile / boardPickFile / boardTakePickedFile.
+#ifndef CAP_FILE_HANDOFF
+  #define CAP_FILE_HANDOFF 0
+#endif
+// CAP_NATIVE_KEYBOARD: the host may supply its own text input (a phone's keyboard in the
+// browser build); while boardNativeKeyboard() is true the UI never brings up its own keys.
+#ifndef CAP_NATIVE_KEYBOARD
+  #define CAP_NATIVE_KEYBOARD 0
 #endif
 
 // ---- Lua app host (LUA_APPS.md) --------------------------------------------
@@ -569,11 +649,15 @@
 // ---- USB Files ---------------------------------------------------------------
 // files.wadamesh.com browses and edits the SD card and internal storage over the
 // USB cable (Web Serial) while the USB Files app is open (UsbFilesSession.h).
-// Prototype boards first: the T-Deck (HW-CDC) and the Heltec V4 TFT (TinyUSB
-// CDC), one of each USB serial driver. Others follow once tested on hardware.
+// Every ESP32-S3 board whose USB socket is the chip's own USB (ARDUINO_USB_CDC_ON_BOOT):
+// UsbFilesSession handles both of its serial drivers (HW-CDC and TinyUSB CDC), proven on
+// the T-Deck and the Heltec V4. Not yet: boards behind a USB-serial bridge chip (M9,
+// CrowPanel 3.5/5.0, Attaky, SenseCAP Indicator: 115200 baud and a UART receive buffer
+// that is fixed once running), the ESP32-P4 builds (IDF), and the T-Deck Pro family incl.
+// the Max (left out from the start; e-paper refresh during a transfer is untested).
 #ifndef CAP_USB_FILES
-  #if (defined(HAS_TDECK_GT911) && !defined(HAS_TDECK_PRO)) || \
-      (defined(HELTEC_LORA_V4_TFT) && !defined(HELTEC_LORA_V4_R8))
+  #if defined(ESP32) && ARDUINO_USB_CDC_ON_BOOT && !defined(HAS_TDECK_PRO) && \
+      !defined(HAS_TDISPLAY_P4) && !defined(HAS_CROWPANEL_P4_101) && !defined(HAS_TANMATSU)
     #define CAP_USB_FILES 1
   #else
     #define CAP_USB_FILES 0
@@ -637,4 +721,23 @@
   #else
     #define CAP_BUILTIN_LUA_APPS 0
   #endif
+#endif
+
+// The Store downloads apps and languages (its Apps tab, the Languages downloads). A
+// board that bakes them in (CAP_BUILTIN_*) shows a picker instead, unless it can also
+// reach the Store (the browser build: CAP_STORE_DOWNLOADS 1, the baked copies are the
+// offline first load and a download wins, as everywhere). CAP_FW_UPDATE_CHECK: the
+// firmware version check (and the beta report / install count it carries); off, the
+// Store's update badge fetches the catalog on its own. Defined after
+// CAP_BUILTIN_LUA_APPS, which it reads: above it, an undefined macro reads 0 and the
+// 2 MB V4 would get the downloading Store instead of its picker.
+#ifndef CAP_STORE_DOWNLOADS
+  #if CAP_BUILTIN_LUA_APPS
+    #define CAP_STORE_DOWNLOADS 0
+  #else
+    #define CAP_STORE_DOWNLOADS 1
+  #endif
+#endif
+#ifndef CAP_FW_UPDATE_CHECK
+  #define CAP_FW_UPDATE_CHECK 1
 #endif
