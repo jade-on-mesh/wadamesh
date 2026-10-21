@@ -28,6 +28,7 @@ static const char* const kDir = "/flock-you";
 static const char* const kLogRel = "/flock-you/detections.csv";
 static const char* const kLogOldRel = "/flock-you/detections.old.csv";
 static const char* const kCamsRel = "/flock-you/cameras.csv";
+static const char* const kCamsTmpRel = "/flock-you/cameras.part";   // a download in progress
 static const char* const kMarkedRel = "/flock-you/marked.csv";
 
 static flockyou::Settings s_cfg;
@@ -87,7 +88,7 @@ static void ensureDir(fs::FS* fs) {
 }
 
 static void saveCfg() {
-  char buf[160];
+  char buf[256];
   const size_t n = flockyou::saveSettings(s_cfg, buf, sizeof buf);
   teamui::s_io.writeFile("flockyou", (const uint8_t*)buf, n);
 }
@@ -95,7 +96,7 @@ static void saveCfg() {
 static void loadCfg() {
   if (s_cfg_loaded) return;
   s_cfg_loaded = true;
-  char buf[160];
+  char buf[256];
   size_t n = 0;
   if (teamui::s_io.readFile("flockyou", (uint8_t*)buf, sizeof buf - 1, &n)) {
     buf[n] = 0;
@@ -244,6 +245,236 @@ static void camLoadStep() {
 }
 
 static bool camsReady() { return s_cam_state == CamLoad::Done && s_cams.size() > 0; }
+
+// ---- downloading cameras on the radio ------------------------------------------------------
+// The cameras within kAreaKm of the radio, straight from OpenStreetMap's Overpass
+// API over Wi-Fi: what scripts/flock_cameras.py does, without a computer. The
+// answer streams through osmRowToCamLine into cameras.part, which replaces
+// cameras.csv only once it is complete (marked.csv is never touched). HTTPS on
+// a task of its own with mbedTLS in PSRAM, as fork updates do (ForkUpdate.inc).
+// Wi-Fi sniffing steps aside whenever Wi-Fi is connected, so the two never meet.
+#if defined(ESP32) && defined(MULTI_TRANSPORT_COMPANION) && WADA_FORK_RELEASES
+#define FLOCK_DOWNLOAD 1
+#else
+#define FLOCK_DOWNLOAD 0
+#endif
+
+#if FLOCK_DOWNLOAD
+enum class Dl : uint8_t { Idle, Running, Done, Failed };
+static volatile Dl s_dl = Dl::Idle;
+static volatile int s_dl_rows = 0;          // cameras so far (the page shows it)
+static char s_dl_msg[96] = "";              // the last outcome, for the page
+static int32_t s_dl_lat6 = 0, s_dl_lon6 = 0;
+static uint8_t s_dl_area = 1;
+static bool s_dl_manual = false;            // started from the page: say how it went
+static uint32_t s_dl_retry_at = 0;
+static uint32_t s_dl_last_ms = 0;           // when the last one finished (no clock needed)
+constexpr uint32_t kDlRetryMs = 30UL * 60000;
+
+// Takes the HTTP body (HTTPClient::writeToStream undoes the chunking) a line at
+// a time and writes cameras.csv lines, through a buffer in internal RAM (SD
+// writes from PSRAM come back short).
+class OsmSink : public Stream {
+ public:
+  explicit OsmSink(File& f) : f_(f) {}
+  size_t write(uint8_t c) override { feed(&c, 1); return 1; }
+  size_t write(const uint8_t* b, size_t n) override { feed(b, n); return n; }
+  int available() override { return 0; }
+  int read() override { return -1; }
+  int peek() override { return -1; }
+  void flush() override {}
+  bool finish() {
+    if (n_) take();
+    return flushOut();
+  }
+  int rows = 0;
+  bool full = false;
+
+ private:
+  File& f_;
+  char line_[256];
+  size_t n_ = 0;
+  char out_[2048];
+  size_t on_ = 0;
+  bool bad_ = false;
+  void feed(const uint8_t* b, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+      const char c = (char)b[i];
+      if (c == '\n' || c == '\r') { if (n_) take(); }
+      else if (n_ + 1 < sizeof line_) line_[n_++] = c;
+    }
+  }
+  void take() {
+    line_[n_] = 0;
+    n_ = 0;
+    char cam[96];
+    if (full || !flockyou::osmRowToCamLine(line_, cam, sizeof cam)) return;
+    const size_t l = strlen(cam);
+    if (on_ + l + 1 > sizeof out_) flushOut();
+    memcpy(out_ + on_, cam, l);
+    on_ += l;
+    out_[on_++] = '\n';
+    if (++rows >= kMaxCams) full = true;
+    s_dl_rows = rows;
+  }
+  bool flushOut() {
+    if (on_ && !bad_ && f_.write((const uint8_t*)out_, on_) != on_) bad_ = true;
+    on_ = 0;
+    return !bad_;
+  }
+};
+
+static void dlTask(void*) {
+  const char* fail = nullptr;
+  char detail[48] = "";
+  int rows = 0;
+  forkupd_dev::tlsUsePsram();
+  char path[96], part[96];
+  fs::FS* fs = dataFs(path, sizeof path, kCamsRel);
+  dataFs(part, sizeof part, kCamsTmpRel);
+  char* url = (char*)malloc(900);
+  const flockyou::Box box =
+      flockyou::areaBox(s_dl_lat6 / 1e6, s_dl_lon6 / 1e6, flockyou::kAreaKm[s_dl_area % flockyou::kAreaChoices]);
+  if (!url || !flockyou::overpassUrl(box, url, 900)) fail = "out of memory";
+  else if (!fs) fail = "no storage";
+  File f;
+  if (!fail) {
+    ensureDir(fs);
+    f = fs->open(part, "w");
+    if (!f) fail = "can't write the file";
+  }
+  OsmSink* sink = nullptr;
+  WiFiClientSecure* c = nullptr;
+  HTTPClient* h = nullptr;
+  if (!fail) {
+    sink = new (std::nothrow) OsmSink(f);
+    c = new (std::nothrow) WiFiClientSecure();
+    h = new (std::nothrow) HTTPClient();
+    if (!sink || !c || !h) fail = "out of memory";
+  }
+  if (!fail) {
+    char hdr[160];
+    snprintf(hdr, sizeof hdr, "# OpenStreetMap ALPR cameras (DeFlock), %u km around %.4f,%.4f, downloaded by the radio\n"
+             "lat,lon,direction,label\n", flockyou::kAreaKm[s_dl_area % flockyou::kAreaChoices], s_dl_lat6 / 1e6, s_dl_lon6 / 1e6);
+    f.print(hdr);
+    c->setInsecure();   // no CA store on the radio; the data is public and checked line by line
+    h->setReuse(false);
+    h->setConnectTimeout(15000);
+    h->setTimeout(65000);   // Overpass can think for a while before the first byte
+    h->setUserAgent("wadamesh-flock-you/2.0");
+    if (!h->begin(*c, url)) {
+      fail = "can't reach Overpass";
+    } else {
+      const int code = h->GET();
+      if (code == 200) {
+        const int got = h->writeToStream(sink);
+        if (got < 0) { fail = "the download broke off"; snprintf(detail, sizeof detail, " (%d)", got); }
+      } else if (code == 429 || code == 504) {
+        fail = "Overpass is busy";
+        snprintf(detail, sizeof detail, " (%d)", code);
+      } else {
+        fail = code < 0 ? "can't connect to Overpass" : "Overpass refused";
+        snprintf(detail, sizeof detail, " (%d)", code);
+      }
+      h->end();
+    }
+    if (!sink->finish() && !fail) fail = "storage full or failing";
+    rows = sink->rows;
+  }
+  if (f) f.close();
+  delete h;
+  if (c) { c->stop(); delete c; }
+  delete sink;
+  free(url);
+  if (!fail && rows > 0) {   // complete: it replaces the old list
+    fs->remove(path);
+    if (!fs->rename(part, path)) fail = "can't replace cameras.csv";
+  } else if (fs) {
+    fs->remove(part);
+  }
+  if (fail) snprintf(s_dl_msg, sizeof s_dl_msg, "%s%s", fail, detail);
+  else if (!rows) snprintf(s_dl_msg, sizeof s_dl_msg, "%s", "no cameras mapped in this area");
+  else s_dl_msg[0] = 0;
+  s_dl_rows = rows;
+  Serial.printf("[FLOCK] camera download: %d cameras %s; stack %u unused\n", rows, fail ? fail : "ok",
+                (unsigned)uxTaskGetStackHighWaterMark(nullptr));
+  s_dl = fail ? Dl::Failed : Dl::Done;
+  vTaskDelete(nullptr);
+}
+
+// Where the radio is: a GPS fix, else the position set in Settings.
+static bool dlPosition(double* lat, double* lon) {
+  if (gpsFix(lat, lon)) return true;
+  UITask* t = g_lv.task;
+  if (!t) return false;
+  *lat = t->getNodeLat();
+  *lon = t->getNodeLon();
+  return *lat != 0.0 || *lon != 0.0;
+}
+
+static bool wifiUp() { return WiFi.status() == WL_CONNECTED; }
+
+static bool dlStart(bool manual) {
+  if (s_dl == Dl::Running) return false;
+  double la, lo;
+  if (!wifiUp()) { if (manual) toast(TR("Connect to Wi-Fi first")); return false; }
+  if (!dlPosition(&la, &lo)) { if (manual) toast(TR("No position: get a GPS fix or set one in Settings")); return false; }
+  if (heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) < 20 * 1024) {
+    if (manual) toast(TR("Not enough memory right now"));
+    s_dl_retry_at = millis() + 60000;
+    return false;
+  }
+  s_dl_lat6 = (int32_t)lround(la * 1e6);
+  s_dl_lon6 = (int32_t)lround(lo * 1e6);
+  s_dl_area = s_cfg.area;
+  s_dl_manual = manual;
+  s_dl_rows = 0;
+  s_dl = Dl::Running;
+  if (xTaskCreate(dlTask, "flock_dl", 16 * 1024, nullptr, 2, nullptr) != pdPASS) {
+    s_dl = Dl::Idle;
+    if (manual) toast(TR("Not enough memory right now"));
+    s_dl_retry_at = millis() + 60000;
+    return false;
+  }
+  s_ver++;
+  return true;
+}
+
+static void dlTick(uint32_t now) {
+  if (s_dl == Dl::Done || s_dl == Dl::Failed) {   // the task finished: take the result on this task
+    const bool ok = s_dl == Dl::Done;
+    s_dl = Dl::Idle;
+    s_dl_last_ms = now;
+    char t[120];
+    if (ok) {
+      s_cfg.dl_lat_e6 = s_dl_lat6;
+      s_cfg.dl_lon_e6 = s_dl_lon6;
+      s_cfg.dl_at = epochNow();
+      saveCfg();
+      if (s_dl_rows > 0) camsReload();
+      if (s_dl_rows > 0) snprintf(t, sizeof t, "%s %d", TR("Cameras updated:"), (int)s_dl_rows);
+      else snprintf(t, sizeof t, "%s", TR("No cameras mapped around here"));
+      if (s_dl_manual || s_dl_rows > 0) toast(t, 2400);
+    } else {
+      s_dl_retry_at = now + kDlRetryMs;
+      if (s_dl_manual) {
+        snprintf(t, sizeof t, "%s: %s", TR("Camera download failed"), s_dl_msg);
+        toast(t, 3000);
+      }
+    }
+    s_ver++;
+    s_map_ver++;
+    return;
+  }
+  static uint32_t last = 0;
+  if (s_dl == Dl::Running || now - last < 30000) return;
+  last = now;
+  if (!s_cfg.auto_dl || (int32_t)(now - s_dl_retry_at) < 0 || !wifiUp()) return;
+  double la, lo;
+  if (!dlPosition(&la, &lo) || !flockyou::downloadDue(s_cfg, la, lo, epochNow())) return;
+  dlStart(false);
+}
+#endif  // FLOCK_DOWNLOAD
 
 // ---- the alert channel -------------------------------------------------------------------
 static bool channelUsable(const char* name, int* idx_out) {
@@ -853,10 +1084,60 @@ static void buildCameras(lv_obj_t* b) {
   }
   lbl(b, line, &g_font_14, COLOR_TEXT);
   if (s_cam_state == CamLoad::Done && !s_cams_from_file) {
+#if FLOCK_DOWNLOAD
+    snprintf(line, sizeof line, "%s", TR("No camera list yet. Download the cameras around you below, or put a list made by "
+                                         "scripts/flock_cameras.py in"));
+    lbl(b, line, &g_font_12, 0xF2A33A);
+    lbl(b, path, &g_font_12, COLOR_SUB);
+#else
     snprintf(line, sizeof line, "%s %s\n%s", TR("No camera list yet. Put DeFlock's cameras for your area in"), path,
              TR("(scripts/flock_cameras.py makes it from OpenStreetMap; copy it over with Files, Transfer or USB Files)."));
     lbl(b, line, &g_font_12, 0xF2A33A);
+#endif
   }
+#if FLOCK_DOWNLOAD
+  {
+    const unsigned km = flockyou::kAreaKm[s_cfg.area % flockyou::kAreaChoices];
+    if (s_dl == Dl::Running) {
+      snprintf(line, sizeof line, "%s %d", TR("Downloading cameras from OpenStreetMap..."), (int)s_dl_rows);
+      lbl(b, line, &g_font_12, 0x4FC3F7);
+    } else if (s_dl_msg[0]) {
+      snprintf(line, sizeof line, "%s: %s", TR("Last download"), s_dl_msg);
+      lbl(b, line, &g_font_12, 0xF2A33A);
+    } else if (s_cfg.dl_lat_e6 || s_cfg.dl_lon_e6) {
+      char rb[40];
+      teamui::rangeTo(s_cfg.dl_lat_e6 / 1e6, s_cfg.dl_lon_e6 / 1e6, rb, sizeof rb);
+      const uint32_t now = epochNow();
+      char when[32] = "";
+      if (now && s_cfg.dl_at && now >= s_cfg.dl_at) {
+        const uint32_t h = (now - s_cfg.dl_at) / 3600;
+        if (h < 1) snprintf(when, sizeof when, " \xC2\xB7 %s", TR("just now"));
+        else if (h < 48) snprintf(when, sizeof when, " \xC2\xB7 %luh %s", (unsigned long)h, TR("ago"));
+        else snprintf(when, sizeof when, " \xC2\xB7 %lud %s", (unsigned long)(h / 24), TR("ago"));
+      }
+      snprintf(line, sizeof line, "%s %s%s", TR("Downloaded around a point"), rb, when);
+      lbl(b, line, &g_font_12, COLOR_SUB);
+    }
+    snprintf(line, sizeof line, "%s %u km %s", TR("Download cameras within"), km, TR("now"));
+    wideBtn(b, line, [](lv_event_t*) { dlStart(true); pageBuild(); }, nullptr, s_dl == Dl::Running ? 0 : kMineRgb);
+    snprintf(line, sizeof line, "%s: %s", TR("Keep them current over Wi-Fi"), s_cfg.auto_dl ? TR("on") : TR("off"));
+    wideBtn(b, line, [](lv_event_t*) {
+      s_cfg.auto_dl = !s_cfg.auto_dl;
+      s_dl_retry_at = millis();
+      saveCfg();
+      pageBuild();
+    }, nullptr, s_cfg.auto_dl ? 0x2E7D32 : 0);
+    snprintf(line, sizeof line, "%s: %u km %s", TR("Area"), km, TR("around the radio"));
+    wideBtn(b, line, [](lv_event_t*) {
+      s_cfg.area = (uint8_t)((s_cfg.area + 1) % flockyou::kAreaChoices);
+      saveCfg();
+      pageBuild();
+    });
+    lbl(b, TR("From OpenStreetMap (DeFlock's mapping) over Wi-Fi. When on, it downloads again once the radio moves "
+              "half the area away, or after a week. It replaces cameras.csv; cameras you mark stay in marked.csv."),
+        &g_font_12, COLOR_SUB);
+  }
+#endif
   double la, lo;
   if (camsReady() && gpsFix(&la, &lo)) {
     double dm = 0;
@@ -1062,6 +1343,9 @@ static void loopTick() {
     if (s_cfg_found && (s_cfg.show_cams || s_cfg.proximity)) camsReload();   // never for a radio that never opened it
   }
   camLoadStep();
+#if FLOCK_DOWNLOAD
+  if (s_cfg_found) dlTick(now);   // a radio that never opened Flock You never downloads
+#endif
   FlockRadio::tick(now);
   if (s_tab) {
     flockyou::Alert a;

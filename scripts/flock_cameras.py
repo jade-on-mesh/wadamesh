@@ -76,7 +76,7 @@ def direction(tags: dict) -> str:
 
 def label(tags: dict) -> str:
     s = tags.get("manufacturer") or tags.get("brand") or tags.get("operator") or "ALPR"
-    return re.sub(r"[,\r\n]", " ", s).strip()[:32]
+    return re.sub(r"[,\r\n]", " ", s).strip()[:32].strip()
 
 
 def rows(osm: dict):
