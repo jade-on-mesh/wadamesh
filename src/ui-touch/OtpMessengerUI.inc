@@ -16,6 +16,12 @@
 #include "PadQr.h"
 #include "src/extra/libs/qrcode/qrcodegen.h"   // LVGL's QR encoder: alphanumeric mode at level L
 
+#if CAP_SOUND_LINK
+// Sound link (SoundLinkUI.inc, included further down): the pad's check code
+// over the speaker, and a short listen for the other side's.
+namespace soundui { static bool playRaw(const char* msg); static void listenFor(uint32_t ms); }
+#endif
+
 namespace otpui {
 
 enum class Screen : uint8_t { List, Pick, Chat, Pad, Settings, Lock, Import };
@@ -1363,6 +1369,58 @@ static const int kGenSizes[] = {512, 1700, 4096, otp::kMaxTotalPadBytes};
 constexpr int kGenSizeCount = sizeof kGenSizes / sizeof kGenSizes[0];
 static uint8_t s_gen_size = 2;
 
+// ---- checking a pad (otp::padFingerprint) ----------------------------------------------------
+// The check code is on the pad screen to read out; with Sound link it can be
+// played, and a code heard by Sound link is compared here.
+static char s_chk_tid[48] = "";      // the pad the last result is about
+static char s_chk_msg[120] = "";
+static int8_t s_chk_ok = -1;
+static char s_chk_listen[48] = "";   // the pad a "Listen for a check" was started from
+
+// A check code was heard: compare it with the pad being checked, else every
+// pad here. `out` gets what to tell the user.
+[[maybe_unused]] static void onPadCheckHeard(const uint8_t fp[8], uint32_t n, char* out, size_t cap) {
+  otp::Core& c = OtpMessenger::core();
+  uint8_t mine[8];
+  uint32_t mn = 0;
+  char nm[56];
+  if (!OtpMessenger::ready() || c.locked()) {
+    snprintf(out, cap, "%s", TR("Pad check heard: unlock OTP Messenger to compare it"));
+    toast(out, 3000);
+    return;
+  }
+  otp::Target* want = s_chk_listen[0] ? c.findById(s_chk_listen) : nullptr;
+  s_chk_listen[0] = 0;
+  otp::Target* hit = nullptr;
+  if (want && c.padCheck(*want, mine, &mn)) {
+    hit = want;
+    displayName(*want, nm, sizeof nm);
+    s_chk_ok = !memcmp(mine, fp, 8);
+    if (s_chk_ok) snprintf(out, cap, "%s %s", TR("Same pad on both sides:"), nm);
+    else if (n && n != mn)
+      snprintf(out, cap, "%s %s: %lu / %lu B. %s", TR("Different pad for"), nm, (unsigned long)n, (unsigned long)mn,
+               TR("Share it again."));
+    else snprintf(out, cap, "%s %s. %s", TR("Different pad bytes for"), nm, TR("Share it again before using it."));
+  } else {
+    s_chk_ok = 0;
+    for (int i = 0; i < c.targetCount() && !hit; i++) {
+      otp::Target* t = c.targetAt(i);
+      if (t && t->used && c.padCheck(*t, mine, &mn) && !memcmp(mine, fp, 8)) hit = t;
+    }
+    if (hit) {
+      s_chk_ok = 1;
+      displayName(*hit, nm, sizeof nm);
+      snprintf(out, cap, "%s %s", TR("Same pad on both sides:"), nm);
+    } else {
+      snprintf(out, cap, "%s", TR("No pad here matches that check code"));
+    }
+  }
+  snprintf(s_chk_msg, sizeof s_chk_msg, "%s", out);
+  snprintf(s_chk_tid, sizeof s_chk_tid, "%s", hit ? hit->id : "");
+  toast(out, 3500);
+  if (s_root && s_screen == Screen::Pad) show(Screen::Pad);
+}
+
 static void buildPad() {
   otp::Target* t = cur();
   if (!t) { show(Screen::List); return; }
@@ -1474,6 +1532,34 @@ static void buildPad() {
 
   lv_obj_t* share = setCardIn(b, TR("Share"));
   setActionRow(share, UI_ICON_QR_CODE, "Show as QR code", nullptr, [](lv_event_t*) { qrOpen(); }, nullptr, SET_NORMAL, false);
+  {
+    uint8_t fp[8];
+    uint32_t pn = 0;
+    if (c.padCheck(*t, fp, &pn)) {
+      char code[20];
+      otp::padCheckCode(fp, code);
+      setActionRow(share, UI_ICON_CHECK_CHECK, "Check code", code, nullptr, nullptr, SET_NORMAL, false);
+#if CAP_SOUND_LINK
+      setActionRow(share, UI_ICON_WAVES, "Play the check code", nullptr, [](lv_event_t*) {
+        otp::Target* x = cur();
+        uint8_t f[8];
+        uint32_t n = 0;
+        char link[80];
+        if (!x || !OtpMessenger::core().padCheck(*x, f, &n) || !otp::padCheckLink(f, n, link, sizeof link)) return;
+        if (soundui::playRaw(link)) toast(TR("Playing the check code"), 1500);
+      }, nullptr, SET_NORMAL, false);
+      setActionRow(share, UI_ICON_WAVES, "Listen for a check code", nullptr, [](lv_event_t*) {
+        otp::Target* x = cur();
+        if (!x) return;
+        snprintf(s_chk_listen, sizeof s_chk_listen, "%s", x->id);
+        soundui::listenFor(120000);
+        toast(TR("Listening for 2 minutes: play the check code on the other device"), 2500);
+      }, nullptr, SET_NORMAL, false);
+#endif
+      if (s_chk_msg[0] && !strcmp(s_chk_tid, t->id))
+        setNote(share, s_chk_msg, s_chk_ok == 1 ? SET_TONE_OK : SET_TONE_DANGER);
+    }
+  }
   setActionRow(share, UI_ICON_SHARE_2, "Export to the SD card", nullptr, [](lv_event_t*) { exportPadNow(); }, nullptr, SET_NORMAL, false);
   if (t->kind == otp::Kind::Dm) {
     char role[4] = {t->role, 0};
@@ -1481,6 +1567,8 @@ static void buildPad() {
       if (otp::Target* x = cur()) { OtpMessenger::core().flipRole(*x); show(Screen::Pad); }
     }, nullptr, SET_NORMAL, false);
   }
+  setNote(share, "Check code: the same on both devices means the same pad. Read it out, or play it by sound "
+                 "(Sound link) and listen on the other one; it reveals nothing about the pad.");
   setNote(share, "Show as QR code: MeshCore Open TAK scans it from its OTP Pad screen (Scan QR), a few parts in turn. "
                  "Export writes this pad, unused, to the SD card as hex. The other device imports the same file; "
                  "roles A/B are worked out from your keys, so both sides import it unchanged.");

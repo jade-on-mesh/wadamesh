@@ -142,6 +142,51 @@ void sha256(const uint8_t* data, size_t len, uint8_t out[32]) {
   shaFinal(s, out);
 }
 
+void padFingerprint(const uint8_t* pad, size_t n, uint8_t fp[8]) {
+  Sha256 s;
+  shaInit(s);
+  shaUpdate(s, (const uint8_t*)kPadCheckLabel, strlen(kPadCheckLabel));
+  if (n) shaUpdate(s, pad, n);
+  uint8_t h[32];
+  shaFinal(s, h);
+  memcpy(fp, h, 8);
+}
+
+size_t padCheckLink(const uint8_t fp[8], uint32_t n, char* out, size_t cap) {
+  char hex[17];
+  toHex(fp, 8, hex);
+  const int r = snprintf(out, cap, "meshcore://otp/check?fp=%s&n=%lu", hex, (unsigned long)n);
+  return r > 0 && (size_t)r < cap ? (size_t)r : 0;
+}
+
+bool parsePadCheck(const char* s, uint8_t fp[8], uint32_t* n) {
+  static const char* const pre = "meshcore://otp/check?";
+  for (size_t i = 0; pre[i]; i++)
+    if (!s[i] || (s[i] | 0x20) != (pre[i] | 0x20)) return false;
+  bool have_fp = false;
+  *n = 0;
+  for (const char* p = s + strlen(pre); *p;) {
+    const char* end = strchr(p, '&');
+    if (!end) end = p + strlen(p);
+    if (end - p == 3 + 16 && !strncmp(p, "fp=", 3)) {
+      Bytes b;
+      if (!fromHex(p + 3, 16, b) || b.n != 8) return false;
+      memcpy(fp, b.p, 8);
+      have_fp = true;
+    } else if (end - p > 2 && !strncmp(p, "n=", 2)) {
+      *n = (uint32_t)strtoul(p + 2, nullptr, 10);
+    }
+    p = *end ? end + 1 : end;
+  }
+  return have_fp;
+}
+
+void padCheckCode(const uint8_t fp[8], char out[20]) {
+  char hex[17];
+  toHex(fp, 8, hex);
+  snprintf(out, 20, "%.4s %.4s %.4s %.4s", hex, hex + 4, hex + 8, hex + 12);
+}
+
 void hmacSha256(const uint8_t* key, size_t key_len, const uint8_t* msg, size_t msg_len, uint8_t out[32]) {
   uint8_t k[64] = {0};
   if (key_len > 64) sha256(key, key_len, k);
@@ -687,6 +732,15 @@ void Core::flipRole(Target& t) {
   t.role = t.role == 'A' ? 'B' : 'A';
   savePad(t);
   notifyChanged(t);
+}
+
+bool Core::padCheck(Target& t, uint8_t fp[8], uint32_t* n) {
+  if (locked()) return false;
+  loadPad(t);
+  if (t.legacy || t.read_failed || !t.pad.n) return false;
+  padFingerprint(t.pad.p, t.pad.n, fp);
+  *n = t.pad.n;
+  return true;
 }
 
 bool Core::exportHex(Target& t, Bytes& out) {

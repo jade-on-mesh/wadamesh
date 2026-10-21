@@ -25,6 +25,12 @@ The **Link** tab:
 - Below that, what was heard, newest first. Tap a channel or contact card to
   add it.
 
+**Checking a one-time pad.** OTP Messenger's pad screen shows the pad's check
+code. **Play the check code** on one device and **Listen for a check code** on
+the other (or just read the codes out). The listener says whether its pad is
+the same. The code reveals nothing about the pad; the pad itself never goes
+over sound, because anyone in earshot could record it.
+
 In MeshCore Open TAK the same links play from the channel share screen
 (**Play by sound**), and its QR scanners have a **Listen** button.
 
