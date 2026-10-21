@@ -689,7 +689,16 @@ static void testSwitchTimes() {
          slow.need[1], quick.need[1]);
 }
 
+static void testFind() {
+  assert(findPick(0, 0) == -1);
+  assert(findPick(3, 0) == 0);
+  assert(findPick(0, 2) == 1);
+  assert(findPick(1, 5) == 1);
+  assert(findPick(4, 4) == 0);   // a tie: the fast preset
+}
+
 int main() {
+  testFind();
   testSwitchTimes();
   testTiming();
   testAirtime();

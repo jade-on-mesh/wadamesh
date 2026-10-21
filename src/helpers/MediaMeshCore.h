@@ -102,6 +102,21 @@ static constexpr uint8_t kNotHeld = 0xFF;
 static constexpr float kDefaultFreq = 911.150f;
 static constexpr float kDefaultBw = 250.0f;
 static constexpr float kRangeBw = 125.0f;
+
+// ---- Find MediaMesh -------------------------------------------------------------
+// Which preset a MediaMesh nearby uses. radio2 listens (rx, tempradio2) on each
+// preset in turn while a repeater discovery request goes out on the main mesh:
+// MediaMesh repeaters answer on both radios (keymindCascade's tx.reply both),
+// so their radio2 copy is only heard on the preset they run. Shared with
+// MeshCore Open TAK (lib/services/media_mesh_find.dart).
+static constexpr uint32_t kFindSettleMs = 1500;   // after the retune, before asking
+static constexpr uint32_t kFindListenMs = 9000;   // repeaters answer after a random delay (x4)
+// 0: 250 kHz fast, 1: 125 kHz range, -1: nothing heard on either. A tie goes
+// to the fast preset.
+inline int findPick(uint32_t heard_fast, uint32_t heard_range) {
+  if (!heard_fast && !heard_range) return -1;
+  return heard_range > heard_fast ? 1 : 0;
+}
 static constexpr uint8_t kDefaultSf = 7;
 static constexpr uint8_t kDefaultCr = 5;
 
