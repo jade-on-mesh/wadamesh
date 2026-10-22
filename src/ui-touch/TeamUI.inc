@@ -7,6 +7,7 @@
 #include <new>
 
 #include "TeamCore.h"
+#include "TeamSetup.h"
 #include "WatchFeed.h"
 #include "MapHighlight.h"
 
@@ -1334,6 +1335,178 @@ static void callsignDone(const char* t) {
   pageBuild();
 }
 
+// ---- one-scan team setup (TEAM_SETUP.md) ---------------------------------------------------
+#if CAP_SOUND_LINK
+}  // namespace teamui
+namespace soundui { static bool playRaw(const char* msg); static void listenFor(uint32_t ms); }
+namespace teamui {
+#endif
+
+// This team's setup: the team channel, the watched channels, radio2's profile
+// when it's on. False without a team channel on this radio.
+static bool currentSetup(teamsetup::Setup& s) {
+  team::Core* c = s_core;
+  if (!c || !c->cfg.channel[0]) return false;
+  const int idx = Io::channelIdx(c->cfg.channel);
+  ChannelDetails cd;
+  if (idx < 0 || !the_mesh.getChannel(idx, cd)) return false;
+  s = teamsetup::Setup();
+  snprintf(s.team.name, sizeof s.team.name, "%s", cd.name);
+  memcpy(s.team.secret, cd.channel.secret, 16);
+  watchfeed::Store* w = watch();
+  for (int i = 0; w && i < MAX_GROUP_CHANNELS && s.nw < teamsetup::kMaxWatched; i++) {
+    ChannelDetails d;
+    if (i == idx || !the_mesh.getChannel(i, d) || !d.name[0] || !w->isWatched(d.name)) continue;
+    if (!strcasecmp(d.name, "public") || threadIsPublicChannel(d.name)) continue;
+    teamsetup::Channel& x = s.watched[s.nw++];
+    snprintf(x.name, sizeof x.name, "%s", d.name);
+    x.hashtag = d.name[0] == '#';
+    if (!x.hashtag) memcpy(x.secret, d.channel.secret, 16);
+  }
+  const mediamesh::Config& m = mediamesh::config();
+  if (mediamesh::supported() && m.mode != mediamesh::MODE_OFF) {
+    s.has_mm = true;
+    s.khz = (uint32_t)lroundf(m.p.freq * 1000.0f);
+    s.bw_hz = (uint32_t)lroundf(m.p.bw * 1000.0f);
+    s.sf = m.p.sf;
+    s.cr = m.p.cr;
+  }
+  return true;
+}
+
+static void setupSummary(const teamsetup::Setup& s, char* out, size_t cap) {
+  // The firmware builds as C++11: no generic lambdas, so each part is its own snprintf.
+  size_t n = 0;
+  auto adv = [&](int w) { if (w > 0 && n < cap) n += (size_t)w < cap - n ? (size_t)w : cap - n - 1; };
+  if (!cap) return;
+  out[0] = 0;
+  adv(snprintf(out, cap, "%s %s", TR("Team channel:"), s.team.name));
+  for (int i = 0; i < s.nw && n + 1 < cap; i++) {
+    if (i) adv(snprintf(out + n, cap - n, ", %s", s.watched[i].name));
+    else adv(snprintf(out + n, cap - n, "\n%s %s", TR("Watch:"), s.watched[i].name));
+  }
+  if (s.has_mm && n + 1 < cap)
+    adv(snprintf(out + n, cap - n, "\n%s %.3f MHz, %g kHz, SF%u", TR("MediaMesh:"), s.khz / 1000.0, s.bw_hz / 1000.0,
+                 (unsigned)s.sf));
+}
+
+static char s_setup_link[teamsetup::kMaxLink + 1];
+
+static void openShareSetup() {
+  teamsetup::Setup* s = new (std::nothrow) teamsetup::Setup();
+  if (!s) return;
+  if (!currentSetup(*s) || !teamsetup::toLink(*s, s_setup_link, sizeof s_setup_link)) {
+    delete s;
+    toast(TR("Pick the team channel first"));
+    return;
+  }
+  char summary[200];
+  setupSummary(*s, summary, sizeof summary);
+  delete s;
+  lv_obj_t* body = createSettingsModal(TR("Share team setup"), SettingsModalKind::AddContact);   // reuse a kind
+  lv_obj_set_flex_flow(body, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_flex_align(body, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lv_obj_set_style_pad_row(body, 6, LV_PART_MAIN);
+  const lv_coord_t qs = LV_MIN((lv_coord_t)SC(170), (lv_coord_t)(lv_disp_get_ver_res(nullptr) - 70));
+  lv_obj_t* qr = lv_qrcode_create(body, qs, lv_color_hex(0x000000), lv_color_hex(0xFFFFFF));
+  lv_qrcode_update(qr, s_setup_link, strlen(s_setup_link));
+  lv_obj_set_style_border_color(qr, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
+  lv_obj_set_style_border_width(qr, 6, LV_PART_MAIN);
+  lv_obj_t* l = lbl(body, summary, &g_font_12, COLOR_TEXT);
+  lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+#if CAP_SOUND_LINK
+  lv_obj_t* x = lv_btn_create(body);
+  styleButton(x);
+  lv_obj_set_size(x, LV_PCT(100), 34);
+  lv_obj_add_event_cb(x, [](lv_event_t*) {
+    char parts[teamsetup::kMaxParts][teamsetup::kSoundBytes + 1];
+    const int n = teamsetup::soundParts(s_setup_link, parts);
+    int queued = 0;
+    for (int i = 0; i < n; i++) queued += soundui::playRaw(parts[i]) ? 1 : 0;
+    char t[64];
+    snprintf(t, sizeof t, TR("Playing the team setup (%d part(s))"), queued);
+    toast(queued ? t : TR("Sound link is busy, try again"), 2000);
+  }, LV_EVENT_CLICKED, nullptr);
+  lv_obj_t* xl = lv_label_create(x);
+  lv_label_set_text(xl, TR("Play by sound"));
+  useChainedFont(xl);
+  lv_obj_center(xl);
+#endif
+  lbl(body, TR("Anyone who scans or hears this can join your team channel and see your positions."), &g_font_12,
+      0xF2A33A);
+}
+
+// Joining: a setup heard by Sound link waits here for "Join".
+static teamsetup::Setup* s_join = nullptr;
+
+static int ensureChannel(const char* name, const uint8_t secret[16]) {
+  for (int i = 0; i < MAX_GROUP_CHANNELS; i++) {
+    ChannelDetails cd;
+    if (the_mesh.getChannel(i, cd) && cd.name[0] && !memcmp(cd.channel.secret, secret, 16)) return i;
+  }
+  const int slot = the_mesh.findFirstEmptyChannelSlot();
+  if (slot < 0 || !the_mesh.uiAddOrUpdateChannel(slot, name, secret)) return -1;
+  if (g_lv.task) { g_lv.task->refreshThreadsFromMesh(); g_lv.dirty_threads = true; }
+  return slot;
+}
+
+static void joinApply() {
+  teamsetup::Setup* s = s_join;
+  s_join = nullptr;
+  team::Core* c = core();
+  if (!s || !c) { delete s; return; }
+  int missing = 0;
+  if (ensureChannel(s->team.name, s->team.secret) >= 0) {
+    snprintf(c->cfg.channel, sizeof c->cfg.channel, "%s", s->team.name);
+    c->cfg.enabled = true;
+    c->identityChanged();   // saves, and a position goes out soon
+  } else {
+    missing++;
+  }
+  watchfeed::Store* w = watch();
+  for (int i = 0; i < s->nw; i++) {
+    teamsetup::Channel& x = s->watched[i];
+    uint8_t secret[16];
+    char hashed[42];
+    if (x.hashtag) {
+      if (!deriveHashtagChannelKey(x.name, hashed, sizeof hashed, secret)) continue;
+      snprintf(x.name, sizeof x.name, "%s", hashed);
+    } else {
+      memcpy(secret, x.secret, 16);
+    }
+    if (ensureChannel(x.name, secret) < 0) { missing++; continue; }
+    if (w) w->setWatched(x.name, true);
+  }
+  if (w) watchSave();
+  if (s->has_mm && mediamesh::supported())
+    mmFindApply(s->khz / 1000.0f, s->bw_hz / 1000.0f, s->sf, s->cr, TR("MediaMesh set"));
+  char t[96];
+  if (missing) snprintf(t, sizeof t, TR("Joined %s (%d channel(s) didn't fit)"), s->team.name, missing);
+  else snprintf(t, sizeof t, TR("Joined %s"), s->team.name);
+  toast(t, 2500);
+  delete s;
+  s_io.changed();
+}
+
+}  // namespace teamui
+
+// Sound link heard a whole team setup: ask, then set it up.
+void teamSetupHeard(const teamsetup::Setup& s) {
+  using namespace teamui;
+  delete s_join;
+  s_join = new (std::nothrow) teamsetup::Setup(s);
+  if (!s_join) return;
+  static char msg[320];
+  char summary[200];
+  setupSummary(s, summary, sizeof summary);
+  snprintf(msg, sizeof msg, "%s\n\n%s\n\n%s", TR("Join this team?"), summary,
+           s.has_mm ? TR("Joining adds the channels, turns team mode on, and sets radio2 to the team's MediaMesh.")
+                    : TR("Joining adds the channels and turns team mode on."));
+  showConfirm(msg, TR("Join"), joinApply);
+}
+
+namespace teamui {
+
 static void buildSetup(lv_obj_t* b) {
   team::Core* c = s_core;
   char line[96];
@@ -1382,6 +1555,30 @@ static void buildSetup(lv_obj_t* b) {
     shown++;
   }
   if (!shown) lbl(row, TR("No private channels. Join the team's channel first (scan its QR in MeshCore Open TAK's channel settings, or add it in Chats)."), &g_font_12, 0xF2A33A);
+  {
+    // One scan sets a newcomer up (TEAM_SETUP.md).
+    lv_obj_t* x = lv_btn_create(b);
+    styleButton(x);
+    lv_obj_set_size(x, LV_PCT(100), 32);
+    lv_obj_add_event_cb(x, [](lv_event_t*) { openShareSetup(); }, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t* l = lv_label_create(x);
+    lv_label_set_text(l, TR("Share team setup (QR / sound)"));
+    useChainedFont(l);
+    lv_obj_align(l, LV_ALIGN_LEFT_MID, 0, 0);
+#if CAP_SOUND_LINK
+    x = lv_btn_create(b);
+    styleButton(x);
+    lv_obj_set_size(x, LV_PCT(100), 32);
+    lv_obj_add_event_cb(x, [](lv_event_t*) {
+      soundui::listenFor(120000);
+      toast(TR("Listening for 2 minutes: play the team setup on the other phone or standalone"), 2500);
+    }, LV_EVENT_CLICKED, nullptr);
+    l = lv_label_create(x);
+    lv_label_set_text(l, TR("Join a team by sound"));
+    useChainedFont(l);
+    lv_obj_align(l, LV_ALIGN_LEFT_MID, 0, 0);
+#endif
+  }
   {
     lv_obj_t* x = lv_btn_create(b);
     styleButton(x);
