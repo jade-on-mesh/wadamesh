@@ -38556,7 +38556,17 @@ static void showRouteHud();
 static void hideRouteHud();
 
 // MediaMesh coverage (Settings > MediaMesh > Map coverage): recorder, map layer, settings rows.
+#if CAP_MM_COVERAGE
 #include "MediaMeshCoverageUI.inc"
+#else
+namespace mmcovui {
+static void loopTick(uint32_t) {}
+static bool recording() { return false; }
+static void freeMapObj() {}
+static void drawOnMap(lv_obj_t*, double, double) {}
+}  // namespace mmcovui
+static void mmcovBuildRows(lv_obj_t*) {}
+#endif
 
 // ---- Discover wardriving coverage overlay (drawn on the map pan layer) ----
 // Plots the Discover app's logged coverage samples (s_disc_track[], populated in discoverWardriveTick)
