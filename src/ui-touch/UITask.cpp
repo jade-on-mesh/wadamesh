@@ -40126,6 +40126,7 @@ static void mapContactsFillList() {
   if (!s_map_contacts_list) return;
   lv_indev_reset(nullptr, nullptr);   // #27: abort any scroll-throw before freeing these rows (UAF on telemetry/position rebuild mid-flick)
   lv_obj_clean(s_map_contacts_list);
+#if CAP_TAK_EXTRAS
   for (int t = 0; t < MC_TAB_COUNT; t++) {   // the chosen tab, filled in
     lv_obj_t* b = s_map_contacts_tabs[t];
     if (!b) continue;
@@ -40145,6 +40146,7 @@ static void mapContactsFillList() {
   const uint8_t want_type = s_map_contacts_tab == MC_TAB_REPEATERS ? ADV_TYPE_REPEATER
                           : s_map_contacts_tab == MC_TAB_COMPANIONS ? ADV_TYPE_CHAT
                           : s_map_contacts_tab == MC_TAB_ROOMS ? ADV_TYPE_ROOM : ADV_TYPE_SENSOR;
+#endif
 
   // Collect GPS-bearing contacts + their distance/age keys.
   static MapContactEntry* ents = (MapContactEntry*)psAlloc(sizeof(MapContactEntry) * 64);
@@ -40158,7 +40160,9 @@ static void mapContactsFillList() {
     ContactInfo c;
     if (!the_mesh.getContactByIdx(i, c)) continue;
     if (c.gps_lat == 0 && c.gps_lon == 0) continue;
+#if CAP_TAK_EXTRAS
     if (c.type != want_type) continue;
+#endif
     MapContactEntry& e = ents[n];
     e.midx = (int)i;
     e.type = c.type;
@@ -40313,6 +40317,8 @@ static void openMapContactsList() {
   lv_obj_center(s_map_contacts_sort_lbl);
 
   // Tabs: ours, then the mesh's nodes by kind (a row that scrolls sideways).
+#if CAP_TAK_EXTRAS
+  const lv_coord_t list_y = 66;
   {
     lv_obj_t* row = lv_obj_create(card);
     lv_obj_remove_style_all(row);
@@ -40341,12 +40347,15 @@ static void openMapContactsList() {
       s_map_contacts_tabs[t] = b;
     }
   }
+#else
+  const lv_coord_t list_y = 34;
+#endif
 
   // Scrollable list (filled + re-filled by mapContactsFillList).
   s_map_contacts_list = lv_obj_create(card);
   lv_obj_remove_style_all(s_map_contacts_list);
-  lv_obj_set_size(s_map_contacts_list, card_w - 2 * pad, card_h - 2 * pad - 66);
-  lv_obj_set_pos(s_map_contacts_list, 0, 66);
+  lv_obj_set_size(s_map_contacts_list, card_w - 2 * pad, card_h - 2 * pad - list_y);
+  lv_obj_set_pos(s_map_contacts_list, 0, list_y);
   lv_obj_set_flex_flow(s_map_contacts_list, LV_FLEX_FLOW_COLUMN);
   lv_obj_set_style_pad_row(s_map_contacts_list, 6, LV_PART_MAIN);
   lv_obj_set_scroll_dir(s_map_contacts_list, LV_DIR_VER);
