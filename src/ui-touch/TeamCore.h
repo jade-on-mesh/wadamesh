@@ -161,6 +161,9 @@ class Core {
   }
   bool routeShape(int i, TeamWire::Shape& out) const;
   bool followRoute(int i, bool reverse);
+  // Back-track: follow a recorded track (oldest point first) back to its
+  // start, with the same turn cues as a route. Thinned to fit.
+  bool followTrack(const int32_t* lat5, const int32_t* lon5, int n, const char* label);
   bool following() const { return hound_ == 3; }
   int followedRoute() const { return hound_ == 3 ? follow_idx_ : -1; }
   const teamroute::Cue& cue() const { return cue_; }

@@ -170,4 +170,67 @@ inline void cueText(const Cue& c, char* out, size_t cap) {
   else snprintf(out, cap, "%s in %s \xC2\xB7 %s left", turnWord(c.turn_deg), a, b);
 }
 
+// A recorded track thinned to at most `max_out` points for following back
+// (Douglas-Peucker, the tolerance doubling from 5 m until it fits): the corners
+// stay, the straight bits go, both ends are kept. Returns the points written.
+inline int simplifyTrack(const int32_t* lat5, const int32_t* lon5, int n, int32_t* out_lat5, int32_t* out_lon5,
+                         int max_out) {
+  if (n <= 0 || max_out <= 0) return 0;
+  if (n <= max_out) {
+    for (int i = 0; i < n; i++) { out_lat5[i] = lat5[i]; out_lon5[i] = lon5[i]; }
+    return n;
+  }
+  bool* keep = (bool*)calloc((size_t)n, 1);
+  int* stack = (int*)malloc(sizeof(int) * 2 * (size_t)n);
+  if (!keep || !stack) {   // no memory: every k-th point
+    free(keep);
+    free(stack);
+    int k = 0;
+    for (int i = 0; i < max_out; i++) {
+      const int j = (int)((long)i * (n - 1) / (max_out - 1 > 0 ? max_out - 1 : 1));
+      out_lat5[k] = lat5[j];
+      out_lon5[k++] = lon5[j];
+    }
+    return k;
+  }
+  const double cosl = cos(lat5[0] / 1e5 * M_PI / 180.0);
+  auto x = [&](int i) { return lon5[i] / 1e5 * 111320.0 * cosl; };
+  auto y = [&](int i) { return lat5[i] / 1e5 * 110540.0; };
+  int kept = 0;
+  for (double tol = 5; ; tol *= 2) {
+    for (int i = 0; i < n; i++) keep[i] = false;
+    keep[0] = keep[n - 1] = true;
+    int sp = 0;
+    stack[sp++] = 0;
+    stack[sp++] = n - 1;
+    while (sp) {
+      const int b = stack[--sp], a = stack[--sp];
+      if (b - a < 2) continue;
+      const double ax = x(a), ay = y(a), dx = x(b) - ax, dy = y(b) - ay, len2 = dx * dx + dy * dy;
+      double worst = -1;
+      int at = -1;
+      for (int i = a + 1; i < b; i++) {
+        double t = len2 == 0 ? 0 : ((x(i) - ax) * dx + (y(i) - ay) * dy) / len2;
+        t = t < 0 ? 0 : t > 1 ? 1 : t;
+        const double d = hypot(x(i) - (ax + t * dx), y(i) - (ay + t * dy));
+        if (d > worst) { worst = d; at = i; }
+      }
+      if (worst > tol) {
+        keep[at] = true;
+        stack[sp++] = a; stack[sp++] = at;
+        stack[sp++] = at; stack[sp++] = b;
+      }
+    }
+    kept = 0;
+    for (int i = 0; i < n; i++) kept += keep[i] ? 1 : 0;
+    if (kept <= max_out) break;
+  }
+  int k = 0;
+  for (int i = 0; i < n; i++)
+    if (keep[i]) { out_lat5[k] = lat5[i]; out_lon5[k++] = lon5[i]; }
+  free(keep);
+  free(stack);
+  return k;
+}
+
 }  // namespace teamroute

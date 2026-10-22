@@ -197,6 +197,28 @@ bool Core::followRoute(int i, bool reverse) {
   return ok;
 }
 
+bool Core::followTrack(const int32_t* lat5, const int32_t* lon5, int n, const char* label) {
+  if (n < 2) return false;
+  int32_t* la = (int32_t*)malloc(sizeof(int32_t) * teamroute::kMax);
+  int32_t* lo = (int32_t*)malloc(sizeof(int32_t) * teamroute::kMax);
+  if (!la || !lo) { free(la); free(lo); return false; }
+  const int k = teamroute::simplifyTrack(lat5, lon5, n, la, lo, teamroute::kMax);
+  Fix f;
+  const bool pos = io_->fix(f);
+  follow_.start(la, lo, k, true, pos, f.lat, f.lon);   // from the newest point back to the first
+  free(la);
+  free(lo);
+  hound_ = 3;
+  follow_idx_ = -1;   // not a shared route
+  follow_id_ = 0;
+  memset(follow_key_, 0, 4);
+  snprintf(hound_label_, sizeof hound_label_, "%s", label && *label ? label : "Back-track");
+  cue_ = teamroute::Cue();
+  updateFollow();
+  io_->changed();
+  return true;
+}
+
 void Core::updateFollow() {
   if (hound_ != 3) return;
   Fix f;

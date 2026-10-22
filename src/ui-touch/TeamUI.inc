@@ -1091,6 +1091,15 @@ void teamOnChannelData(int idx, const uint8_t* data, size_t len) {
 // a watched channel goes on the map.
 // MeshCore TEAM's channel text (MESHCORE_TEAM.md): true when it is, so it isn't
 // shown as chat; on the team channel it becomes members, pins and routes.
+// Back-track (BACKTRACK.md): follow a recorded track back to its start.
+bool teamFollowTrack(const int32_t* lat5, const int32_t* lon5, int n, const char* label) {
+  using namespace teamui;
+  team::Core* c = core();
+  if (!c || !c->followTrack(lat5, lon5, n, label)) return false;
+  houndRefresh();
+  return true;
+}
+
 bool teamCompatOnChannelText(int idx, const char* text) {
   using namespace teamui;
   if (idx < 0 || !text) return false;
