@@ -39158,7 +39158,7 @@ static int buildRouteFromMessage(const UITask::UIMessage& m) {
       ++s_route_n;
     }
     // Teammates who said they heard it, on the same star (MESSAGE_REACH.md).
-    if (m.channel) {
+    if (CAP_TAK_EXTRAS && m.channel) {
       char names[6][21];
       double la[6], lo[6];
       const int k = teamHeardBy(m.ts, m.text, names, la, lo, 6);
@@ -44149,7 +44149,7 @@ static void openMessageInfoPopup(int msg_idx) {
     }
   }
   // Teammates who said they heard it, from their beacons (MESSAGE_REACH.md).
-  if (m.outgoing && m.channel && teamReachActive() && blen < (int)sizeof(body) - 64) {
+  if (CAP_TAK_EXTRAS && m.outgoing && m.channel && teamReachActive() && blen < (int)sizeof(body) - 64) {
     char names[6][21];
     const int k = teamHeardBy(m.ts, m.text, names, nullptr, nullptr, 6);
     blen += snprintf(body + blen, sizeof(body) - blen, "\n%s", k ? TR("Teammates who heard it:") : TR("No teammate has said they heard it yet."));
