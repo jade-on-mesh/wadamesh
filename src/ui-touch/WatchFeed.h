@@ -764,6 +764,7 @@ struct Item {
   bool has_course = false;   // from its previous position (a drone)
   float course = 0;
   uint32_t at_ms = 0;        // when it happened, on this radio's millis() clock
+  uint16_t reply_hash = 0;   // its id for quick replies (QuickReply.h reportHash)
   Report r;
 };
 

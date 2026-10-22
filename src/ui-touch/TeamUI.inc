@@ -6,6 +6,7 @@
 
 #include <new>
 
+#include "QuickReply.h"
 #include "TeamCore.h"
 #include "TeamSetup.h"
 #include "WatchFeed.h"
@@ -16,6 +17,20 @@ extern bool wadaGpsMotion(float* speed_kmh, float* course_deg);   // board targe
 #endif
 
 namespace teamui {
+
+#if CAP_TAK_EXTRAS
+// Quick replies heard and sent (QuickReply.h), one answer per person per item.
+static quickreply::Book* s_book = nullptr;
+static quickreply::Book* book() {
+  if (!s_book) {
+    void* m = heap_caps_malloc(sizeof(quickreply::Book), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (m) s_book = new (m) quickreply::Book();
+  }
+  return s_book;
+}
+static char s_reply_toast[96];
+static bool s_reply_toast_pending = false;
+#endif
 
 // ---- glue ---------------------------------------------------------------------------
 class Io : public team::Io {
@@ -88,6 +103,28 @@ class Io : public team::Io {
   }
   void changed() override { s_version++; }
   void alarm(const team::AlertRec&) override { s_alarm_pending = true; }
+#if CAP_TAK_EXTRAS
+  // A teammate's quick reply: kept for the item's sheet, and a toast when it
+  // answers something of ours.
+  void reply(const TeamWire::Reply& r) override {
+    quickreply::Book* bk = book();
+    if (!bk) return;
+    char ref[28], who[21];
+    quickreply::refTeam(r.ref, r.to4, r.ref_id, ref, sizeof ref);
+    if (r.callsign[0]) snprintf(who, sizeof who, "%s", r.callsign);
+    else snprintf(who, sizeof who, "%02X%02X%02X%02X", r.key4[0], r.key4[1], r.key4[2], r.key4[3]);
+    bk->add(ref, who, r.code, r.arg, nullptr, millis(), false);
+    uint8_t me[4];
+    selfKey4(me);
+    if (!memcmp(r.to4, me, 4)) {
+      char w[24];
+      quickreply::words(r.code, r.arg, w, sizeof w);
+      snprintf(s_reply_toast, sizeof s_reply_toast, "%s: %s", who, w);
+      s_reply_toast_pending = true;
+    }
+    s_version++;
+  }
+#endif
   // MeshCore TEAM interop (MESHCORE_TEAM.md).
   bool sendText(const char* name, const char* text) override {
     const int idx = channelIdx(name);
@@ -288,6 +325,19 @@ static void showOnMap(double lat, double lon) {
   goToTab(MAP_TAB_INDEX);
 }
 
+#if CAP_TAK_EXTRAS
+// ---- quick replies: what the answer buttons answer -----------------------------------------
+// Set by the sheet (or the alarm) that shows the buttons; the buttons send.
+static uint8_t s_rq_kind = 0;          // TeamWire::kRefAlert/Report/Pin, or kRqWatch
+static constexpr uint8_t kRqWatch = 9;
+static uint8_t s_rq_to4[4] = {0};
+static uint32_t s_rq_id = 0;
+static uint8_t s_rq_ch = 0;            // a watched report's channel
+static uint16_t s_rq_hash = 0;         // and its hash
+static void rqSend(uint8_t code, uint8_t arg);
+static void rqEtaSheet();
+#endif
+
 // ---- alarm (a teammate's SOS) ------------------------------------------------------------
 static lv_obj_t* s_alarm = nullptr;
 static team::AlertRec* s_alarm_rec = nullptr;
@@ -352,6 +402,43 @@ static void alarmShow(team::AlertRec& r) {
     if (s_alarm_rec && s_core) s_core->acknowledge(*s_alarm_rec);
     alarmClose();
   });
+#if CAP_TAK_EXTRAS
+  // One tap answers the teammate and acknowledges (QuickReply.h).
+  {
+    lv_obj_t* qrow = lv_obj_create(s_alarm);
+    lv_obj_remove_style_all(qrow);
+    lv_obj_set_size(qrow, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(qrow, LV_FLEX_FLOW_ROW_WRAP);
+    lv_obj_set_flex_align(qrow, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(qrow, 6, LV_PART_MAIN);
+    lv_obj_set_style_pad_row(qrow, 6, LV_PART_MAIN);
+    for (uint8_t code : quickreply::kAlertCodes) {
+      lv_obj_t* b = lv_btn_create(qrow);
+      styleButton(b);
+      fill(b, 0xB71C1C);
+      lv_obj_set_size(b, LV_SIZE_CONTENT, 32);
+      lv_obj_set_style_pad_hor(b, 10, LV_PART_MAIN);
+      lv_obj_set_style_border_color(b, lv_color_white(), LV_PART_MAIN);
+      lv_obj_set_style_border_width(b, 1, LV_PART_MAIN);
+      lv_obj_add_event_cb(b, [](lv_event_t* e) {
+        if (!s_alarm_rec || !s_core) return;
+        const uint8_t code = (uint8_t)(uintptr_t)lv_event_get_user_data(e);
+        s_rq_kind = TeamWire::kRefAlert;
+        memcpy(s_rq_to4, s_alarm_rec->a.key4, 4);
+        s_rq_id = s_alarm_rec->a.id;
+        s_core->acknowledge(*s_alarm_rec);
+        alarmClose();
+        if (code == quickreply::kEta) rqEtaSheet();
+        else rqSend(code, 0);
+      }, LV_EVENT_CLICKED, (void*)(uintptr_t)code);
+      lv_obj_t* l = lv_label_create(b);
+      lv_label_set_text(l, code == quickreply::kEta ? TR("ETA...") : TR(quickreply::english(code)));
+      lv_obj_set_style_text_color(l, lv_color_white(), LV_PART_MAIN);
+      useChainedFont(l);
+      lv_obj_center(l);
+    }
+  }
+#endif
   if (r.a.has_pos) {
     mk(TR("Hound"), [](lv_event_t*) {
       if (s_alarm_rec && s_core) {
@@ -508,7 +595,7 @@ static uint32_t onColor(uint32_t rgb) {
   return 0.2126f * r + 0.7152f * g + 0.0722f * b > 0.5f ? 0x000000 : 0xFFFFFF;
 }
 
-static void mapLabel(lv_obj_t* parent, int sx, int sy, const char* text, uint32_t color) {
+static void mapLabelNow(lv_obj_t* parent, int sx, int sy, const char* text, uint32_t color) {
   lv_obj_t* l = lv_label_create(parent);
   lv_label_set_text(l, text);
   lv_obj_set_style_text_font(l, &g_font_12, LV_PART_MAIN);
@@ -520,6 +607,59 @@ static void mapLabel(lv_obj_t* parent, int sx, int sy, const char* text, uint32_
   lv_obj_set_pos(l, sx + 9, sy - 8);
   lv_obj_clear_flag(l, LV_OBJ_FLAG_CLICKABLE);
   mapTrack(l);
+}
+
+// Labels go up after every point is drawn, most important first, and a label
+// that would cover one already placed is left out: zoomed out, points keep
+// their names ("ICE Kent Pacific Hwy S") until there are too many to read.
+// prio: 0 teammates, 1 drones and quakes, 2 watched reports, 3 pins,
+// 4 routes and drone operators. Within one, newer first (`order`).
+struct PendingLabel { int16_t x, y; uint8_t prio; uint32_t color, order; char text[64]; };
+static constexpr int kMaxLabels = 96;
+static auto& s_lbls = psramStatic<PendingLabel[kMaxLabels]>();
+static int s_lbl_n = 0;
+
+static void mapLabel(lv_obj_t*, int sx, int sy, const char* text, uint32_t color, uint8_t prio = 3,
+                     uint32_t order = 0) {
+  if (!text || !*text || s_lbl_n >= kMaxLabels) return;
+  if (sx < -40 || sx > k_map_canvas_w || sy < -10 || sy > k_map_canvas_h + 10) return;
+  PendingLabel& l = s_lbls[s_lbl_n++];
+  l.x = (int16_t)sx;
+  l.y = (int16_t)sy;
+  l.prio = prio;
+  l.color = color;
+  l.order = order;
+  snprintf(l.text, sizeof l.text, "%s", text);
+}
+
+static void mapLabelsPlace(lv_obj_t* parent) {
+  int idx[kMaxLabels];
+  for (int i = 0; i < s_lbl_n; i++) idx[i] = i;
+  for (int i = 1; i < s_lbl_n; i++)   // by priority, then newest
+    for (int j = i; j > 0; j--) {
+      const PendingLabel& a = s_lbls[idx[j]];
+      const PendingLabel& b = s_lbls[idx[j - 1]];
+      if (a.prio > b.prio || (a.prio == b.prio && a.order <= b.order)) break;
+      const int t = idx[j]; idx[j] = idx[j - 1]; idx[j - 1] = t;
+    }
+  lv_area_t placed[kMaxLabels];
+  int n = 0;
+  for (int k = 0; k < s_lbl_n; k++) {
+    const PendingLabel& l = s_lbls[idx[k]];
+    lv_point_t sz;
+    lv_txt_get_size(&sz, l.text, &g_font_12, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+    lv_area_t a;
+    a.x1 = (lv_coord_t)(l.x + 9 - 2);
+    a.y1 = (lv_coord_t)(l.y - 8 - 1);
+    a.x2 = (lv_coord_t)(a.x1 + sz.x + 4 + 2);
+    a.y2 = (lv_coord_t)(a.y1 + sz.y + 2);
+    bool clash = false;
+    for (int q = 0; q < n && !clash; q++) clash = _lv_area_is_on(&a, &placed[q]);
+    if (clash) continue;
+    placed[n++] = a;
+    mapLabelNow(parent, l.x, l.y, l.text, l.color);
+  }
+  s_lbl_n = 0;
 }
 
 // A new point's highlight: a ring in [rgb] that flashes (its border fades
@@ -660,9 +800,9 @@ static void drawRoutes(lv_obj_t* parent, double cwx, double cwy) {
     lv_obj_set_pos(l, 0, 0);
     lv_obj_clear_flag(l, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
     mapTrack(l);
-    if (sh.label[0] && s_map_zoom >= 12 && pts[0].x > -12 && pts[0].x < k_map_canvas_w && pts[0].y > -12 &&
+    if (sh.label[0] && pts[0].x > -12 && pts[0].x < k_map_canvas_w && pts[0].y > -12 &&
         pts[0].y < k_map_canvas_h)
-      mapLabel(parent, pts[0].x, pts[0].y, sh.label, 0xFFFFFF);
+      mapLabel(parent, pts[0].x, pts[0].y, sh.label, 0xFFFFFF, 4);
   }
 }
 
@@ -703,7 +843,7 @@ static void teamDrawMapOverlay(lv_obj_t* parent, double cwx, double cwy) {
         mapIcon(op_dot, mapicons::kPerson, 0x000000);
         char op[24];
         snprintf(op, sizeof op, "%s %.8s", it.r.label2[0] ? it.r.label2 : "Op", it.r.title + 6);
-        if (s_map_zoom >= 12) mapLabel(parent, sx, sy, op, 0xC8CCD0);
+        mapLabel(parent, sx, sy, op, 0xC8CCD0, 4, it.at_ms);
         if (s_hit_n < kMapObjs) s_hits[s_hit_n++] = {(int16_t)sx, (int16_t)sy, 2, (uint8_t)i};
       }
       if (!toScreen(it.r.lat, it.r.lon, cwx, cwy, &sx, &sy)) continue;
@@ -717,7 +857,7 @@ static void teamDrawMapOverlay(lv_obj_t* parent, double cwx, double cwy) {
                 it.r.has_bearing ? it.r.bearing : it.has_course ? it.course : 0);
         char lbl[64];
         watchfeed::droneLabel(it.r, it.has_course, it.course, lbl, sizeof lbl);
-        mapLabel(parent, sx, sy, lbl, 0xFFCC80);
+        mapLabel(parent, sx, sy, lbl, 0xFFCC80, 1, it.at_ms);
       } else if (it.r.quake_m10) {
         // An earthquake: a ring that grows with the magnitude, always labelled.
         const int m = it.r.quake_m10 < 20 ? 0 : it.r.quake_m10 > 80 ? 60 : it.r.quake_m10 - 20;
@@ -725,10 +865,10 @@ static void teamDrawMapOverlay(lv_obj_t* parent, double cwx, double cwy) {
                              LV_RADIUS_CIRCLE, LV_OPA_50);
         lv_obj_set_style_border_width(d, 3, LV_PART_MAIN);
         mapIcon(d, mapicons::kWaves, 0x000000);
-        mapLabel(parent, sx, sy, it.r.title, 0xFFFFFF);
+        mapLabel(parent, sx, sy, it.r.title, 0xFFFFFF, 1, it.at_ms);
       } else {
         mapDot(parent, sx, sy, 14, watchfeed::levelRgb(it.r.level), 0x101418, LV_RADIUS_CIRCLE, LV_OPA_COVER);
-        if (it.r.title[0] && s_map_zoom >= 13) mapLabel(parent, sx, sy, it.r.title, 0xFFFFFF);
+        mapLabel(parent, sx, sy, it.r.title, 0xFFFFFF, 2, it.at_ms);
       }
       if (s_hit_n < kMapObjs) s_hits[s_hit_n++] = {(int16_t)sx, (int16_t)sy, 2, (uint8_t)i};
     }
@@ -749,7 +889,7 @@ static void teamDrawMapOverlay(lv_obj_t* parent, double cwx, double cwy) {
     }
   }
   team::Core* c = s_core;
-  if (!c || !c->cfg.enabled) return;
+  if (!c || !c->cfg.enabled) { mapLabelsPlace(parent); return; }
   for (int i = 0; i < team::kMaxMarkers; i++) {
     const TeamWire::Marker* m = c->marker(i);
     if (!m || !toScreen(m->lat, m->lon, cwx, cwy, &sx, &sy)) continue;
@@ -759,7 +899,7 @@ static void teamDrawMapOverlay(lv_obj_t* parent, double cwx, double cwy) {
     const uint32_t kc = TeamWire::kindRgb(m->kind);
     lv_obj_t* d = mapDot(parent, sx, sy, 22, 0x101418, kc, 5, LV_OPA_COVER);
     mapIcon(d, mapicons::markerKind(m->kind), kc);
-    if (m->label[0] && s_map_zoom >= 13) mapLabel(parent, sx, sy, m->label, 0xFFFFFF);
+    mapLabel(parent, sx, sy, m->label, 0xFFFFFF, 3, m->time);
     if (s_hit_n < kMapObjs) s_hits[s_hit_n++] = {(int16_t)sx, (int16_t)sy, 1, (uint8_t)i};
   }
   for (int i = 0; i < team::kMaxMembers; i++) {
@@ -793,9 +933,11 @@ static void teamDrawMapOverlay(lv_obj_t* parent, double cwx, double cwy) {
       lv_obj_set_style_text_color(l, lv_color_hex(onColor(mc)), LV_PART_MAIN);
       lv_obj_center(l);
     }
-    mapLabel(parent, sx, sy, m->pos.callsign[0] ? m->pos.callsign : "?", fr == team::Fresh::Live ? 0xFFFFFF : 0x9AA0A6);
+    mapLabel(parent, sx, sy, m->pos.callsign[0] ? m->pos.callsign : "?", fr == team::Fresh::Live ? 0xFFFFFF : 0x9AA0A6,
+             0, m->heard_ms);
     if (s_hit_n < kMapObjs) s_hits[s_hit_n++] = {(int16_t)sx, (int16_t)sy, 0, (uint8_t)i};
   }
+  mapLabelsPlace(parent);
 }
 static void teamFreeMapOverlay() { teamui::mapFree(); }
 
@@ -862,6 +1004,103 @@ static lv_obj_t* sheetBtn(lv_obj_t* card, const char* txt, lv_event_cb_t cb, voi
   return b;
 }
 
+#if CAP_TAK_EXTRAS
+// ---- quick replies in the sheets --------------------------------------------------------------
+static void rqRef(char* ref, size_t cap) {
+  if (s_rq_kind == kRqWatch) quickreply::refWatch(s_rq_ch, s_rq_hash, ref, cap);
+  else quickreply::refTeam(s_rq_kind, s_rq_to4, s_rq_id, ref, cap);
+}
+
+// A watched report is answered on its own channel, in plain text every client reads.
+static bool rqSendWatch(uint8_t ch, const char* text) {
+  ChannelDetails cd;
+  if (!the_mesh.getChannel(ch, cd) || !cd.name[0]) return false;
+  const uint32_t ts = the_mesh.getRTCClock()->getCurrentTimeUnique();
+  const char* me = the_mesh.getNodePrefs()->node_name;
+  if (!sendGroupMessageScoped(ch, cd, ts, me && *me ? me : "me", text)) return false;
+  if (g_lv.task) g_lv.task->appSentMsgToChannel(cd.name, text, the_mesh.uiLastSentFp());
+  return true;
+}
+
+static void rqSend(uint8_t code, uint8_t arg) {
+  bool ok;
+  if (s_rq_kind == kRqWatch) {
+    char t[64];
+    quickreply::watchText(code, arg, s_rq_hash, t, sizeof t);
+    ok = rqSendWatch(s_rq_ch, t);
+  } else {
+    ok = s_core && s_core->sendReply(s_rq_kind, s_rq_to4, s_rq_id, code, arg);
+  }
+  char w[24], msg[48];
+  quickreply::words(code, arg, w, sizeof w);
+  if (!ok) { toast(TR("Couldn't send the answer")); return; }
+  if (quickreply::Book* bk = book()) {
+    char ref[28];
+    rqRef(ref, sizeof ref);
+    bk->add(ref, "You", code, arg, nullptr, millis(), true);
+  }
+  snprintf(msg, sizeof msg, "%s: %s", TR("Sent"), w);
+  toast(msg, 1400);
+  Io::s_version++;
+}
+
+static void rqEtaSheet() {
+  lv_obj_t* card = sheetOpen(TR("How long until you're there?"), "");
+  for (uint8_t m : quickreply::kEtas) {
+    char t[16];
+    snprintf(t, sizeof t, "%u min", (unsigned)m);
+    sheetBtn(card, t, [](lv_event_t* e) {
+      const uint8_t m = (uint8_t)(uintptr_t)lv_event_get_user_data(e);
+      sheetClose();
+      rqSend(quickreply::kEta, m);
+    }, (void*)(uintptr_t)m, 0x2979FF);
+  }
+  sheetBtn(card, TR("Close"), [](lv_event_t*) { sheetClose(); });
+}
+
+// The answers so far, one line each, then (unless it's ours) the buttons.
+static void rqBlock(lv_obj_t* card, const uint8_t* codes, int n, bool can_answer) {
+  quickreply::Book* bk = book();
+  char ref[28];
+  rqRef(ref, sizeof ref);
+  if (bk) {
+    const quickreply::Entry* a[6];
+    const int k = bk->answers(ref, a, 6);
+    for (int i = 0; i < k; i++) {
+      char line[64], ago[12];
+      quickreply::line(*a[i], line, sizeof line);
+      const uint32_t m = (millis() - a[i]->at_ms) / 60000;
+      if (m) snprintf(ago, sizeof ago, "  %lum", (unsigned long)m);
+      else ago[0] = 0;
+      char full[80];
+      snprintf(full, sizeof full, LV_SYMBOL_LEFT " %s%s", line, ago);
+      lv_obj_t* l = lv_label_create(card);
+      lv_label_set_text(l, full);
+      lv_obj_set_width(l, LV_PCT(100));
+      lv_obj_set_style_text_font(l, &g_font_12, LV_PART_MAIN);
+      lv_obj_set_style_text_color(l, lv_color_hex(a[i]->own ? COLOR_SUB : COLOR_TEXT), LV_PART_MAIN);
+      useChainedFont(l);
+    }
+  }
+  if (!can_answer) return;
+  const uint8_t mine = bk ? bk->mine(ref) : quickreply::kCustom;
+  for (int i = 0; i < n; i++) {
+    const uint8_t code = codes[i];
+    lv_obj_t* b = sheetBtn(card, code == quickreply::kEta ? TR("ETA...") : TR(quickreply::english(code)),
+                           [](lv_event_t* e) {
+      const uint8_t c = (uint8_t)(uintptr_t)lv_event_get_user_data(e);
+      sheetClose();
+      if (c == quickreply::kEta) rqEtaSheet();
+      else rqSend(c, 0);
+    }, (void*)(uintptr_t)code, 0x37474F);
+    if (code == mine) {
+      lv_obj_set_style_border_color(b, lv_color_white(), LV_PART_MAIN);
+      lv_obj_set_style_border_width(b, 2, LV_PART_MAIN);
+    }
+  }
+}
+#endif
+
 static void memberSheet(int i) {
   team::Member* m = s_core ? s_core->member(i) : nullptr;
   if (!m) return;
@@ -876,6 +1115,17 @@ static void memberSheet(int i) {
            m->pos.status ? " · " : "", TeamWire::statusName(m->pos.status), m->pos.sos ? " · SOS" : "", rb,
            (unsigned long)ago, batt);
   lv_obj_t* card = sheetOpen(m->pos.callsign[0] ? m->pos.callsign : "?", body);
+#if CAP_TAK_EXTRAS
+  for (int k = 0; k < team::kMaxAlerts; k++) {   // their alert, if one is on: answer it
+    team::AlertRec* r = s_core->alert(k);
+    if (!r || !r->a.active || memcmp(r->a.key4, m->pos.key4, 4)) continue;
+    s_rq_kind = TeamWire::kRefAlert;
+    memcpy(s_rq_to4, r->a.key4, 4);
+    s_rq_id = r->a.id;
+    rqBlock(card, quickreply::kAlertCodes, 4, true);
+    break;
+  }
+#endif
   sheetBtn(card, TR("Hound"), [](lv_event_t*) {
     team::Member* x = s_core ? s_core->member(s_sel_idx) : nullptr;
     if (x) s_core->houndMember(x->pos.key4);
@@ -935,6 +1185,12 @@ static void pinSheet(int i) {
   snprintf(body, sizeof body, "%s%s%s\n%s%s", TeamWire::kindName(m->kind), m->note[0] ? " · " : "", m->note, rb,
            m->att_mode ? "\nHas a photo or voice note: open it in MeshCore Open TAK" : "");
   lv_obj_t* card = sheetOpen(m->label[0] ? m->label : TeamWire::kindName(m->kind), body);
+#if CAP_TAK_EXTRAS
+  s_rq_kind = TeamWire::kRefPin;
+  memcpy(s_rq_to4, m->key4, 4);
+  s_rq_id = m->id;
+  rqBlock(card, quickreply::kReportCodes, 4, !s_core->isMine(*m));
+#endif
   sheetBtn(card, TR("Hound"), [](lv_event_t*) {
     TeamWire::Marker* x = s_core ? s_core->marker(s_sel_idx) : nullptr;
     if (x) s_core->houndPoint(x->lat, x->lon, x->label[0] ? x->label : TeamWire::kindName(x->kind));
@@ -976,6 +1232,12 @@ static void watchSheet(int i) {
            it.r.track[0] && it.r.body[0] ? " · " : "", it.r.track[0] ? it.r.body : "", rb, op,
            channelName(it.channel), (unsigned long)((millis() - it.at_ms) / 60000));
   lv_obj_t* card = sheetOpen(title, body);
+#if CAP_TAK_EXTRAS
+  s_rq_kind = kRqWatch;
+  s_rq_ch = it.channel;
+  s_rq_hash = it.reply_hash;
+  rqBlock(card, quickreply::kReportCodes, 4, true);
+#endif
   sheetBtn(card, TR("Hound"), [](lv_event_t*) {
     const watchfeed::Item* x = s_watch ? &s_watch->items[s_sel_idx] : nullptr;
     if (x && x->used && core()) s_core->houndPoint(x->r.lat, x->r.lon, x->r.title);
@@ -1089,8 +1351,6 @@ void teamOnChannelData(int idx, const uint8_t* data, size_t len) {
 
 // Called by MyMesh for every channel text message: a report with a position on
 // a watched channel goes on the map.
-// MeshCore TEAM's channel text (MESHCORE_TEAM.md): true when it is, so it isn't
-// shown as chat; on the team channel it becomes members, pins and routes.
 // Back-track (BACKTRACK.md): follow a recorded track back to its start.
 bool teamFollowTrack(const int32_t* lat5, const int32_t* lon5, int n, const char* label) {
   using namespace teamui;
@@ -1100,6 +1360,144 @@ bool teamFollowTrack(const int32_t* lat5, const int32_t* lon5, int n, const char
   return true;
 }
 
+// The map's "On map" list, first tab: teammates, team pins, watched reports and
+// pins shared in chats, nearest first (or newest, without a position of our
+// own). A tap centres the map there. Returns how many rows it added.
+struct OnMapRow { double lat, lon; uint32_t age_s; double dist_km; uint32_t color; char name[40]; char kind[40]; };
+static OnMapRow* s_onmap = nullptr;
+static constexpr int kOnMapMax = 96;
+
+int teamOnMapFill(lv_obj_t* list, lv_coord_t rw, double self_lat, double self_lon) {
+  using namespace teamui;
+  if (!s_onmap) s_onmap = (OnMapRow*)psAlloc(sizeof(OnMapRow) * kOnMapMax);
+  if (!s_onmap || !list) return 0;
+  const bool fix = self_lat != 0.0 || self_lon != 0.0;
+  const uint32_t now = millis();
+  const uint32_t epoch = s_io.epoch();
+  int n = 0;
+  auto add = [&](double lat, double lon, uint32_t age_s, uint32_t color, const char* name, const char* kind) {
+    if (n >= kOnMapMax || (lat == 0.0 && lon == 0.0)) return;
+    OnMapRow& r = s_onmap[n++];
+    r.lat = lat;
+    r.lon = lon;
+    r.age_s = age_s;
+    r.dist_km = fix ? TeamWire::distanceM(self_lat, self_lon, lat, lon) / 1000.0 : -1;
+    r.color = color;
+    snprintf(r.name, sizeof r.name, "%s", name && *name ? name : "?");
+    snprintf(r.kind, sizeof r.kind, "%s", kind);
+  };
+  if (team::Core* c = s_core) {
+    for (int i = 0; i < team::kMaxMembers; i++) {
+      team::Member* m = c->member(i);
+      if (!m) continue;
+      char kind[40];
+      c->roleName(m->pos.role, kind, sizeof kind);
+      if (m->pos.sos) snprintf(kind + strlen(kind), sizeof kind - strlen(kind), " \xC2\xB7 SOS");
+      add(m->pos.lat, m->pos.lon, (now - m->heard_ms) / 1000, TeamWire::colorRgb(m->pos.color), m->pos.callsign,
+          kind);
+    }
+    for (int i = 0; i < team::kMaxMarkers; i++) {
+      const TeamWire::Marker* m = c->marker(i);
+      if (!m) continue;
+      const uint32_t age = epoch && m->time && m->time < epoch ? epoch - m->time : 0;
+      add(m->lat, m->lon, age, TeamWire::kindRgb(m->kind), m->label[0] ? m->label : TeamWire::kindName(m->kind),
+          TeamWire::kindName(m->kind));
+    }
+  }
+  if (watchfeed::Store* w = s_watch) {
+    for (int i = 0; i < watchfeed::kMaxItems; i++) {
+      const watchfeed::Item& it = w->items[i];
+      if (!w->live(it, now)) continue;
+      char name[64];
+      if (it.r.track[0]) watchfeed::droneLabel(it.r, it.has_course, it.course, name, sizeof name);
+      else snprintf(name, sizeof name, "%s", it.r.title);
+      add(it.r.lat, it.r.lon, (now - it.at_ms) / 1000, watchfeed::levelRgb(it.r.level), name, channelName(it.channel));
+    }
+  }
+  if (g_lv.task) {
+    const sharedpins::Pin* pins = nullptr;
+    const int k = g_lv.task->sharedPins(&pins);
+    for (int i = 0; pins && i < k; i++) {
+      const sharedpins::Pin& p = pins[i];
+      char kind[48];
+      snprintf(kind, sizeof kind, "%s %s", TR("Shared in"), p.thread);
+      const uint32_t age = epoch && p.ts && p.ts < epoch ? epoch - p.ts : 0;
+      add(p.lat, p.lon, age, 0x7C3AED, p.label[0] ? p.label : p.from, kind);
+    }
+  }
+  // Nearest first; without a position, newest first.
+  for (int i = 1; i < n; i++)
+    for (int j = i; j > 0; j--) {
+      const OnMapRow& a = s_onmap[j];
+      const OnMapRow& b = s_onmap[j - 1];
+      const bool before = fix ? a.dist_km < b.dist_km : a.age_s < b.age_s;
+      if (!before) break;
+      const OnMapRow t = s_onmap[j];
+      s_onmap[j] = s_onmap[j - 1];
+      s_onmap[j - 1] = t;
+    }
+  for (int i = 0; i < n; i++) {
+    const OnMapRow& r = s_onmap[i];
+    lv_obj_t* b = lv_btn_create(list);
+    lv_obj_set_size(b, rw, 46);
+    styleButton(b);
+    lv_obj_set_style_bg_color(b, lv_color_hex(COLOR_CONTROL), LV_PART_MAIN);
+    lv_obj_set_style_pad_all(b, 0, LV_PART_MAIN);
+    lv_obj_set_style_border_side(b, LV_BORDER_SIDE_LEFT, LV_PART_MAIN);
+    lv_obj_set_style_border_width(b, 4, LV_PART_MAIN);
+    lv_obj_set_style_border_color(b, lv_color_hex(r.color), LV_PART_MAIN);
+    lv_obj_add_event_cb(b, [](lv_event_t* e) {
+      if (lv_event_get_code(e) != LV_EVENT_CLICKED || !s_onmap) return;
+      const OnMapRow& x = s_onmap[(int)(intptr_t)lv_event_get_user_data(e)];
+      const double la = x.lat, lo = x.lon;
+      lv_indev_t* a = lv_indev_get_act();
+      if (a) lv_indev_wait_release(a);
+      closeMapContacts();
+      s_map_center_lat = la;
+      s_map_center_lon = lo;
+      s_map_view_inited = true;
+      if (s_map_zoom < 14) s_map_zoom = 14;
+      renderMapTiles();
+      renderMapMarkers();
+      refreshMapInfoLabel();
+    }, LV_EVENT_CLICKED, (void*)(intptr_t)i);
+    lv_obj_t* nl = lv_label_create(b);
+    lv_label_set_text(nl, r.name);
+    lv_label_set_long_mode(nl, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(nl, rw - 96);
+    lv_obj_set_height(nl, lv_font_get_line_height(&g_font_14));
+    lv_obj_set_style_text_font(nl, &g_font_14, LV_PART_MAIN);
+    lv_obj_set_style_text_color(nl, lv_color_hex(COLOR_TEXT), LV_PART_MAIN);
+    useChainedFont(nl);
+    lv_obj_align(nl, LV_ALIGN_TOP_LEFT, 8, 5);
+    char dist[16] = "", age[12], meta[32];
+    if (r.dist_km >= 0) {
+      if (r.dist_km < 1) snprintf(dist, sizeof dist, "%d m", (int)(r.dist_km * 1000));
+      else snprintf(dist, sizeof dist, "%.1f km", r.dist_km);
+    }
+    formatAgeBadge(age, sizeof age, r.age_s);
+    if (dist[0]) snprintf(meta, sizeof meta, "%s \xC2\xB7 %s", dist, age);
+    else snprintf(meta, sizeof meta, "%s", age);
+    lv_obj_t* ml = lv_label_create(b);
+    lv_label_set_text(ml, meta);
+    lv_obj_set_style_text_font(ml, &g_font_12, LV_PART_MAIN);
+    lv_obj_set_style_text_color(ml, lv_color_hex(COLOR_SUB), LV_PART_MAIN);
+    lv_obj_align(ml, LV_ALIGN_TOP_RIGHT, -8, 6);
+    lv_obj_t* kl = lv_label_create(b);
+    lv_label_set_text(kl, r.kind);
+    lv_label_set_long_mode(kl, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(kl, rw - 16);
+    lv_obj_set_height(kl, lv_font_get_line_height(&g_font_12));
+    lv_obj_set_style_text_font(kl, &g_font_12, LV_PART_MAIN);
+    lv_obj_set_style_text_color(kl, lv_color_hex(COLOR_SUB), LV_PART_MAIN);
+    useChainedFont(kl);
+    lv_obj_align(kl, LV_ALIGN_BOTTOM_LEFT, 8, -4);
+  }
+  return n;
+}
+
+// MeshCore TEAM's channel text (MESHCORE_TEAM.md): true when it is, so it isn't
+// shown as chat; on the team channel it becomes members, pins and routes.
 bool teamCompatOnChannelText(int idx, const char* text) {
   using namespace teamui;
   if (idx < 0 || !text) return false;
@@ -1112,15 +1510,67 @@ bool teamCompatOnChannelText(int idx, const char* text) {
   return c ? c->onText(cd.name, sender, body) : true;
 }
 
+// Teammates whose beacons said they heard one of our channel messages
+// (MESSAGE_REACH.md), for the message's info and its map. Our stored time can
+// be a second or two off the one that went on the air, so nearby ones count too.
+int teamHeardBy(uint32_t ts, const char* text, char (*names)[21], double* lat, double* lon, int cap) {
+  using namespace teamui;
+  team::Core* c = s_core;
+  if (!c || !c->active() || !text) return 0;
+  const char* me = the_mesh.getNodePrefs()->node_name;
+  int n = 0;
+  for (int dt = -2; dt <= 2; dt++) {
+    uint8_t keys[8][4];
+    const int k = c->heardBy(quickreply::reportHash(ts + dt, me && *me ? me : "me", text), keys, nullptr, 8);
+    for (int i = 0; i < k && n < cap; i++) {
+      for (int j = 0; j < team::kMaxMembers; j++) {
+        team::Member* m = c->member(j);
+        if (!m || memcmp(m->pos.key4, keys[i], 4)) continue;
+        bool dup = false;
+        for (int q = 0; q < n && !dup; q++) dup = !strcmp(names[q], m->pos.callsign[0] ? m->pos.callsign : "?");
+        if (dup) break;
+        snprintf(names[n], 21, "%s", m->pos.callsign[0] ? m->pos.callsign : "?");
+        if (lat) lat[n] = m->pos.lat;
+        if (lon) lon[n] = m->pos.lon;
+        n++;
+        break;
+      }
+    }
+  }
+  return n;
+}
+
+bool teamReachActive() { return teamui::s_core && teamui::s_core->active(); }
+
 void teamOnChannelText(int idx, const char* text, uint32_t sent) {
   using namespace teamui;
   if (idx < 0 || !text) return;
-  watchfeed::Store* w = watch();
   ChannelDetails cd;
-  if (!w || !w->watchedCount() || !the_mesh.getChannel(idx, cd) || !w->isWatched(cd.name)) return;
+  if (!the_mesh.getChannel(idx, cd)) return;
+  {   // a teammate's message: say we heard it in our next beacon (MESSAGE_REACH.md)
+    char who[40];
+    const char* b = watchfeed::messageText(text, who, sizeof who);
+    if (s_core && who[0]) s_core->noteChannelText(cd.name, who, sent, b);
+  }
+  watchfeed::Store* w = watch();
+  if (!w || !w->watchedCount() || !w->isWatched(cd.name)) return;
   watchfeed::Report r;
   char sender[40];
-  if (!watchfeed::parse(watchfeed::messageText(text, sender, sizeof sender), r)) return;
+  const char* body = watchfeed::messageText(text, sender, sizeof sender);
+#if CAP_TAK_EXTRAS
+  // A quick reply belongs to the report it answers ("On my way ↩3fa1").
+  quickreply::Parsed qp;
+  if (quickreply::parseWatch(body, qp)) {
+    if (quickreply::Book* bk = book()) {
+      char ref[28];
+      quickreply::refWatch((uint8_t)idx, qp.hash, ref, sizeof ref);
+      bk->add(ref, sender[0] ? sender : "?", qp.code, qp.arg, qp.said, millis(), false);
+      s_io.changed();
+    }
+    return;
+  }
+#endif
+  if (!watchfeed::parse(body, r)) return;
   if (!r.track[0] && !r.quake_m10 && watchfeed::isIce(cd.name, sender)) watchfeed::tagIce(r);
   // When it happened: the sender's time if both clocks are plausible (a
   // report that waited in the mesh is older), else now.
@@ -1130,7 +1580,10 @@ void teamOnChannelText(int idx, const char* text, uint32_t sent) {
     const uint32_t age_ms = (now_epoch - sent) > 4000000UL ? 4000000000UL : (now_epoch - sent) * 1000UL;
     at = age_ms < at ? at - age_ms : 0;
   }
-  if (w->add(r, (uint8_t)idx, at)) s_io.changed();
+  if (watchfeed::Item* it = w->add(r, (uint8_t)idx, at)) {
+    it->reply_hash = quickreply::reportHash(sent, sender, body);
+    s_io.changed();
+  }
 }
 
 namespace teamui {
@@ -1209,6 +1662,23 @@ static void buildTeam(lv_obj_t* b) {
   lv_obj_set_style_text_color(sl, lv_color_white(), LV_PART_MAIN);
   useChainedFont(sl);
   lv_obj_center(sl);
+#if CAP_TAK_EXTRAS
+  if (c->sosActive()) {   // the team's answers to our SOS
+    char ref[28];
+    uint8_t me[4];
+    s_io.selfKey4(me);
+    quickreply::refTeam(TeamWire::kRefAlert, me, c->ownAlert().id, ref, sizeof ref);
+    if (quickreply::Book* bk = book()) {
+      const quickreply::Entry* a[6];
+      const int k = bk->answers(ref, a, 6);
+      for (int i = 0; i < k; i++) {
+        quickreply::line(*a[i], line, sizeof line);
+        lbl(b, line, &g_font_14, 0xFFCDD2);
+      }
+      if (!k) lbl(b, TR("No answers yet."), &g_font_12, COLOR_SUB);
+    }
+  }
+#endif
   // active alerts first
   for (int i = 0; i < team::kMaxAlerts; i++) {
     team::AlertRec* r = c->alert(i);
@@ -1793,8 +2263,11 @@ static void pageOpen() {
 static void loopTick() {
   team::Core* c = core();
   if (!c) return;
-  c->tick();
   const uint32_t now = millis();
+  // Four times a second is plenty for beacons, alert repeats and route cues;
+  // every pass of the UI loop read the GPS (and its motion) for nothing.
+  static uint32_t last_core = 0;
+  if (now - last_core >= 250) { last_core = now; c->tick(); }
   static uint32_t map_seen = 0, last_map = 0;
   if (Io::s_version != map_seen && now - last_map > 1500) {
     map_seen = Io::s_version;
@@ -1828,6 +2301,15 @@ static void loopTick() {
   }
   static uint32_t last_hound = 0;
   if (now - last_hound >= 1000) { last_hound = now; houndRefresh(); }
+#if CAP_TAK_EXTRAS
+  // A teammate answered our alert, report or pin.
+  if (s_reply_toast_pending) {
+    s_reply_toast_pending = false;
+    toast(s_reply_toast, 3000);
+    if (g_lv.task && !g_lv.task->isBuzzerQuiet()) uiPlaySlot(TOUCH_SND_MEN);
+    if (s_root) pageBuild();
+  }
+#endif
 }
 
 }  // namespace teamui
