@@ -44705,7 +44705,10 @@ static int s_talk_wave_next = 0;
 static volatile uint32_t s_talk_wave_ver = 0;   // bumped when one is ready: the chat repaints
 static volatile bool s_talk_wave_busy = false;
 
-#if VOX_CODEC2_AVAILABLE
+// Only where clips can play (CAP_LUA_AUDIO): elsewhere Codec2's decoder isn't
+// linked at all, and a waveform isn't worth its ~58 KB of flash (ThinkNode M9).
+#define TALK_WAVES (VOX_CODEC2_AVAILABLE && CAP_LUA_AUDIO)
+#if TALK_WAVES
 static void talkWaveTask(void* arg) {
   TalkWave* w = static_cast<TalkWave*>(arg);
   int mode = 0;
@@ -44733,7 +44736,7 @@ static const uint8_t* talkWaveFor(uint32_t sid) {
     if (w.sid != sid) continue;
     return __atomic_load_n(&w.state, __ATOMIC_ACQUIRE) == 2 ? w.bars : nullptr;
   }
-#if VOX_CODEC2_AVAILABLE
+#if TALK_WAVES
   if (s_talk_wave_busy || !VoxPhotos::haveVoice(sid)) return nullptr;
   TalkWave& w = s_talk_waves[s_talk_wave_next];
   if (__atomic_load_n(&w.state, __ATOMIC_ACQUIRE) == 1) return nullptr;   // still working on the old one
@@ -44752,7 +44755,7 @@ static const uint8_t* talkWaveFor(uint32_t sid) {
 
 // Spaces as wide as the waveform: the bubble's line for it, so the bubble is
 // measured with room for it (chatTalkWaveDrawCb draws over them).
-static const char* talkWaveSpaces() {
+[[maybe_unused]] static const char* talkWaveSpaces() {
   static char buf[72];
   const lv_font_t* font = chatMessageFont();
   const lv_coord_t sw = LV_MAX((lv_coord_t)1, (lv_coord_t)lv_font_get_glyph_width(font, ' ', ' '));
@@ -44879,10 +44882,17 @@ static void chatParseMessageDisplay(const UITask::UIMessage& m, bool channel_mod
       const char* via = strchr(st, '\n');
       const int first = via ? (int)(via - st) : (int)strlen(st);
       const bool voice_word = first > 6 && !strncmp(st, "Voice ", 6);
+#if TALK_WAVES
       snprintf(vox_line, sizeof vox_line, "%s  %s%s%.*s\n%s%s", LV_SYMBOL_AUDIO, TR("Talk"),
                voice_word ? " " : " - ", voice_word ? first - 6 : first, voice_word ? st + 6 : st,
                talkWaveSpaces(), via ? via : "");
       d.talk_sid = vox_env.sid;
+#else
+      // No waveform here (no speaker): no line for it.
+      snprintf(vox_line, sizeof vox_line, "%s  %s%s%.*s%s", LV_SYMBOL_AUDIO, TR("Talk"),
+               voice_word ? " " : " - ", voice_word ? first - 6 : first, voice_word ? st + 6 : st,
+               via ? via : "");
+#endif
     } else {
       snprintf(vox_line, sizeof vox_line, "%s  %s%s%.*s",
                vox_env.kind == VoxWire::kImage ? LV_SYMBOL_IMAGE : LV_SYMBOL_AUDIO, st,
