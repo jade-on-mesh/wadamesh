@@ -413,6 +413,7 @@ void Core::onPayload(const char* channel, const uint8_t* p, size_t n) {
     case TeamWire::kMarker: { TeamWire::Marker x; if (TeamWire::parse(p, n, x)) onMarker(x); break; }
     case TeamWire::kRole: { TeamWire::RoleDef x; if (TeamWire::parse(p, n, x)) onRoleDef(x); break; }
     case TeamWire::kShape: onShape(p, n); break;
+    case TeamWire::kReply: { TeamWire::Reply x; if (TeamWire::parse(p, n, x)) io_->reply(x); break; }
     default: break;   // reports: not on this radio yet
   }
 }
@@ -443,6 +444,21 @@ int Core::memberCount() const {
   int n = 0;
   for (auto& m : members_) if (m.used) n++;
   return n;
+}
+
+bool Core::sendReply(uint8_t ref, const uint8_t to4[4], uint32_t ref_id, uint8_t code, uint8_t arg) {
+  if (!active()) return false;
+  TeamWire::Reply r;
+  io_->selfKey4(r.key4);
+  memcpy(r.to4, to4, 4);
+  r.ref = ref;
+  r.ref_id = ref_id;
+  r.code = code;
+  r.arg = arg;
+  snprintf(r.callsign, sizeof r.callsign, "%s", callsign());
+  uint8_t buf[TeamWire::kMaxPayload];
+  const size_t n = TeamWire::encode(r, buf, sizeof buf);
+  return n && sendRaw(buf, n);
 }
 
 void Core::onAlert(const TeamWire::Alert& a) {
