@@ -508,7 +508,7 @@ static uint32_t onColor(uint32_t rgb) {
   return 0.2126f * r + 0.7152f * g + 0.0722f * b > 0.5f ? 0x000000 : 0xFFFFFF;
 }
 
-static void mapLabel(lv_obj_t* parent, int sx, int sy, const char* text, uint32_t color) {
+static void mapLabelNow(lv_obj_t* parent, int sx, int sy, const char* text, uint32_t color) {
   lv_obj_t* l = lv_label_create(parent);
   lv_label_set_text(l, text);
   lv_obj_set_style_text_font(l, &g_font_12, LV_PART_MAIN);
@@ -520,6 +520,59 @@ static void mapLabel(lv_obj_t* parent, int sx, int sy, const char* text, uint32_
   lv_obj_set_pos(l, sx + 9, sy - 8);
   lv_obj_clear_flag(l, LV_OBJ_FLAG_CLICKABLE);
   mapTrack(l);
+}
+
+// Labels go up after every point is drawn, most important first, and a label
+// that would cover one already placed is left out: zoomed out, points keep
+// their names ("ICE Kent Pacific Hwy S") until there are too many to read.
+// prio: 0 teammates, 1 drones and quakes, 2 watched reports, 3 pins,
+// 4 routes and drone operators. Within one, newer first (`order`).
+struct PendingLabel { int16_t x, y; uint8_t prio; uint32_t color, order; char text[64]; };
+static constexpr int kMaxLabels = 96;
+static auto& s_lbls = psramStatic<PendingLabel[kMaxLabels]>();
+static int s_lbl_n = 0;
+
+static void mapLabel(lv_obj_t*, int sx, int sy, const char* text, uint32_t color, uint8_t prio = 3,
+                     uint32_t order = 0) {
+  if (!text || !*text || s_lbl_n >= kMaxLabels) return;
+  if (sx < -40 || sx > k_map_canvas_w || sy < -10 || sy > k_map_canvas_h + 10) return;
+  PendingLabel& l = s_lbls[s_lbl_n++];
+  l.x = (int16_t)sx;
+  l.y = (int16_t)sy;
+  l.prio = prio;
+  l.color = color;
+  l.order = order;
+  snprintf(l.text, sizeof l.text, "%s", text);
+}
+
+static void mapLabelsPlace(lv_obj_t* parent) {
+  int idx[kMaxLabels];
+  for (int i = 0; i < s_lbl_n; i++) idx[i] = i;
+  for (int i = 1; i < s_lbl_n; i++)   // by priority, then newest
+    for (int j = i; j > 0; j--) {
+      const PendingLabel& a = s_lbls[idx[j]];
+      const PendingLabel& b = s_lbls[idx[j - 1]];
+      if (a.prio > b.prio || (a.prio == b.prio && a.order <= b.order)) break;
+      const int t = idx[j]; idx[j] = idx[j - 1]; idx[j - 1] = t;
+    }
+  lv_area_t placed[kMaxLabels];
+  int n = 0;
+  for (int k = 0; k < s_lbl_n; k++) {
+    const PendingLabel& l = s_lbls[idx[k]];
+    lv_point_t sz;
+    lv_txt_get_size(&sz, l.text, &g_font_12, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+    lv_area_t a;
+    a.x1 = (lv_coord_t)(l.x + 9 - 2);
+    a.y1 = (lv_coord_t)(l.y - 8 - 1);
+    a.x2 = (lv_coord_t)(a.x1 + sz.x + 4 + 2);
+    a.y2 = (lv_coord_t)(a.y1 + sz.y + 2);
+    bool clash = false;
+    for (int q = 0; q < n && !clash; q++) clash = _lv_area_is_on(&a, &placed[q]);
+    if (clash) continue;
+    placed[n++] = a;
+    mapLabelNow(parent, l.x, l.y, l.text, l.color);
+  }
+  s_lbl_n = 0;
 }
 
 // A new point's highlight: a ring in [rgb] that flashes (its border fades
@@ -660,9 +713,9 @@ static void drawRoutes(lv_obj_t* parent, double cwx, double cwy) {
     lv_obj_set_pos(l, 0, 0);
     lv_obj_clear_flag(l, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
     mapTrack(l);
-    if (sh.label[0] && s_map_zoom >= 12 && pts[0].x > -12 && pts[0].x < k_map_canvas_w && pts[0].y > -12 &&
+    if (sh.label[0] && pts[0].x > -12 && pts[0].x < k_map_canvas_w && pts[0].y > -12 &&
         pts[0].y < k_map_canvas_h)
-      mapLabel(parent, pts[0].x, pts[0].y, sh.label, 0xFFFFFF);
+      mapLabel(parent, pts[0].x, pts[0].y, sh.label, 0xFFFFFF, 4);
   }
 }
 
@@ -703,7 +756,7 @@ static void teamDrawMapOverlay(lv_obj_t* parent, double cwx, double cwy) {
         mapIcon(op_dot, mapicons::kPerson, 0x000000);
         char op[24];
         snprintf(op, sizeof op, "%s %.8s", it.r.label2[0] ? it.r.label2 : "Op", it.r.title + 6);
-        if (s_map_zoom >= 12) mapLabel(parent, sx, sy, op, 0xC8CCD0);
+        mapLabel(parent, sx, sy, op, 0xC8CCD0, 4, it.at_ms);
         if (s_hit_n < kMapObjs) s_hits[s_hit_n++] = {(int16_t)sx, (int16_t)sy, 2, (uint8_t)i};
       }
       if (!toScreen(it.r.lat, it.r.lon, cwx, cwy, &sx, &sy)) continue;
@@ -717,7 +770,7 @@ static void teamDrawMapOverlay(lv_obj_t* parent, double cwx, double cwy) {
                 it.r.has_bearing ? it.r.bearing : it.has_course ? it.course : 0);
         char lbl[64];
         watchfeed::droneLabel(it.r, it.has_course, it.course, lbl, sizeof lbl);
-        mapLabel(parent, sx, sy, lbl, 0xFFCC80);
+        mapLabel(parent, sx, sy, lbl, 0xFFCC80, 1, it.at_ms);
       } else if (it.r.quake_m10) {
         // An earthquake: a ring that grows with the magnitude, always labelled.
         const int m = it.r.quake_m10 < 20 ? 0 : it.r.quake_m10 > 80 ? 60 : it.r.quake_m10 - 20;
@@ -725,10 +778,10 @@ static void teamDrawMapOverlay(lv_obj_t* parent, double cwx, double cwy) {
                              LV_RADIUS_CIRCLE, LV_OPA_50);
         lv_obj_set_style_border_width(d, 3, LV_PART_MAIN);
         mapIcon(d, mapicons::kWaves, 0x000000);
-        mapLabel(parent, sx, sy, it.r.title, 0xFFFFFF);
+        mapLabel(parent, sx, sy, it.r.title, 0xFFFFFF, 1, it.at_ms);
       } else {
         mapDot(parent, sx, sy, 14, watchfeed::levelRgb(it.r.level), 0x101418, LV_RADIUS_CIRCLE, LV_OPA_COVER);
-        if (it.r.title[0] && s_map_zoom >= 13) mapLabel(parent, sx, sy, it.r.title, 0xFFFFFF);
+        mapLabel(parent, sx, sy, it.r.title, 0xFFFFFF, 2, it.at_ms);
       }
       if (s_hit_n < kMapObjs) s_hits[s_hit_n++] = {(int16_t)sx, (int16_t)sy, 2, (uint8_t)i};
     }
@@ -749,7 +802,7 @@ static void teamDrawMapOverlay(lv_obj_t* parent, double cwx, double cwy) {
     }
   }
   team::Core* c = s_core;
-  if (!c || !c->cfg.enabled) return;
+  if (!c || !c->cfg.enabled) { mapLabelsPlace(parent); return; }
   for (int i = 0; i < team::kMaxMarkers; i++) {
     const TeamWire::Marker* m = c->marker(i);
     if (!m || !toScreen(m->lat, m->lon, cwx, cwy, &sx, &sy)) continue;
@@ -759,7 +812,7 @@ static void teamDrawMapOverlay(lv_obj_t* parent, double cwx, double cwy) {
     const uint32_t kc = TeamWire::kindRgb(m->kind);
     lv_obj_t* d = mapDot(parent, sx, sy, 22, 0x101418, kc, 5, LV_OPA_COVER);
     mapIcon(d, mapicons::markerKind(m->kind), kc);
-    if (m->label[0] && s_map_zoom >= 13) mapLabel(parent, sx, sy, m->label, 0xFFFFFF);
+    mapLabel(parent, sx, sy, m->label, 0xFFFFFF, 3, m->time);
     if (s_hit_n < kMapObjs) s_hits[s_hit_n++] = {(int16_t)sx, (int16_t)sy, 1, (uint8_t)i};
   }
   for (int i = 0; i < team::kMaxMembers; i++) {
@@ -793,9 +846,11 @@ static void teamDrawMapOverlay(lv_obj_t* parent, double cwx, double cwy) {
       lv_obj_set_style_text_color(l, lv_color_hex(onColor(mc)), LV_PART_MAIN);
       lv_obj_center(l);
     }
-    mapLabel(parent, sx, sy, m->pos.callsign[0] ? m->pos.callsign : "?", fr == team::Fresh::Live ? 0xFFFFFF : 0x9AA0A6);
+    mapLabel(parent, sx, sy, m->pos.callsign[0] ? m->pos.callsign : "?", fr == team::Fresh::Live ? 0xFFFFFF : 0x9AA0A6,
+             0, m->heard_ms);
     if (s_hit_n < kMapObjs) s_hits[s_hit_n++] = {(int16_t)sx, (int16_t)sy, 0, (uint8_t)i};
   }
+  mapLabelsPlace(parent);
 }
 static void teamFreeMapOverlay() { teamui::mapFree(); }
 
