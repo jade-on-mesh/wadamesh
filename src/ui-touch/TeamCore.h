@@ -9,6 +9,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "QuickReply.h"
 #include "TeamCompat.h"
 #include "TeamRoute.h"
 #include "TeamWire.h"
@@ -142,6 +143,16 @@ class Core {
   void raiseAlert(uint8_t type, const char* note);
   // A quick reply to a teammate's alert, report or pin (TeamWire::Reply).
   bool sendReply(uint8_t ref, const uint8_t to4[4], uint32_t ref_id, uint8_t code, uint8_t arg);
+  // Who heard what (MESSAGE_REACH.md): every channel text heard; a teammate's
+  // goes into the next beacon, sent 15-45 s later.
+  void noteChannelText(const char* channel, const char* sender, uint32_t sent, const char* body);
+  // Teammates whose beacons say they heard the message with this reaction hash.
+  int heardBy(uint16_t msg, uint8_t (*keys)[4], uint32_t* ms, int cap) const;
+  static uint16_t nameHash(const char* name) {
+    quickreply::DartHash d;
+    d.utf8(name ? name : "");
+    return (uint16_t)(d.done() & 0xFFFF);
+  }
   void cancelAlert();
 
   // pins
@@ -194,6 +205,15 @@ class Core {
 
   bool force_beacon_ = false;
   bool beaconed_ = false;
+  // Who heard what: the last teammates' messages heard (for our beacons) and
+  // what teammates' beacons said they heard.
+  uint16_t heard_recent_[4] = {0};
+  uint8_t heard_recent_n_ = 0;
+  uint32_t heard_beacon_due_ms_ = 0;     // 0: none due
+  uint32_t heard_beacon_last_ms_ = 0;
+  bool heard_beaconed_ = false;
+  struct HeardRec { bool used; uint16_t msg; uint8_t key4[4]; uint32_t ms; };
+  HeardRec heard_by_[48] = {};
   uint32_t last_beacon_ms_ = 0;
   Fix last_fix_;
 

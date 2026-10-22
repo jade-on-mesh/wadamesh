@@ -1310,12 +1310,50 @@ bool teamCompatOnChannelText(int idx, const char* text) {
   return c ? c->onText(cd.name, sender, body) : true;
 }
 
+// Teammates whose beacons said they heard one of our channel messages
+// (MESSAGE_REACH.md), for the message's info and its map. Our stored time can
+// be a second or two off the one that went on the air, so nearby ones count too.
+int teamHeardBy(uint32_t ts, const char* text, char (*names)[21], double* lat, double* lon, int cap) {
+  using namespace teamui;
+  team::Core* c = s_core;
+  if (!c || !c->active() || !text) return 0;
+  const char* me = the_mesh.getNodePrefs()->node_name;
+  int n = 0;
+  for (int dt = -2; dt <= 2; dt++) {
+    uint8_t keys[8][4];
+    const int k = c->heardBy(quickreply::reportHash(ts + dt, me && *me ? me : "me", text), keys, nullptr, 8);
+    for (int i = 0; i < k && n < cap; i++) {
+      for (int j = 0; j < team::kMaxMembers; j++) {
+        team::Member* m = c->member(j);
+        if (!m || memcmp(m->pos.key4, keys[i], 4)) continue;
+        bool dup = false;
+        for (int q = 0; q < n && !dup; q++) dup = !strcmp(names[q], m->pos.callsign[0] ? m->pos.callsign : "?");
+        if (dup) break;
+        snprintf(names[n], 21, "%s", m->pos.callsign[0] ? m->pos.callsign : "?");
+        if (lat) lat[n] = m->pos.lat;
+        if (lon) lon[n] = m->pos.lon;
+        n++;
+        break;
+      }
+    }
+  }
+  return n;
+}
+
+bool teamReachActive() { return teamui::s_core && teamui::s_core->active(); }
+
 void teamOnChannelText(int idx, const char* text, uint32_t sent) {
   using namespace teamui;
   if (idx < 0 || !text) return;
-  watchfeed::Store* w = watch();
   ChannelDetails cd;
-  if (!w || !w->watchedCount() || !the_mesh.getChannel(idx, cd) || !w->isWatched(cd.name)) return;
+  if (!the_mesh.getChannel(idx, cd)) return;
+  {   // a teammate's message: say we heard it in our next beacon (MESSAGE_REACH.md)
+    char who[40];
+    const char* b = watchfeed::messageText(text, who, sizeof who);
+    if (s_core && who[0]) s_core->noteChannelText(cd.name, who, sent, b);
+  }
+  watchfeed::Store* w = watch();
+  if (!w || !w->watchedCount() || !w->isWatched(cd.name)) return;
   watchfeed::Report r;
   char sender[40];
   const char* body = watchfeed::messageText(text, sender, sizeof sender);

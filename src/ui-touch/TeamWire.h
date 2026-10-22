@@ -28,6 +28,10 @@
 // high nibble; 15 and up write 15 there, set flag 0x20 and put the role id in
 // one byte after the callsign.
 //
+// Position flag 0x40 (who heard what, MESSAGE_REACH.md) adds, after that:
+// [nameHash u16 (the radio name's Dart string hash)][n u8 (0-4)][heard u16 x n
+// (reaction hashes of the last teammates' channel messages heard)].
+//
 // Host-tested against golden bytes that the app's own test checks too
 // (test/test_team_wire.cpp here, test/team/team_wire_golden_test.dart there).
 
@@ -111,6 +115,10 @@ struct Position {
   uint8_t role = 0, color = 0, status = 0;
   bool from_radio = false, sos = false, relayed = false;
   char callsign[kMaxCallsign + 1] = {0};
+  bool has_name_hash = false;   // flag 0x40
+  uint16_t name_hash = 0;
+  uint8_t heard_n = 0;
+  uint16_t heard[4] = {0};
 };
 
 struct RoleDef {
@@ -242,7 +250,7 @@ inline size_t encode(const Position& x, uint8_t* out, size_t cap) {
   const uint32_t rid = x.role > kMaxRoleId ? 0 : x.role;
   const bool ext = rid >= (uint32_t)kRoleEscape;
   w.u8((x.has_alt ? 0x01 : 0) | (x.has_motion ? 0x02 : 0) | (x.from_radio ? 0x04 : 0) | (x.sos ? 0x08 : 0) |
-       (x.relayed ? 0x10 : 0) | (ext ? 0x20 : 0));
+       (x.relayed ? 0x10 : 0) | (ext ? 0x20 : 0) | (x.has_name_hash ? 0x40 : 0));
   w.u32((uint32_t)deg7(x.lat));
   w.u32((uint32_t)deg7(x.lon));
   w.u16((uint16_t)(int16_t)(x.has_alt ? x.alt_m : 0));
@@ -256,6 +264,12 @@ inline size_t encode(const Position& x, uint8_t* out, size_t cap) {
   w.u8(x.status);
   w.str(x.callsign, kMaxCallsign);
   if (ext) w.u8(rid);
+  if (x.has_name_hash) {
+    const uint8_t k = x.heard_n > 4 ? 4 : x.heard_n;
+    w.u16(x.name_hash);
+    w.u8(k);
+    for (uint8_t i = 0; i < k; i++) w.u16(x.heard[i]);
+  }
   return w.ok ? w.n : 0;
 }
 
@@ -284,6 +298,15 @@ inline bool parse(const uint8_t* p, size_t n, Position& x) {
   x.role = (uint8_t)(rc >> 4);
   if (x.role == kRoleEscape) x.role = (flags & 0x20) && r.has(1) ? (uint8_t)r.u8() : 0;
   if (x.role > kMaxRoleId) x.role = 0;
+  x.has_name_hash = false;
+  x.heard_n = 0;
+  if ((flags & 0x40) && r.has(3)) {
+    x.has_name_hash = true;
+    x.name_hash = (uint16_t)r.u16();
+    uint32_t k = r.u8();
+    if (k > 4) k = 4;
+    for (uint32_t i = 0; i < k && r.has(2); i++) x.heard[x.heard_n++] = (uint16_t)r.u16();
+  }
   x.color = (uint8_t)(rc & 0x0F);
   if (x.color >= kColors) x.color = 0;
   x.from_radio = flags & 0x04;

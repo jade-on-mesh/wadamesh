@@ -459,7 +459,72 @@ static void routes() {
   }
 }
 
+// Who heard what (MESSAGE_REACH.md): position flag 0x40, golden bytes shared
+// with the app's test/team/message_reach_test.dart.
+static void reach() {
+  TeamWire::Position p;
+  key(p.key4, 0xa1b2c3d4);
+  p.lat = 47.6;
+  p.lon = -122.3;
+  snprintf(p.callsign, sizeof p.callsign, "Sam");
+  p.has_name_hash = true;
+  p.name_hash = 0x1234;
+  p.heard_n = 2;
+  p.heard[0] = 0x9aa8;
+  p.heard[1] = 0x477d;
+  uint8_t buf[TeamWire::kMaxPayload];
+  size_t n = TeamWire::encode(p, buf, sizeof buf);
+  CHECK(hex(buf, n) == "50a1b2c3d4401c5f2f00b71a80400000000000ff00000353616d1234029aa8477d");
+  TeamWire::Position b;
+  CHECK(TeamWire::parse(buf, n, b) && b.has_name_hash && b.name_hash == 0x1234 && b.heard_n == 2 &&
+        b.heard[1] == 0x477d);
+  p.role = 17;   // an added role: after its byte
+  n = TeamWire::encode(p, buf, sizeof buf);
+  CHECK(TeamWire::parse(buf, n, b) && b.role == 17 && b.name_hash == 0x1234 && b.heard_n == 2);
+  CHECK(team::Core::nameHash("Sam") == 0x415f && team::Core::nameHash("Jade T-Deck") == 0x2b34);
+
+  TestIo io;
+  team::Core c(&io);
+  c.begin();
+  io.f.lat = 47.6; io.f.lon = -122.3; io.f.gps = true;
+  c.cfg.enabled = true;
+  snprintf(c.cfg.channel, sizeof c.cfg.channel, "ops");
+  c.tick();
+  CHECK(io.sent.size() == 1);
+  // Sam's beacon: his name hash, and he heard our message 0xbeef.
+  TeamWire::Position sam;
+  key(sam.key4, 0x0a0b0c0d);
+  sam.lat = 47.61; sam.lon = -122.3;
+  snprintf(sam.callsign, sizeof sam.callsign, "Sam");
+  sam.has_name_hash = true;
+  sam.name_hash = team::Core::nameHash("Sam radio");
+  sam.heard_n = 1;
+  sam.heard[0] = 0xbeef;
+  n = TeamWire::encode(sam, buf, sizeof buf);
+  c.onPayload("ops", buf, n);
+  uint8_t keys[4][4];
+  CHECK(c.heardBy(0xbeef, keys, nullptr, 4) == 1 && keys[0][0] == 0x0a);
+  CHECK(c.heardBy(0x1111, nullptr, nullptr, 4) == 0);
+  // A stranger's message on #public: nothing.
+  c.noteChannelText("public", "Stranger", 1760000000, "hello");
+  for (int i = 0; i < 60; i++) { io.now += 1000; c.tick(); }
+  CHECK(io.sent.size() == 1);
+  // Sam's message on #public: in our next beacon, 15-45 s later.
+  c.noteChannelText("public", "Sam radio", 1760000000, "hi");
+  for (int i = 0; i < 46; i++) { io.now += 1000; c.tick(); }
+  CHECK(io.sent.size() == 2);
+  TeamWire::Position me;
+  CHECK(TeamWire::parse(io.sent[1].data(), io.sent[1].size(), me) && me.has_name_hash &&
+        me.name_hash == team::Core::nameHash("TDeck") && me.heard_n == 1 &&
+        me.heard[0] == quickreply::reportHash(1760000000, "Sam radio", "hi"));
+  // Another one soon after: remembered, but no extra beacon within 2 minutes.
+  c.noteChannelText("ops", "Lee", 1760000005, "copy");
+  for (int i = 0; i < 60; i++) { io.now += 1000; c.tick(); }
+  CHECK(io.sent.size() == 2);
+}
+
 int main() {
+  reach();
   routes();
   golden();
   core();
