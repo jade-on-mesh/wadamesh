@@ -57800,6 +57800,21 @@ enum AppDrawerAction {
 #include "OtpMessengerUI.inc"
 // Team (app drawer -> APPACT_TEAM): MeshCore Open TAK team awareness; rules in TeamCore.cpp.
 #include "TeamUI.inc"
+// Flock You, Drone Detector and Sound link used to switch themselves on the
+// first time their page opened, and stay on across reboots: each then runs all
+// the time (Wi-Fi/BLE scanning, or the mic decoder) and slows everything. Each
+// is switched off once on the first boot of this firmware; after that it only
+// runs when started by hand.
+#if defined(ESP32)
+__attribute__((unused)) static bool bgListenerResetOnce(const char* key) {
+  SdNvsPrefs p;
+  if (!p.begin("bgoff", false)) return false;
+  const bool first = !p.getBool(key, false);
+  if (first) p.putBool(key, true);
+  p.end();
+  return first;
+}
+#endif
 // Flock You (app drawer -> APPACT_FLOCK): Flock ALPR detection + known cameras; rules in FlockCore.h.
 #include "FlockYouUI.inc"
 // Drone Detector (app drawer -> APPACT_DRONE): Remote ID on Flock You's radios; glue in DroneCore.h.
