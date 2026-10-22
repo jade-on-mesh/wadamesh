@@ -80,6 +80,7 @@ static void loadCfg() {
     else if (!strcmp(line, "forward")) s_cfg.forward = atoi(v) != 0;
     else if (!strcmp(line, "play")) s_cfg.play = atoi(v) != 0;
   }
+  if (bgListenerResetOnce("sound") && s_cfg.listen) { s_cfg.listen = false; saveCfg(); }
 }
 
 static const char* myCallsign() {
@@ -836,10 +837,7 @@ static void pageOpen() {
   s_page_open = true;
   s_tab_i = 0;
   s_pick_channel = false;
-  // The first time in: start listening (it's what the tile is for).
-  static bool s_opened_once = false;
-  if (!s_opened_once && !s_cfg.listen) { s_cfg.listen = true; s_rx_retry_at = millis(); saveCfg(); }
-  s_opened_once = true;
+  // Not started by opening the page: listening decodes the mic all the time.
   pageBuild();
   s_page_timer = lv_timer_create([](lv_timer_t*) {
     static uint32_t seen = 0;
