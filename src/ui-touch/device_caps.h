@@ -328,10 +328,10 @@
   #endif
 #endif
 
-// MediaMesh coverage map (MEDIAMESH.md, "Coverage map"): needs a GPS. Not on the
-// ThinkNode M9, whose app slot is full. A board can opt in or out by defining it.
+// MediaMesh coverage map (MEDIAMESH.md, "Coverage map"): needs a GPS. A board can
+// opt in or out by defining it.
 #ifndef CAP_MM_COVERAGE
-  #if CAP_GPS && !defined(HAS_THINKNODE_M9)
+  #if CAP_GPS
     #define CAP_MM_COVERAGE 1
   #else
     #define CAP_MM_COVERAGE 0
@@ -339,10 +339,11 @@
 #endif
 
 // MeshCore Open TAK extras with screens of their own (quick replies, home
-// tiles, predictive text...): not on boards whose app slot is already full,
-// the ThinkNode M9 and the T-Display P4. A board can opt in or out by defining it.
+// tiles, predictive text...): not on the T-Display P4, whose app slot is full
+// (the ThinkNode M9 has room since its bigger slots). A board can opt in or out
+// by defining it.
 #ifndef CAP_TAK_EXTRAS
-  #if defined(HAS_THINKNODE_M9) || defined(HAS_TDISPLAY_P4)
+  #if defined(HAS_TDISPLAY_P4)
     #define CAP_TAK_EXTRAS 0
   #else
     #define CAP_TAK_EXTRAS 1
