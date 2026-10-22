@@ -1375,15 +1375,19 @@ static bool currentSetup(teamsetup::Setup& s) {
 }
 
 static void setupSummary(const teamsetup::Setup& s, char* out, size_t cap) {
+  // The firmware builds as C++11: no generic lambdas, so each part is its own snprintf.
   size_t n = 0;
-  auto add = [&](const char* fmt, auto... a) {
-    if (n >= cap) return;
-    const int w = snprintf(out + n, cap - n, fmt, a...);
-    if (w > 0) n += (size_t)w < cap - n ? (size_t)w : cap - n - 1;
-  };
-  add("%s %s", TR("Team channel:"), s.team.name);
-  for (int i = 0; i < s.nw; i++) add(i ? ", %s" : "\n%s %s", i ? s.watched[i].name : TR("Watch:"), s.watched[i].name);
-  if (s.has_mm) add("\n%s %.3f MHz, %g kHz, SF%u", TR("MediaMesh:"), s.khz / 1000.0, s.bw_hz / 1000.0, (unsigned)s.sf);
+  auto adv = [&](int w) { if (w > 0 && n < cap) n += (size_t)w < cap - n ? (size_t)w : cap - n - 1; };
+  if (!cap) return;
+  out[0] = 0;
+  adv(snprintf(out, cap, "%s %s", TR("Team channel:"), s.team.name));
+  for (int i = 0; i < s.nw && n + 1 < cap; i++) {
+    if (i) adv(snprintf(out + n, cap - n, ", %s", s.watched[i].name));
+    else adv(snprintf(out + n, cap - n, "\n%s %s", TR("Watch:"), s.watched[i].name));
+  }
+  if (s.has_mm && n + 1 < cap)
+    adv(snprintf(out + n, cap - n, "\n%s %.3f MHz, %g kHz, SF%u", TR("MediaMesh:"), s.khz / 1000.0, s.bw_hz / 1000.0,
+                 (unsigned)s.sf));
 }
 
 static char s_setup_link[teamsetup::kMaxLink + 1];
