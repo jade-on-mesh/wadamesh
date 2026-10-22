@@ -403,8 +403,24 @@ static void onChannelText(int idx, const char* text) {
 // ---- handling what was heard -------------------------------------------------------------------
 static bool s_page_open = false;
 
+static teamsetup::Assembler* s_team_parts = nullptr;   // a team setup played in parts (TEAM_SETUP.md)
+
 static void handleHeard(const char* s) {
   Serial.printf("[SOUND] heard %u bytes\n", (unsigned)strlen(s));
+  if (teamsetup::isPart(s)) {   // a team setup, whole or a part: asks to join once it's all here
+    if (!s_team_parts) s_team_parts = new (std::nothrow) teamsetup::Assembler();
+    teamsetup::Setup* st = new (std::nothrow) teamsetup::Setup();
+    if (s_team_parts && st && s_team_parts->accept(s, *st)) {
+      s_listen_until = 0;   // a short listen ends with what it was for
+      teamSetupHeard(*st);
+    } else if (s_team_parts) {
+      char t[64];
+      snprintf(t, sizeof t, TR("Team setup: heard %d of %d"), s_team_parts->got(), s_team_parts->of());
+      toast(t, 1500);
+    }
+    delete st;
+    return;
+  }
   Entry* e = newEntry();
   if (!e) return;
   uint8_t key[32];

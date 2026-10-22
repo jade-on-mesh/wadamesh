@@ -94,6 +94,8 @@ jobs:
         run: g++ -std=c++17 -Wall -Wextra -fsanitize=address,undefined -I src test/test_team_wire.cpp src/ui-touch/TeamCore.cpp -o /tmp/team_test && /tmp/team_test
       - name: MeshCore TEAM interop (host test, golden strings shared with Open TAK)
         run: g++ -std=c++17 -Wall -Wextra -fsanitize=address,undefined -I src test/test_team_compat.cpp src/ui-touch/TeamCore.cpp -o /tmp/team_compat && /tmp/team_compat
+      - name: One-scan team setup (host test, golden strings shared with Open TAK)
+        run: g++ -std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined -I src test/test_team_setup.cpp -o /tmp/team_setup && /tmp/team_setup
       - name: Watched channels on the map (host test)
         run: g++ -std=c++17 -Wall -I src test/test_watch_feed.cpp -o /tmp/watch_test && /tmp/watch_test
       - name: Flock You signatures, log, cameras, downloads and channel alerts (host test)

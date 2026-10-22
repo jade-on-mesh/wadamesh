@@ -66,6 +66,8 @@ E:<callsign>|AES:<base64(iv12|ct|tag16)>  AES-256-GCM, key = SHA-256(passkey)
 E:<callsign>|XOR:<base64>                 Wavest's fallback (read only)
 meshcore://channel/add?name=<name>&secret=<32 hex>
 meshcore://contact/add?name=<name>&public_key=<64 hex>&type=1
+meshcore://team/join?n=<team channel>&s=<32 hex>&...   a team setup (TEAM_SETUP.md)
+MCT:<id>:<i>/<n>:<piece>                                 one part of a longer team setup
 ```
 
 The audible protocols use tones from about 1.9 to 6.4 kHz. Ultrasound needs a
