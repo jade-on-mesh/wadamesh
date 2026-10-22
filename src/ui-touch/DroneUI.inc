@@ -32,8 +32,12 @@ struct Cfg {
   bool share = false;
   bool sound = true;
   bool scan900 = false;   // the 900 MHz control-link sweep (off unless turned on)
-  char channel[32] = "";
+  char channel[32] = "#dronewatch";   // kDefaultChannel until one is picked
 };
+
+// The alert channel to start with. A hashtag channel, so anyone can join it by
+// name; Setup offers to join it when this standalone hasn't.
+static const char kDefaultChannel[] = "#dronewatch";
 
 static Cfg s_cfg;
 static bool s_cfg_loaded = false;
@@ -61,7 +65,7 @@ static void loadCfg() {
   s_cfg.share = p.getBool("share", false);
   s_cfg.sound = p.getBool("sound", true);
   s_cfg.scan900 = p.getBool("s900", false);
-  snprintf(s_cfg.channel, sizeof s_cfg.channel, "%s", p.getString("channel", "").c_str());
+  snprintf(s_cfg.channel, sizeof s_cfg.channel, "%s", p.getString("channel", kDefaultChannel).c_str());
   p.end();
 }
 
@@ -99,6 +103,21 @@ static bool channelUsable(const char* name, int* idx_out) {
   if (idx < 0) return false;
   if (!strcasecmp(name, "public") || teamui::threadIsPublicChannel(name)) return false;
   if (idx_out) *idx_out = idx;
+  return true;
+}
+
+// Join the default hashtag channel in the first free slot, as Chats > Join
+// hashtag channel does (same key). False when the table is full.
+static bool joinDefaultChannel() {
+  char hashed[42];
+  uint8_t secret[16];
+  if (!deriveHashtagChannelKey(kDefaultChannel, hashed, sizeof hashed, secret)) return false;
+  const int slot = the_mesh.findFirstEmptyChannelSlot();
+  if (slot < 0 || !the_mesh.uiAddOrUpdateChannel(slot, hashed, secret)) return false;
+  if (g_lv.task) {
+    g_lv.task->refreshThreadsFromMesh();
+    g_lv.dirty_threads = true;
+  }
   return true;
 }
 
@@ -573,7 +592,7 @@ static void buildSetup(lv_obj_t* b) {
                   "Affects mesh reception while on."),
       &g_font_12, s_cfg.scan900 ? 0xF2A33A : COLOR_SUB);
 
-  lbl(b, TR("Alert channel (e.g. #dronewatch; never Public):"), &g_font_12, COLOR_SUB);
+  lbl(b, TR("Alert channel (#dronewatch unless you pick another; never Public):"), &g_font_12, COLOR_SUB);
   lv_obj_t* row = lv_obj_create(b);
   lv_obj_remove_style_all(row);
   lv_obj_set_size(row, LV_PCT(100), LV_SIZE_CONTENT);
@@ -604,9 +623,18 @@ static void buildSetup(lv_obj_t* b) {
     lv_obj_center(l);
     shown++;
   }
-  if (!shown)
+  if (!strcmp(s_cfg.channel, kDefaultChannel) && teamui::Io::channelIdx(kDefaultChannel) < 0) {
+    // The default isn't joined here yet: one tap joins it.
+    wideBtn(b, TR("Join #dronewatch"), [](lv_event_t*) {
+      if (!joinDefaultChannel()) { toast(TR("Channel table is full.")); return; }
+      s_share_err[0] = 0;
+      toast(TR("Channel joined"), 1200);
+      pageBuild();
+    });
+  } else if (!shown) {
     lbl(row, TR("No channel to post on. Add one in Chats first: a hashtag channel like #dronewatch, or a private one."),
         &g_font_12, 0xF2A33A);
+  }
   snprintf(line, sizeof line, "%s: %s", TR("Post drones there"), onoff(s_cfg.share));
   wideBtn(b, line, setupToggle, (void*)0, s_cfg.share ? 0x2E7D32 : 0);
   if (s_cfg.channel[0]) {
