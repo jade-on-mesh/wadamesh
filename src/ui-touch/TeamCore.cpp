@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "TeamCore.h"
+#include "device_caps.h"   // CAP_TAK_EXTRAS: who-heard-what is off where the app slot is full
 
 #include <new>
 
@@ -314,6 +315,12 @@ bool Core::sendPosition() {
   p.from_radio = true;
   p.sos = own_active_;
   snprintf(p.callsign, sizeof p.callsign, "%s", callsign());
+#if CAP_TAK_EXTRAS
+  p.has_name_hash = true;
+  p.name_hash = nameHash(io_->nodeName());
+  p.heard_n = heard_recent_n_;
+  for (uint8_t i = 0; i < heard_recent_n_; i++) p.heard[i] = heard_recent_[i];
+#endif
   uint8_t buf[TeamWire::kMaxPayload];
   const size_t n = TeamWire::encode(p, buf, sizeof buf);
   if (!sendRaw(buf, n)) return false;
@@ -394,6 +401,12 @@ void Core::tick() {
     turn = fmod(f.heading_deg - last_fix_.heading_deg + 540.0, 360.0) - 180.0;
   }
   const double moved = beaconed_ ? TeamWire::distanceM(last_fix_.lat, last_fix_.lon, f.lat, f.lon) : 0;
+  if (heard_beacon_due_ms_ && (int32_t)(now - heard_beacon_due_ms_) >= 0) {   // we heard a teammate: say so
+    heard_beacon_due_ms_ = 0;
+    heard_beacon_last_ms_ = now;
+    heard_beaconed_ = true;
+    force_beacon_ = true;
+  }
   bool send = force_beacon_ && (since < 0 || since >= 5);
   if (!send) send = TeamWire::shouldBeacon(since, moved, f.has_motion ? f.speed_mps : 0, turn);
   if (!send && own_active_ && since >= 60) send = true;
@@ -418,7 +431,63 @@ void Core::onPayload(const char* channel, const uint8_t* p, size_t n) {
   }
 }
 
+void Core::noteChannelText(const char* channel, const char* sender, uint32_t sent, const char* body) {
+#if !CAP_TAK_EXTRAS
+  (void)channel; (void)sender; (void)sent; (void)body;
+  return;
+#endif
+  if (!active() || !sender || !body) return;
+  const uint16_t from = nameHash(sender);
+  bool teammate = channel && !strcmp(channel, cfg.channel);
+  for (int i = 0; i < kMaxMembers && !teammate; i++)
+    teammate = members_[i].used && members_[i].pos.has_name_hash && members_[i].pos.name_hash == from;
+  if (!teammate) return;
+  const uint16_t h = quickreply::reportHash(sent, sender, body);
+  for (uint8_t i = 0; i < heard_recent_n_; i++)
+    if (heard_recent_[i] == h) return;
+  if (heard_recent_n_ == 4) {
+    memmove(heard_recent_, heard_recent_ + 1, 3 * sizeof heard_recent_[0]);
+    heard_recent_n_ = 3;
+  }
+  heard_recent_[heard_recent_n_++] = h;
+  const uint32_t now = io_->nowMs();
+  if (heard_beacon_due_ms_ || (heard_beaconed_ && now - heard_beacon_last_ms_ < 120000UL)) return;
+  heard_beacon_due_ms_ = now + 15000UL + io_->random32() % 31000UL;
+  if (!heard_beacon_due_ms_) heard_beacon_due_ms_ = 1;
+}
+
+int Core::heardBy(uint16_t msg, uint8_t (*keys)[4], uint32_t* ms, int cap) const {
+  int n = 0;
+  for (const HeardRec& r : heard_by_) {
+    if (!r.used || r.msg != msg || n >= cap) continue;
+    if (keys) memcpy(keys[n], r.key4, 4);
+    if (ms) ms[n] = r.ms;
+    n++;
+  }
+  return n;
+}
+
 void Core::onPosition(const TeamWire::Position& x) {
+  // What this teammate heard (MESSAGE_REACH.md).
+  const uint32_t at = io_->nowMs();
+  for (uint8_t k = 0; CAP_TAK_EXTRAS && k < x.heard_n; k++) {
+    HeardRec* slot = nullptr;
+    for (HeardRec& r : heard_by_)
+      if (r.used && r.msg == x.heard[k] && keyEq(r.key4, x.key4)) { slot = &r; break; }
+    if (!slot)
+      for (HeardRec& r : heard_by_)
+        if (!r.used) { slot = &r; break; }
+    if (!slot) {   // full: the oldest goes
+      slot = &heard_by_[0];
+      for (HeardRec& r : heard_by_)
+        if ((int32_t)(r.ms - slot->ms) < 0) slot = &r;
+    }
+    if (slot->used && slot->msg == x.heard[k] && keyEq(slot->key4, x.key4)) continue;   // known: keep its time
+    slot->used = true;
+    slot->msg = x.heard[k];
+    memcpy(slot->key4, x.key4, 4);
+    slot->ms = at;
+  }
   int slot = -1;
   for (int i = 0; i < kMaxMembers && slot < 0; i++)
     if (members_[i].used && keyEq(members_[i].pos.key4, x.key4)) slot = i;

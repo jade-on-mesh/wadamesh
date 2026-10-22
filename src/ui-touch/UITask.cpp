@@ -39101,6 +39101,10 @@ static void routeFillId(RouteNode& nd, const uint8_t* hash, uint8_t hsz) {
   }
 }
 
+// Who heard one of our channel messages (TeamUI.inc, MESSAGE_REACH.md).
+int teamHeardBy(uint32_t ts, const char* text, char (*names)[21], double* lat, double* lon, int cap);
+bool teamReachActive();
+
 // Build s_route[] from a message's repeater hops. Returns how many nodes have a
 // known position (the button is only offered when >= 2).
 static int buildRouteFromMessage(const UITask::UIMessage& m) {
@@ -39165,6 +39169,21 @@ static int buildRouteFromMessage(const UITask::UIMessage& m) {
       snprintf(s_route[s_route_n].tag, sizeof(s_route[0].tag), "R%u", (unsigned)(r + 1));
       routeFillId(s_route[s_route_n], hh, hs);
       ++s_route_n;
+    }
+    // Teammates who said they heard it, on the same star (MESSAGE_REACH.md).
+    if (CAP_TAK_EXTRAS && m.channel) {
+      char names[6][21];
+      double la[6], lo[6];
+      const int k = teamHeardBy(m.ts, m.text, names, la, lo, 6);
+      for (int i = 0; i < k && s_route_n < k_route_max; ++i) {
+        RouteNode& nd = s_route[s_route_n++];
+        nd.has_pos = la[i] != 0.0 || lo[i] != 0.0;
+        nd.lat = la[i];
+        nd.lon = lo[i];
+        snprintf(nd.tag, sizeof nd.tag, "T%d", i + 1);
+        snprintf(nd.name, sizeof nd.name, "%s", names[i]);
+        snprintf(nd.id, sizeof nd.id, "%s", "heard");
+      }
     }
   }
 
@@ -44141,6 +44160,14 @@ static void openMessageInfoPopup(int msg_idx) {
       } else
         blen = recolorWords(body, blen, (int)sizeof(body), nodeSigColorHex(hashstr), hashstr, &g_font_12, card_w - 28);
     }
+  }
+  // Teammates who said they heard it, from their beacons (MESSAGE_REACH.md).
+  if (CAP_TAK_EXTRAS && m.outgoing && m.channel && teamReachActive() && blen < (int)sizeof(body) - 64) {
+    char names[6][21];
+    const int k = teamHeardBy(m.ts, m.text, names, nullptr, nullptr, 6);
+    blen += snprintf(body + blen, sizeof(body) - blen, "\n%s", k ? TR("Teammates who heard it:") : TR("No teammate has said they heard it yet."));
+    for (int i = 0; i < k && blen < (int)sizeof(body) - 32; i++)
+      blen += snprintf(body + blen, sizeof(body) - blen, "%s%s", i ? ", " : " ", names[i]);
   }
   if (blen >= (int)sizeof(body)) blen = sizeof(body) - 1;
   body[blen] = '\0';
