@@ -5800,6 +5800,41 @@ static void webMirrorTick() {
 #if defined(DOC_CAPTURE)
 static uint32_t s_dbg_flush_us = 0, s_dbg_flush_px = 0, s_dbg_flush_n = 0;   // capture builds: display flush cost
 #endif
+// ---- Red light (night vision), Settings > Theme -----------------------------------
+// Every pixel leaves for the panel as its brightness in red alone: the map tiles,
+// icons, photos and all, the same filter as MeshCore Open TAK's Night (red light)
+// theme (BT.709 brightness). Turned on and off without a restart.
+static bool s_red_light = false;
+static inline void redLightPixels(uint16_t* px, size_t n) {
+  for (size_t i = 0; i < n; i++) {
+    const uint32_t c = px[i];
+    // 5/6/5 bits to 0..255 brightness: 0.2126 R + 0.7152 G + 0.0722 B.
+    const uint32_t y = (((c >> 11) & 0x1F) * 444u + ((c >> 5) & 0x3F) * 741u + (c & 0x1F) * 156u) >> 8;
+    px[i] = (uint16_t)((y >> 3) << 11);
+  }
+}
+static bool redLightLoad() {
+#if defined(ESP32) && !defined(HAS_TDECK_PRO)
+  SdNvsPrefs p;
+  if (!p.begin("look", true)) return false;
+  const bool on = p.getBool("red", false);
+  p.end();
+  return on;
+#else
+  return false;
+#endif
+}
+[[maybe_unused]] static void redLightSet(bool on) {
+  s_red_light = on;
+#if defined(ESP32)
+  SdNvsPrefs p;
+  if (p.begin("look", false)) { p.putBool("red", on); p.end(); }
+#endif
+  lv_obj_invalidate(lv_scr_act());
+  lv_obj_invalidate(lv_layer_top());
+  lv_obj_invalidate(lv_layer_sys());
+}
+
 static void lvglFlushImpl(lv_disp_drv_t* disp_drv, const lv_area_t* area, lv_color_t* color_p);
 static void lvglFlush(lv_disp_drv_t* disp_drv, const lv_area_t* area, lv_color_t* color_p) {
 #if defined(DOC_CAPTURE)
@@ -5817,6 +5852,7 @@ static void lvglFlushImpl(lv_disp_drv_t* disp_drv, const lv_area_t* area, lv_col
   if (!color_p) { lv_disp_flush_ready(disp_drv); return; }   // never deref a NULL draw buffer (OOM at boot)
   int32_t w = area->x2 - area->x1 + 1;
   int32_t h = area->y2 - area->y1 + 1;
+  if (s_red_light) redLightPixels(reinterpret_cast<uint16_t*>(color_p), (size_t)w * (size_t)h);
 #if !defined(HAS_TANMATSU)
   // REMOTE mode: the UI renders to an off-screen web display — never write the
   // physical panel (wrong resolution). Only capture + stream the band.
@@ -66794,6 +66830,7 @@ static void applyBootTheme() {
   applyColorLook(touchPrefsGetMoreColors(), touchPrefsGetColorStyle(), touchPrefsGetRainbow());
 #endif
   s_chat_icons_initials = touchPrefsGetChatIcons() != 0;
+  s_red_light = redLightLoad();
   bgTheme();   // last: it may change the background colour
 }
 
@@ -67972,6 +68009,20 @@ static void buildThemeSettings() {
     themeMiniBuild(root, page);
     lv_obj_add_event_cb(page, themePageScrollCb, LV_EVENT_SCROLL, nullptr);
   }
+
+  // Red light first: it's the one wanted in the dark, straight away (holding the
+  // control centre's Theme tile opens this page). No restart. Not on e-paper.
+#if !defined(HAS_TDECK_PRO)
+  {
+    lv_obj_t* c = themeSection("Red light");
+    setSwitchRow(c, "Red light (night vision)",
+                 "Everything in dim red, the map and photos too, to keep your eyes used to the dark.",
+                 s_red_light, [](lv_event_t* e) {
+                   if (lv_event_get_code(e) != LV_EVENT_VALUE_CHANGED) return;
+                   redLightSet(lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED));
+                 });
+  }
+#endif
 
   // Mode: Night and Day as two small screens, high contrast under them.
   {
@@ -81827,6 +81878,9 @@ void UITask::loop() {
 #endif
 #if CAP_SOUND_LINK
     soundui::loopTick();    // Sound link: mic, player, heard messages, the bridge
+#endif
+#if CAP_LUA_AUDIO && defined(HAS_TDECK_KEYBOARD) && defined(ESP32)
+    walkie::keyTick(tdeckKeyboardMicHeld(), now);   // hold Mic to talk (WALKIE.md)
 #endif
     static uint32_t s_vox_voice_seen = 0;   // repaint the bubble when playback starts or ends
     if (s_vox_voice_sid != s_vox_voice_seen) { s_vox_voice_seen = s_vox_voice_sid; g_lv.dirty_timeline = true; }

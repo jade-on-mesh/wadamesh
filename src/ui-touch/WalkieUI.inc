@@ -112,6 +112,7 @@ static bool heardTalk(uint32_t sid) {
 static bool s_live_all = true;        // talks on every channel play live (unless muted)
 static String s_muted;                // channels whose talks don't play live, one name per line
 static String s_direct;               // channels set to Direct, one name per line
+static char s_last[33] = "";          // the walkie-talkie last opened (the Mic key talks there)
 static bool s_prefs_loaded = false;
 
 static void prefsLoad() {
@@ -122,6 +123,7 @@ static void prefsLoad() {
   s_live_all = p.getBool("liveall", true);
   s_muted = p.getString("muted", "");
   s_direct = p.getString("direct", "");
+  snprintf(s_last, sizeof s_last, "%s", p.getString("last", "").c_str());
   p.end();
 }
 static void prefsSave() {
@@ -130,6 +132,7 @@ static void prefsSave() {
   p.putBool("liveall", s_live_all);
   p.putString("muted", s_muted);
   p.putString("direct", s_direct);
+  p.putString("last", s_last);
   p.end();
 }
 
@@ -636,6 +639,10 @@ static void cardOpen(int ch) {
   char name[33];
   if (!channelName(ch, name, sizeof name)) return;
   prefsLoad();
+  if (strcmp(s_last, name) != 0) {   // the Mic key's channel from now on
+    snprintf(s_last, sizeof s_last, "%s", name);
+    prefsSave();
+  }
   s_card_ch = ch;
   s_talk_style = -1;
   s_card = lv_obj_create(lv_layer_top());
@@ -718,8 +725,13 @@ static void cardOpen(int ch) {
   lv_obj_t* hint = lv_label_create(card);
   lv_obj_set_width(hint, lv_pct(100));
   lv_label_set_long_mode(hint, LV_LABEL_LONG_WRAP);
+#if defined(HAS_TDECK_KEYBOARD)
+  lv_label_set_text(hint, TR("Up to 20 s a talk, on MediaMesh only. Each one is saved in the chat. "
+                             "From any screen, hold the keyboard's Mic key to talk."));
+#else
   lv_label_set_text(hint, TR(WALKIE_CAN_TALK ? "Up to 20 s a talk, on MediaMesh only. Each one is saved in the chat."
                                              : "No microphone here: you hear talks as they come."));
+#endif
   lv_obj_set_style_text_font(hint, &g_font_12, LV_PART_MAIN);
   lv_obj_set_style_text_color(hint, lv_color_hex(COLOR_SUB), LV_PART_MAIN);
 
@@ -762,6 +774,67 @@ static void tick(uint32_t now) {
 
 static void ensureTimer() {
   if (!s_timer) s_timer = lv_timer_create(timerCb, 50, nullptr);
+}
+
+// ---- the Mic key (T-Deck keyboard): hold to talk from any screen ----------------------
+// Held 0.3 s (so Sym + Mic, typing a 0, doesn't start a talk): talks on the
+// channel whose chat is open, else the walkie-talkie opened last, with its card
+// up so you see it's on the air. Let go: the talk ends. Works locked too.
+static bool s_key_down = false, s_key_talking = false, s_key_tried = false;
+static uint32_t s_key_since = 0;
+
+// The open channel chat's channel, else the last walkie-talkie's; -1 if neither.
+static int keyChannel() {
+  if (g_lv.ch.detail_open && g_lv.task) {
+    bool ch = false; uint16_t unread; uint32_t ts;
+    char tname[UITask::MAX_THREAD_NAME + 1];
+    const int t = g_lv.task->activeThreadIdx();
+    if (t >= 0 && g_lv.task->getThreadInfo(t, ch, unread, ts, tname, sizeof tname) && ch) {
+      ChannelDetails cd{};
+      for (int i = 0; i < MAX_GROUP_CHANNELS; ++i)
+        if (the_mesh.getChannel(i, cd) && cd.name[0] && strncmp(cd.name, tname, sizeof cd.name) == 0) return i;
+    }
+  }
+  prefsLoad();
+  if (!s_last[0]) return -1;
+  ChannelDetails cd{};
+  for (int i = 0; i < MAX_GROUP_CHANNELS; ++i)
+    if (the_mesh.getChannel(i, cd) && cd.name[0] && strcmp(cd.name, s_last) == 0) return i;
+  return -1;
+}
+
+static void keyTick(bool held, uint32_t now) {
+#if WALKIE_CAN_TALK
+  if (held && !s_key_down) {
+    s_key_down = true;
+    s_key_tried = false;
+    s_key_since = now;
+  } else if (!held && s_key_down) {
+    s_key_down = false;
+    if (s_key_talking && talking()) txRelease();
+    s_key_talking = false;
+    return;
+  }
+  if (!s_key_down || s_key_tried || now - s_key_since < 300) return;
+  s_key_tried = true;
+  if (talking()) return;
+  const int ch = keyChannel();
+  if (ch < 0) {
+    if (g_lv.task) g_lv.task->showAlert(TR("Open a channel, or its walkie-talkie once, then hold Mic to talk"), 2200);
+    return;
+  }
+  if (!s_card || s_card_ch != ch) cardOpen(ch);
+  const char* why = nullptr;
+  if (!txStart(ch, &why)) {
+    if (g_lv.task) g_lv.task->showAlert(TR(why ? why : "Can't talk now"), 1800);
+    return;
+  }
+  s_key_talking = true;
+  ensureTimer();
+  refreshCard(now);
+#else
+  (void)held; (void)now;
+#endif
 }
 
 // ---- packets from the mesh -------------------------------------------------------

@@ -12,6 +12,14 @@ voice message, so anyone who missed it can play it later.
 2. Long-press a channel in Chats and pick **Walkie-talkie**.
 3. **Hold to talk**, and let go to finish. A talk can be up to 20 seconds.
 
+On the T-Deck, **hold the keyboard's Mic key** (the one with the microphone,
+which types 0 with Sym) to talk from any screen, even locked, without opening
+anything first: after a third of a second the walkie-talkie card comes up on
+the air, and letting go ends the talk. It talks on the channel whose chat is
+open, otherwise on the walkie-talkie you opened last. This needs the
+keyboard's current firmware (raw mode, the default); with **Older keyboard
+protocol** on, the keyboard reports no key releases, so use the card's button.
+
 Talks play by themselves as they arrive, on any channel, card open or not,
 like a scanner. The card shows who is talking. While someone else is talking, the button waits
 until they finish. It's half duplex: nothing plays while you talk.
@@ -77,6 +85,7 @@ talk with nothing heard for 3.5 s has ended.
 | Packets and the jitter buffer (host-tested) | `src/ui-touch/WalkieWire.h`, `test/test_walkie.cpp` |
 | The card, talking, live playback | `src/ui-touch/WalkieUI.inc` |
 | Mic bytes while recording | `VoxMic::liveBits` (`src/ui-touch/VoxMic.cpp`) |
+| The Mic key | `tdeckKeyboardMicHeld` (`src/helpers/input/TDeckKeyboard.cpp`), `walkie::keyTick` |
 | The waveform (host-tested) | `voxCodec2Waveform` (`src/ui-touch/VoxVoice.cpp`, `test/test_vox_record.cpp`); drawn by `chatTalkWaveDrawCb` |
 | Keeping a talk heard in full | `VoxPhotos::storeHeard` |
 | From the mesh | `MyMesh::onChannelDataRecv` -> `walkieOnChannelData` |
