@@ -20,14 +20,16 @@ open, otherwise on the walkie-talkie you opened last. This needs the
 keyboard's current firmware (raw mode, the default); with **Older keyboard
 protocol** on, the keyboard reports no key releases, so use the card's button.
 
-The T-Deck's **trackball** works the same way: press it and hold it still for
-about half a second to talk, and let go to finish. It talks on the same channel
-as the Mic key. With the walkie-talkie card up it always does; elsewhere it
-does while **Hold the trackball to talk** is ticked on the card (it is to start
-with) and there's a channel to talk on. Untick it to give the hold back to
-switching the trackball between scrolling and the cursor. A press you roll is
-still a drag, and a quick click is still a click. The screen must be unlocked
-(holding the ball on the lock screen unlocks it).
+On the T-Deck, the **trackball's button** is push-to-talk in a channel's chat:
+press it in and you're talking (the walkie-talkie card comes up), let go to
+finish. It works the same with the walkie-talkie card up, from any screen. In
+D-pad mode it talks only with the composer focused (elsewhere it selects, so
+it holds the card's Talk button). Everywhere else the button clicks as before.
+Turn it off with **Trackball button talks in channel chats** on the card.
+
+Without the trackball: hold the Mic key (above), or long-press a channel in
+Chats, choose **Walkie-talkie**, and hold the card's **Talk** button on the
+touchscreen.
 
 Talks play by themselves as they arrive, on any channel, card open or not,
 like a scanner. The card shows who is talking. While someone else is talking, the button waits
@@ -95,7 +97,7 @@ talk with nothing heard for 3.5 s has ended.
 | The card, talking, live playback | `src/ui-touch/WalkieUI.inc` |
 | Mic bytes while recording | `VoxMic::liveBits` (`src/ui-touch/VoxMic.cpp`) |
 | The Mic key | `tdeckKeyboardMicHeld` (`src/helpers/input/TDeckKeyboard.cpp`), `walkie::keyTick` |
-| The trackball hold | `TBH_TALK` in the trackball handler (`UITask.cpp`), `walkie::ballTalks` |
+| The trackball's button | `TBH_TALK` in the trackball handler (`UITask.cpp`), `walkie::ballTalks` |
 | The waveform (host-tested) | `voxCodec2Waveform` (`src/ui-touch/VoxVoice.cpp`, `test/test_vox_record.cpp`); drawn by `chatTalkWaveDrawCb` |
 | Keeping a talk heard in full | `VoxPhotos::storeHeard` |
 | From the mesh | `MyMesh::onChannelDataRecv` -> `walkieOnChannelData` |

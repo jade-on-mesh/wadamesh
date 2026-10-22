@@ -3413,7 +3413,6 @@ constexpr unsigned long kTbCursorHideMs   = 800;   // auto-hide after idle
 constexpr int           kTbScrollStepPx   = 18;    // px of scroll per encoder step (scroll mode)
 constexpr float         kTbScrollSmoothMs = 45.0f; // ease time-constant for scroll mode
 constexpr unsigned long kTbModeHoldMs     = 600;   // hold the ball still this long: scroll <-> cursor
-constexpr unsigned long kTbTalkHoldMs     = 250;   // ...or this long to talk, when it talks (WALKIE.md)
 
 // True while the trackball cursor is visible AND the touch is within the tab
 // bar (the bottom strip, or the right-edge rail with Condense Nav). Used to
@@ -81551,22 +81550,32 @@ void UITask::loop() {
       enum : uint8_t { TBH_IDLE, TBH_PENDING, TBH_DRAG, TBH_DONE, TBH_TALK };
       static uint8_t       s_tbh      = TBH_IDLE;
       static unsigned long s_tbh_down = 0;
-      static int8_t        s_tbh_talks = -1;            // walkie::ballTalks(), asked once a press
       const bool down    = tb_pressed && !s_tb_wake_consume;
       const bool hold_ok = !s_tb_nav && !SnakeGame::isOpen() && !luaAppIsOpen();
-      if (!hold_ok) {
+      // In a channel chat (or with the walkie-talkie card up) the button is
+      // push-to-talk: talking from the moment it goes in until it's let go
+      // (WALKIE.md). In D-pad mode only with the composer focused: elsewhere the
+      // button selects, and the card's Talk button is held that way.
+#if (defined(HAS_TDECK_GT911) || defined(HAS_TDISPLAY_P4)) && CAP_LUA_AUDIO
+      const bool mic_ui = s_mic_pill || s_mic_review;   // recording or reviewing a voice message
+#else
+      const bool mic_ui = false;
+#endif
+      if (down && s_user_btn_prev == HIGH)   // just went in
+        s_tb_ball_talk = !SnakeGame::isOpen() && !luaAppIsOpen() && !mic_ui && walkie::ballTalks() &&
+                         (!s_tb_nav || (s_nav_group && lv_group_get_focused(s_nav_group) == g_lv.ch.composer_ta));
+      if (!down) s_tb_ball_talk = false;
+      if (s_tb_ball_talk) {
+        s_tbh = TBH_TALK;                                 // no click, drag or mode switch this press
+        s_tb_click_press = false;
+      } else if (!hold_ok) {
         s_tbh = TBH_IDLE;
-        s_tb_ball_talk = false;
         s_tb_click_press = down;
       } else if (down) {
-        if (s_tbh == TBH_IDLE) { s_tbh = TBH_PENDING; s_tbh_down = now; s_tbh_talks = -1; }
+        if (s_tbh == TBH_IDLE) { s_tbh = TBH_PENDING; s_tbh_down = now; }
         if (s_tbh == TBH_PENDING) {
           if ((long)(s_tb_motion_ms - s_tbh_down) > 0) {
             s_tbh = TBH_DRAG;                             // rolled while pressed: a drag
-          } else if (now - s_tbh_down >= kTbTalkHoldMs &&
-                     (s_tbh_talks < 0 ? (s_tbh_talks = walkie::ballTalks() ? 1 : 0) : s_tbh_talks) == 1) {
-            s_tbh = TBH_TALK;                             // held still: push to talk until let go
-            s_tb_ball_talk = true;
           } else if (now - s_tbh_down >= kTbModeHoldMs) {
             s_tbh = TBH_DONE;                             // the rest of this press is spent
             tbApplyMode(s_tb_scroll ? TB_MODE_CURSOR : TB_MODE_SCROLL);
@@ -81578,7 +81587,6 @@ void UITask::loop() {
         if (s_tbh == TBH_PENDING && !s_tb_scroll && getActiveTab() != MAP_TAB_INDEX)
           s_tb_click_pulse = true;                        // released in time: a click
         s_tbh = TBH_IDLE;
-        s_tb_ball_talk = false;
         s_tb_click_press = false;
       }
       if (down) { s_tb_last_active_ms = now; noteUserInput(); }
@@ -81989,7 +81997,7 @@ void UITask::loop() {
 #endif
     uiCp("ui:voxpaint");
 #if CAP_LUA_AUDIO && defined(HAS_TDECK_KEYBOARD) && defined(ESP32)
-    walkie::keyTick(tdeckKeyboardMicHeld() || s_tb_ball_talk, now);   // hold Mic or the ball to talk (WALKIE.md)
+    walkie::keyTick(tdeckKeyboardMicHeld() || s_tb_ball_talk, now, s_tb_ball_talk);   // Mic key or trackball (WALKIE.md)
 #endif
     static uint32_t s_vox_voice_seen = 0;   // repaint the bubble when playback starts or ends
     if (s_vox_voice_sid != s_vox_voice_seen) { s_vox_voice_seen = s_vox_voice_sid; g_lv.dirty_timeline = true; }

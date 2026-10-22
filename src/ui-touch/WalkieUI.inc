@@ -113,7 +113,7 @@ static bool s_live_all = true;        // talks on every channel play live (unles
 static String s_muted;                // channels whose talks don't play live, one name per line
 static String s_direct;               // channels set to Direct, one name per line
 static char s_last[33] = "";          // the walkie-talkie last opened (the Mic key talks there)
-static bool s_ball_talk = true;       // T-Deck: holding the trackball still talks there too
+static bool s_ball_talk = true;       // T-Deck: the trackball's button talks in a channel chat
 static bool s_prefs_loaded = false;
 
 static void prefsLoad() {
@@ -623,7 +623,7 @@ static lv_obj_t* s_ball_lbl = nullptr;
 static void ballText() {
   if (s_ball_lbl)
     lv_label_set_text_fmt(s_ball_lbl, "%s %s", s_ball_talk ? LV_SYMBOL_OK : LV_SYMBOL_CLOSE,
-                          TR("Hold the trackball to talk"));
+                          TR("Trackball button talks in channel chats"));
 }
 static void ballCb(lv_event_t* e) {
   if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
@@ -834,20 +834,22 @@ static int keyChannel() {
   return -1;
 }
 
-// Whether holding the trackball still should talk (T-Deck): with the walkie-talkie
-// card up, always; elsewhere when it's switched on (it is by default) and there's
-// a channel to talk on. Otherwise the hold switches scroll <-> cursor as usual.
+// Whether pressing the trackball's button in should talk (T-Deck): with the
+// walkie-talkie card up, always; otherwise in a channel's chat, at its composer,
+// while that's switched on (it is by default). Everywhere else it clicks.
 static bool ballTalks() {
 #if CAP_TRACKBALL && WALKIE_CAN_TALK
   if (s_card) return true;
   prefsLoad();
-  return s_ball_talk && keyChannel() >= 0;
+  return s_ball_talk && g_lv.ch.detail_open && g_lv.ch.composer_ta && keyChannel() >= 0;
 #else
   return false;
 #endif
 }
 
-static void keyTick(bool held, uint32_t now) {
+// `held`: the Mic key or the trackball's button. The Mic key talks after 0.3 s
+// held (Sym + Mic types 0); the trackball's button (`at_once`) as it goes in.
+static void keyTick(bool held, uint32_t now, bool at_once = false) {
 #if WALKIE_CAN_TALK
   if (held && !s_key_down) {
     s_key_down = true;
@@ -859,7 +861,7 @@ static void keyTick(bool held, uint32_t now) {
     s_key_talking = false;
     return;
   }
-  if (!s_key_down || s_key_tried || now - s_key_since < 300) return;
+  if (!s_key_down || s_key_tried || (!at_once && now - s_key_since < 300)) return;
   s_key_tried = true;
   if (talking()) return;
   const int ch = keyChannel();
