@@ -12,19 +12,28 @@ voice message, so anyone who missed it can play it later.
 2. Long-press a channel in Chats and pick **Walkie-talkie**.
 3. **Hold to talk**, and let go to finish. A talk can be up to 20 seconds.
 
-While the walkie-talkie is open, talks on that channel play as they arrive, and
-the card shows who is talking. While someone else is talking, the button waits
+Talks play by themselves as they arrive, on any channel, card open or not,
+like a scanner. The card shows who is talking. While someone else is talking, the button waits
 until they finish. It's half duplex: nothing plays while you talk.
 
 - **Reach** switches between *through repeaters* (the default: the whole
   MediaMesh hears it live, 2-3 s behind) and *direct* (radio to radio: only
   radios in range hear it live, a little sooner, and repeaters stay quiet).
   People out of range still get the voice message.
-- **Keep listening when closed** plays that channel's talks as they come even
-  with the card closed. One channel at a time.
+- **Play talks live (all channels)** is on by default. Off, talks only play
+  while that channel's card is open.
+- **Play this channel's talks live** mutes one channel when turned off. Its
+  talks still arrive as voice messages.
 
 A talk heard live in full is kept with its voice message, so the message plays
 straight away with nothing to download.
+
+In the chat a talk shows as **Talk**, with a waveform of the speech on the line
+under it instead of a plain voice message. The waveform is worked out once the
+talk is stored here (heard live in full, or downloaded; a flat line until
+then), and fills in with the accent colour as it plays. MeshCore Open TAK draws
+the same waveform: each of its 40 bars is the loudness of its slice of the
+decoded speech.
 
 Talking needs a microphone (T-Deck, T-Display P4). Boards with a speaker but no
 microphone (the T-LoRa Pager, the Tanmatsu) can listen.
@@ -44,8 +53,11 @@ only (`markTransfer`):
   0-4 are the VE3 mode (1 = Codec2 1200).
 - Audio packet *i* is exactly packet *i* of the talk's VE3 clip: 156 bytes (26
   frames, 1.04 s), fewer in the last.
-- After the last packet the talk is posted as `VE3:<id>:1:<packets>:<seconds>`
-  on the channel, with the same session id, and served like any recording.
+- After the last packet the talk is posted as
+  `VE3:<id>:1:<packets>:<seconds> PTT` on the channel, with the same session
+  id, and served like any recording. The `PTT` caption marks it as a talk;
+  versions that don't know it show "Voice message: PTT". A talk announced
+  without it still shows as a talk on a standalone that heard its packets.
 
 Packets are spaced like a photo transfer: through repeaters at least four
 packet airtimes plus 150 ms (800 ms at least), so a packet doesn't talk over
@@ -65,6 +77,7 @@ talk with nothing heard for 3.5 s has ended.
 | Packets and the jitter buffer (host-tested) | `src/ui-touch/WalkieWire.h`, `test/test_walkie.cpp` |
 | The card, talking, live playback | `src/ui-touch/WalkieUI.inc` |
 | Mic bytes while recording | `VoxMic::liveBits` (`src/ui-touch/VoxMic.cpp`) |
+| The waveform (host-tested) | `voxCodec2Waveform` (`src/ui-touch/VoxVoice.cpp`, `test/test_vox_record.cpp`); drawn by `chatTalkWaveDrawCb` |
 | Keeping a talk heard in full | `VoxPhotos::storeHeard` |
 | From the mesh | `MyMesh::onChannelDataRecv` -> `walkieOnChannelData` |
 

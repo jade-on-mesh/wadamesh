@@ -157,6 +157,28 @@ static void testRoundTrip() {
   CHECK(r[1] >= 0 && r[1] < r[0] * 0.05, "silence %.0f should be far below speech %.0f", r[1], r[0]);
 }
 
+// The waveform the chat draws for a talk: loud where the synthetic speech is,
+// flat in its silences, 0..100.
+static void testWaveform() {
+  const std::vector<uint8_t> bits = encodeSynth(kVoxRecordWireMode, nullptr);
+  uint8_t bars[kVoxWaveBars];
+  CHECK(voxCodec2Waveform(kVoxRecordWireMode, bits.data(), bits.size(), bars, kVoxWaveBars), "waveform");
+  int top = 0;
+  for (uint8_t b : bars) {
+    CHECK(b <= 100, "bar %u", b);
+    if (b > top) top = b;
+  }
+  CHECK(top == 100, "loudest bar %d", top);
+  // 4 s in 40 bars: 100 ms each. The first /a/ runs 250..1000 ms, the clip
+  // ends in 250 ms of silence.
+  CHECK(bars[6] > 50, "vowel bar %u", bars[6]);
+  CHECK(bars[kVoxWaveBars - 1] < bars[6] / 3, "closing silence %u vs vowel %u", bars[kVoxWaveBars - 1], bars[6]);
+  printf("waveform:");
+  for (uint8_t b : bars) printf(" %u", b);
+  printf("\n");
+  CHECK(!voxCodec2Waveform(0, bits.data(), bits.size(), bars, kVoxWaveBars), "700C is compiled out");
+}
+
 // ---- mic prep ---------------------------------------------------------------
 
 // 16 kHz stereo: `amp` sine at `f` on both channels plus `dc` and `alias_amp` at 6 kHz.
@@ -318,6 +340,7 @@ int main(int argc, char** argv) {
   testEncoderModes();
   testEncoderMatchesApp(dir);
   testRoundTrip();
+  testWaveform();
   testPrepDecimates();
   testPrepRemovesDcAndAliases();
   testPrepAgc();

@@ -78,6 +78,48 @@ long voxCodec2Decode(int wire_mode, const uint8_t* bits, size_t len, int16_t* ou
   return (long)(frames * (size_t)spf);
 }
 
+// Bars from per-bar sums of squares: RMS, square-rooted against the loudest
+// (voxWaveform in the app's walkie_wire.dart).
+static void waveFinish(const double* sum, const uint32_t* cnt, uint8_t* bars, int n_bars) {
+  double top = 0;
+  for (int b = 0; b < n_bars; b++) {
+    const double r = cnt[b] ? sqrt(sum[b] / cnt[b]) : 0;
+    if (r > top) top = r;
+  }
+  for (int b = 0; b < n_bars; b++) {
+    if (top < 200) { bars[b] = 0; continue; }   // silence
+    const double r = cnt[b] ? sqrt(sum[b] / cnt[b]) : 0;
+    const double v = sqrt(r / top);
+    bars[b] = (uint8_t)lrint((v > 1 ? 1 : v) * 100);
+  }
+}
+
+bool voxCodec2Waveform(int wire_mode, const uint8_t* bits, size_t len, uint8_t* bars, int n_bars) {
+  if (!bits || !bars || n_bars <= 0 || n_bars > 64) return false;
+  VoxCodec2Stream c;
+  if (!c.begin(wire_mode)) return false;
+  const size_t bpf = (size_t)c.bytesPerFrame();
+  const int spf = c.samplesPerFrame();
+  const size_t frames = bpf ? len / bpf : 0;
+  if (!frames || spf > 320) { c.end(); return false; }
+  double sum[64] = {0};
+  uint32_t cnt[64] = {0};
+  const size_t total = frames * (size_t)spf;
+  int16_t pcm[320];
+  for (size_t f = 0; f < frames; f++) {
+    c.decode(bits + f * bpf, pcm);
+    for (int k = 0; k < spf; k++) {
+      const size_t i = f * (size_t)spf + (size_t)k;
+      const int b = (int)(i * (size_t)n_bars / total);
+      sum[b] += (double)pcm[k] * pcm[k];
+      cnt[b]++;
+    }
+  }
+  c.end();
+  waveFinish(sum, cnt, bars, n_bars);
+  return true;
+}
+
 bool VoxCodec2Stream::begin(int wire_mode) {
   end();
   if (!voxCodec2CanDecode(wire_mode)) return false;
@@ -138,6 +180,7 @@ void VoxCodec2Encoder::end() {}
 bool voxCodec2CanDecode(int) { return false; }
 size_t voxCodec2Samples(int, size_t) { return 0; }
 long voxCodec2Decode(int, const uint8_t*, size_t, int16_t*, size_t) { return -1; }
+bool voxCodec2Waveform(int, const uint8_t*, size_t, uint8_t*, int) { return false; }
 
 #endif
 
