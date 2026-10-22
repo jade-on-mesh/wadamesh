@@ -18,6 +18,7 @@ extern bool wadaGpsMotion(float* speed_kmh, float* course_deg);   // board targe
 
 namespace teamui {
 
+#if CAP_TAK_EXTRAS
 // Quick replies heard and sent (QuickReply.h), one answer per person per item.
 static quickreply::Book* s_book = nullptr;
 static quickreply::Book* book() {
@@ -29,6 +30,7 @@ static quickreply::Book* book() {
 }
 static char s_reply_toast[96];
 static bool s_reply_toast_pending = false;
+#endif
 
 // ---- glue ---------------------------------------------------------------------------
 class Io : public team::Io {
@@ -101,6 +103,7 @@ class Io : public team::Io {
   }
   void changed() override { s_version++; }
   void alarm(const team::AlertRec&) override { s_alarm_pending = true; }
+#if CAP_TAK_EXTRAS
   // A teammate's quick reply: kept for the item's sheet, and a toast when it
   // answers something of ours.
   void reply(const TeamWire::Reply& r) override {
@@ -121,6 +124,7 @@ class Io : public team::Io {
     }
     s_version++;
   }
+#endif
   // MeshCore TEAM interop (MESHCORE_TEAM.md).
   bool sendText(const char* name, const char* text) override {
     const int idx = channelIdx(name);
@@ -321,6 +325,7 @@ static void showOnMap(double lat, double lon) {
   goToTab(MAP_TAB_INDEX);
 }
 
+#if CAP_TAK_EXTRAS
 // ---- quick replies: what the answer buttons answer -----------------------------------------
 // Set by the sheet (or the alarm) that shows the buttons; the buttons send.
 static uint8_t s_rq_kind = 0;          // TeamWire::kRefAlert/Report/Pin, or kRqWatch
@@ -331,6 +336,7 @@ static uint8_t s_rq_ch = 0;            // a watched report's channel
 static uint16_t s_rq_hash = 0;         // and its hash
 static void rqSend(uint8_t code, uint8_t arg);
 static void rqEtaSheet();
+#endif
 
 // ---- alarm (a teammate's SOS) ------------------------------------------------------------
 static lv_obj_t* s_alarm = nullptr;
@@ -396,6 +402,7 @@ static void alarmShow(team::AlertRec& r) {
     if (s_alarm_rec && s_core) s_core->acknowledge(*s_alarm_rec);
     alarmClose();
   });
+#if CAP_TAK_EXTRAS
   // One tap answers the teammate and acknowledges (QuickReply.h).
   {
     lv_obj_t* qrow = lv_obj_create(s_alarm);
@@ -431,6 +438,7 @@ static void alarmShow(team::AlertRec& r) {
       lv_obj_center(l);
     }
   }
+#endif
   if (r.a.has_pos) {
     mk(TR("Hound"), [](lv_event_t*) {
       if (s_alarm_rec && s_core) {
@@ -941,6 +949,7 @@ static lv_obj_t* sheetBtn(lv_obj_t* card, const char* txt, lv_event_cb_t cb, voi
   return b;
 }
 
+#if CAP_TAK_EXTRAS
 // ---- quick replies in the sheets --------------------------------------------------------------
 static void rqRef(char* ref, size_t cap) {
   if (s_rq_kind == kRqWatch) quickreply::refWatch(s_rq_ch, s_rq_hash, ref, cap);
@@ -1035,6 +1044,7 @@ static void rqBlock(lv_obj_t* card, const uint8_t* codes, int n, bool can_answer
     }
   }
 }
+#endif
 
 static void memberSheet(int i) {
   team::Member* m = s_core ? s_core->member(i) : nullptr;
@@ -1050,6 +1060,7 @@ static void memberSheet(int i) {
            m->pos.status ? " · " : "", TeamWire::statusName(m->pos.status), m->pos.sos ? " · SOS" : "", rb,
            (unsigned long)ago, batt);
   lv_obj_t* card = sheetOpen(m->pos.callsign[0] ? m->pos.callsign : "?", body);
+#if CAP_TAK_EXTRAS
   for (int k = 0; k < team::kMaxAlerts; k++) {   // their alert, if one is on: answer it
     team::AlertRec* r = s_core->alert(k);
     if (!r || !r->a.active || memcmp(r->a.key4, m->pos.key4, 4)) continue;
@@ -1059,6 +1070,7 @@ static void memberSheet(int i) {
     rqBlock(card, quickreply::kAlertCodes, 4, true);
     break;
   }
+#endif
   sheetBtn(card, TR("Hound"), [](lv_event_t*) {
     team::Member* x = s_core ? s_core->member(s_sel_idx) : nullptr;
     if (x) s_core->houndMember(x->pos.key4);
@@ -1118,10 +1130,12 @@ static void pinSheet(int i) {
   snprintf(body, sizeof body, "%s%s%s\n%s%s", TeamWire::kindName(m->kind), m->note[0] ? " · " : "", m->note, rb,
            m->att_mode ? "\nHas a photo or voice note: open it in MeshCore Open TAK" : "");
   lv_obj_t* card = sheetOpen(m->label[0] ? m->label : TeamWire::kindName(m->kind), body);
+#if CAP_TAK_EXTRAS
   s_rq_kind = TeamWire::kRefPin;
   memcpy(s_rq_to4, m->key4, 4);
   s_rq_id = m->id;
   rqBlock(card, quickreply::kReportCodes, 4, !s_core->isMine(*m));
+#endif
   sheetBtn(card, TR("Hound"), [](lv_event_t*) {
     TeamWire::Marker* x = s_core ? s_core->marker(s_sel_idx) : nullptr;
     if (x) s_core->houndPoint(x->lat, x->lon, x->label[0] ? x->label : TeamWire::kindName(x->kind));
@@ -1163,10 +1177,12 @@ static void watchSheet(int i) {
            it.r.track[0] && it.r.body[0] ? " · " : "", it.r.track[0] ? it.r.body : "", rb, op,
            channelName(it.channel), (unsigned long)((millis() - it.at_ms) / 60000));
   lv_obj_t* card = sheetOpen(title, body);
+#if CAP_TAK_EXTRAS
   s_rq_kind = kRqWatch;
   s_rq_ch = it.channel;
   s_rq_hash = it.reply_hash;
   rqBlock(card, quickreply::kReportCodes, 4, true);
+#endif
   sheetBtn(card, TR("Hound"), [](lv_event_t*) {
     const watchfeed::Item* x = s_watch ? &s_watch->items[s_sel_idx] : nullptr;
     if (x && x->used && core()) s_core->houndPoint(x->r.lat, x->r.lon, x->r.title);
@@ -1303,6 +1319,7 @@ void teamOnChannelText(int idx, const char* text, uint32_t sent) {
   watchfeed::Report r;
   char sender[40];
   const char* body = watchfeed::messageText(text, sender, sizeof sender);
+#if CAP_TAK_EXTRAS
   // A quick reply belongs to the report it answers ("On my way ↩3fa1").
   quickreply::Parsed qp;
   if (quickreply::parseWatch(body, qp)) {
@@ -1314,6 +1331,7 @@ void teamOnChannelText(int idx, const char* text, uint32_t sent) {
     }
     return;
   }
+#endif
   if (!watchfeed::parse(body, r)) return;
   if (!r.track[0] && !r.quake_m10 && watchfeed::isIce(cd.name, sender)) watchfeed::tagIce(r);
   // When it happened: the sender's time if both clocks are plausible (a
@@ -1406,6 +1424,7 @@ static void buildTeam(lv_obj_t* b) {
   lv_obj_set_style_text_color(sl, lv_color_white(), LV_PART_MAIN);
   useChainedFont(sl);
   lv_obj_center(sl);
+#if CAP_TAK_EXTRAS
   if (c->sosActive()) {   // the team's answers to our SOS
     char ref[28];
     uint8_t me[4];
@@ -1421,6 +1440,7 @@ static void buildTeam(lv_obj_t* b) {
       if (!k) lbl(b, TR("No answers yet."), &g_font_12, COLOR_SUB);
     }
   }
+#endif
   // active alerts first
   for (int i = 0; i < team::kMaxAlerts; i++) {
     team::AlertRec* r = c->alert(i);
@@ -2040,6 +2060,7 @@ static void loopTick() {
   }
   static uint32_t last_hound = 0;
   if (now - last_hound >= 1000) { last_hound = now; houndRefresh(); }
+#if CAP_TAK_EXTRAS
   // A teammate answered our alert, report or pin.
   if (s_reply_toast_pending) {
     s_reply_toast_pending = false;
@@ -2047,6 +2068,7 @@ static void loopTick() {
     if (g_lv.task && !g_lv.task->isBuzzerQuiet()) uiPlaySlot(TOUCH_SND_MEN);
     if (s_root) pageBuild();
   }
+#endif
 }
 
 }  // namespace teamui
