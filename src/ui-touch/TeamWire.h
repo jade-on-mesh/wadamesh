@@ -20,10 +20,17 @@
 //            [labelLen][label <= 24][geofence u8][param varint (route method; a
 //            circle's radius)][n u8][first lat i32][first lon i32 (degrees x 1e5)]
 //            [n-1 x (dlat, dlon) zigzag varints]   (app: team_shape_wire.dart)
+//   reply    [0x51][key4][toKey4][refKind u8 (1 alert, 2 report, 3 pin)][refId u32]
+//            [code u8][arg u8 (ETA minutes)][callsignLen][callsign]
+//            (a quick reply, QuickReply.h; app: team_reply_wire.dart)
 //
 // Roles 0-9 are the defaults, 10-24 roles a team added. A position's role is the
 // high nibble; 15 and up write 15 there, set flag 0x20 and put the role id in
 // one byte after the callsign.
+//
+// Position flag 0x40 (who heard what, MESSAGE_REACH.md) adds, after that:
+// [nameHash u16 (the radio name's Dart string hash)][n u8 (0-4)][heard u16 x n
+// (reaction hashes of the last teammates' channel messages heard)].
 //
 // Host-tested against golden bytes that the app's own test checks too
 // (test/test_team_wire.cpp here, test/team/team_wire_golden_test.dart there).
@@ -39,6 +46,7 @@ namespace TeamWire {
 constexpr uint16_t kDataType = 0x5654;
 constexpr uint8_t kPosition = 0x50, kAlert = 0x53, kMarker = 0x4D, kReport = 0x52, kRole = 0x4C;
 constexpr uint8_t kShape = 0x44;
+constexpr uint8_t kReply = 0x51;
 // Shapes: line freehand polygon rectangle circle route (the app's ShapeKind).
 constexpr int kShapeRoute = 5;
 constexpr size_t kMaxShapeLabel = 24;
@@ -107,6 +115,10 @@ struct Position {
   uint8_t role = 0, color = 0, status = 0;
   bool from_radio = false, sos = false, relayed = false;
   char callsign[kMaxCallsign + 1] = {0};
+  bool has_name_hash = false;   // flag 0x40
+  uint16_t name_hash = 0;
+  uint8_t heard_n = 0;
+  uint16_t heard[4] = {0};
 };
 
 struct RoleDef {
@@ -238,7 +250,7 @@ inline size_t encode(const Position& x, uint8_t* out, size_t cap) {
   const uint32_t rid = x.role > kMaxRoleId ? 0 : x.role;
   const bool ext = rid >= (uint32_t)kRoleEscape;
   w.u8((x.has_alt ? 0x01 : 0) | (x.has_motion ? 0x02 : 0) | (x.from_radio ? 0x04 : 0) | (x.sos ? 0x08 : 0) |
-       (x.relayed ? 0x10 : 0) | (ext ? 0x20 : 0));
+       (x.relayed ? 0x10 : 0) | (ext ? 0x20 : 0) | (x.has_name_hash ? 0x40 : 0));
   w.u32((uint32_t)deg7(x.lat));
   w.u32((uint32_t)deg7(x.lon));
   w.u16((uint16_t)(int16_t)(x.has_alt ? x.alt_m : 0));
@@ -252,6 +264,12 @@ inline size_t encode(const Position& x, uint8_t* out, size_t cap) {
   w.u8(x.status);
   w.str(x.callsign, kMaxCallsign);
   if (ext) w.u8(rid);
+  if (x.has_name_hash) {
+    const uint8_t k = x.heard_n > 4 ? 4 : x.heard_n;
+    w.u16(x.name_hash);
+    w.u8(k);
+    for (uint8_t i = 0; i < k; i++) w.u16(x.heard[i]);
+  }
   return w.ok ? w.n : 0;
 }
 
@@ -280,6 +298,15 @@ inline bool parse(const uint8_t* p, size_t n, Position& x) {
   x.role = (uint8_t)(rc >> 4);
   if (x.role == kRoleEscape) x.role = (flags & 0x20) && r.has(1) ? (uint8_t)r.u8() : 0;
   if (x.role > kMaxRoleId) x.role = 0;
+  x.has_name_hash = false;
+  x.heard_n = 0;
+  if ((flags & 0x40) && r.has(3)) {
+    x.has_name_hash = true;
+    x.name_hash = (uint16_t)r.u16();
+    uint32_t k = r.u8();
+    if (k > 4) k = 4;
+    for (uint32_t i = 0; i < k && r.has(2); i++) x.heard[x.heard_n++] = (uint16_t)r.u16();
+  }
   x.color = (uint8_t)(rc & 0x0F);
   if (x.color >= kColors) x.color = 0;
   x.from_radio = flags & 0x04;
@@ -319,6 +346,47 @@ inline bool parse(const uint8_t* p, size_t n, Alert& x) {
   if (x.type >= kAlertTypes) x.type = 0;
   if (!r.str(x.callsign, sizeof x.callsign)) x.callsign[0] = 0;
   if (!r.str(x.note, sizeof x.note)) x.note[0] = 0;
+  return true;
+}
+
+// A quick reply to a teammate's alert, report or pin.
+struct Reply {
+  uint8_t key4[4] = {0};      // who answers
+  uint8_t to4[4] = {0};       // the item's author
+  uint8_t ref = 0;            // 1 alert, 2 report, 3 pin
+  uint32_t ref_id = 0;        // the alert id, report id or marker id
+  uint8_t code = 0;           // quickreply::Code
+  uint8_t arg = 0;            // ETA minutes
+  char callsign[kMaxCallsign + 1] = {0};
+};
+constexpr uint8_t kRefAlert = 1, kRefReport = 2, kRefPin = 3;
+constexpr uint8_t kReplyCodes = 7;   // copy onMyWay eta cantHelp seenIt needBackup allClear
+
+inline size_t encode(const Reply& x, uint8_t* out, size_t cap) {
+  W w(out, cap);
+  w.u8(kReply);
+  w.raw(x.key4, 4);
+  w.raw(x.to4, 4);
+  w.u8(x.ref);
+  w.u32(x.ref_id);
+  w.u8(x.code);
+  w.u8(x.arg);
+  w.str(x.callsign, kMaxCallsign);
+  return w.ok ? w.n : 0;
+}
+
+inline bool parse(const uint8_t* p, size_t n, Reply& x) {
+  R r(p, n);
+  if (!r.has(16) || r.u8() != kReply) return false;
+  memcpy(x.key4, p + 1, 4);
+  memcpy(x.to4, p + 5, 4);
+  r.o = 9;
+  x.ref = (uint8_t)r.u8();
+  x.ref_id = r.u32();
+  x.code = (uint8_t)r.u8();
+  x.arg = (uint8_t)r.u8();
+  if (x.ref < kRefAlert || x.ref > kRefPin || x.code >= kReplyCodes) return false;
+  if (!r.str(x.callsign, sizeof x.callsign)) x.callsign[0] = 0;
   return true;
 }
 

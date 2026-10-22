@@ -17438,8 +17438,10 @@ extern uint8_t  g_stall_cnt, g_stall_w;
 // (uptime + heap). Kept in their own small label so the 1 Hz refresh only re-lays
 // ~7 lines — re-setting the full ~40-line text made LVGL spend ~340 ms per second
 // rendering while System Information was open (the "ui:lvgl" stall-ring entries).
+static int perfText(char* buf, size_t cap);   // with UITask::loop below
 static void sysInfoTextLive(char* buf, size_t cap) {
   int p = 0;
+  p += perfText(buf, cap);   // where the time goes, first: the slowdown hunt reads it
 #if defined(ESP32)
   const uint32_t up_s = (uint32_t)(esp_timer_get_time() / 1000000ULL);
   const uint32_t up_d = up_s / 86400u;
@@ -17722,7 +17724,7 @@ static void refreshSysInfo(unsigned long now) {
     if (lv_indev_get_scroll_dir(in) != LV_DIR_NONE) { next = now + 120; return; }
   }
   next = now + 1000;
-  char buf[1024];
+  static char buf[1600];   // static: the busy table made it too big for the stack
   sysInfoTextLive(buf, sizeof buf);
   lv_label_set_text(s_sysinfo_lbl, buf);
   // Slow tier: pushing identical text would still invalidate + repaint the whole
@@ -17795,7 +17797,7 @@ static void refreshSleepDiag(unsigned long now) {
 
 static void buildSystemInfoSettings() {
   lv_obj_t* body = createSettingsModal(TR("System Information"), SettingsModalKind::SystemInfo);
-  char buf[1024];
+  static char buf[1600];
 
   // FLEX COLUMN, deliberately not the manual y cursor the rest of this file uses.
   // Both labels below are re-texted AFTER build with text whose LINE COUNT
@@ -38905,7 +38907,18 @@ static void removeMapLocation();
 // Plot self + contacts onto the canvas at their lat/lon. Called every time
 // tiles are re-rendered (pan, zoom, recenter, tab open) so markers stay
 // pinned to the right pixel for the current center.
+// The map isn't on screen: rebuilding its markers there is wasted work (it is
+// hundreds of objects), and the team, watched channels, Flock You, the drone
+// detector and coverage all ask for it as their data changes. Note it instead;
+// the map catches up when it is shown again (mapMarkersCatchUp) or opened
+// (onMapTabActivated renders it anyway).
+static bool s_map_markers_stale = false;
+static bool mapOnScreen() {
+  return s_map_canvas && getActiveTab() == MAP_TAB_INDEX && g_lv.task && !g_lv.task->isScreenOff();
+}
 static void renderMapMarkers() {
+  if (s_map_canvas && !mapOnScreen()) { s_map_markers_stale = true; return; }
+  s_map_markers_stale = false;
   freeMapMarkers();
   if (!s_map_canvas) return;
   if (s_map_center_lat == 0.0 && s_map_center_lon == 0.0) return;
@@ -39288,6 +39301,10 @@ static void routeFillId(RouteNode& nd, const uint8_t* hash, uint8_t hsz) {
   }
 }
 
+// Who heard one of our channel messages (TeamUI.inc, MESSAGE_REACH.md).
+int teamHeardBy(uint32_t ts, const char* text, char (*names)[21], double* lat, double* lon, int cap);
+bool teamReachActive();
+
 // Build s_route[] from a message's repeater hops. Returns how many nodes have a
 // known position (the button is only offered when >= 2).
 static int buildRouteFromMessage(const UITask::UIMessage& m) {
@@ -39352,6 +39369,21 @@ static int buildRouteFromMessage(const UITask::UIMessage& m) {
       snprintf(s_route[s_route_n].tag, sizeof(s_route[0].tag), "R%u", (unsigned)(r + 1));
       routeFillId(s_route[s_route_n], hh, hs);
       ++s_route_n;
+    }
+    // Teammates who said they heard it, on the same star (MESSAGE_REACH.md).
+    if (CAP_TAK_EXTRAS && m.channel) {
+      char names[6][21];
+      double la[6], lo[6];
+      const int k = teamHeardBy(m.ts, m.text, names, la, lo, 6);
+      for (int i = 0; i < k && s_route_n < k_route_max; ++i) {
+        RouteNode& nd = s_route[s_route_n++];
+        nd.has_pos = la[i] != 0.0 || lo[i] != 0.0;
+        nd.lat = la[i];
+        nd.lon = lo[i];
+        snprintf(nd.tag, sizeof nd.tag, "T%d", i + 1);
+        snprintf(nd.name, sizeof nd.name, "%s", names[i]);
+        snprintf(nd.id, sizeof nd.id, "%s", "heard");
+      }
     }
   }
 
@@ -40226,9 +40258,17 @@ static const char* mapContactsSortName(uint8_t s) {
                case MC_SORT_HEARD: return "Heard"; default: return "?"; }
 }
 
+// The "On map" tabs: our own points (team, pins, watched channels, pins shared
+// in chats; TeamUI.inc fills it), then the mesh's nodes by kind.
+enum : uint8_t { MC_TAB_OURS, MC_TAB_REPEATERS, MC_TAB_COMPANIONS, MC_TAB_ROOMS, MC_TAB_SENSORS, MC_TAB_COUNT };
+static uint8_t s_map_contacts_tab = MC_TAB_OURS;
+static lv_obj_t* s_map_contacts_tabs[MC_TAB_COUNT] = {nullptr};
+int teamOnMapFill(lv_obj_t* list, lv_coord_t rw, double self_lat, double self_lon);   // TeamUI.inc
+
 static void closeMapContacts() {
   if (s_map_contacts_root) { popupClose(&s_map_contacts_root); }
   s_map_contacts_list = nullptr;
+  for (auto& t : s_map_contacts_tabs) t = nullptr;   // deleted with the card
 }
 static void mapContactsBackdropCb(lv_event_t* e) {
   if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
@@ -40318,6 +40358,27 @@ static void mapContactsFillList() {
   if (!s_map_contacts_list) return;
   lv_indev_reset(nullptr, nullptr);   // #27: abort any scroll-throw before freeing these rows (UAF on telemetry/position rebuild mid-flick)
   lv_obj_clean(s_map_contacts_list);
+#if CAP_TAK_EXTRAS
+  for (int t = 0; t < MC_TAB_COUNT; t++) {   // the chosen tab, filled in
+    lv_obj_t* b = s_map_contacts_tabs[t];
+    if (!b) continue;
+    lv_obj_set_style_bg_color(b, lv_color_hex(t == s_map_contacts_tab ? COLOR_GLOW : COLOR_CONTROL), LV_PART_MAIN);
+  }
+  if (s_map_contacts_tab == MC_TAB_OURS) {
+    const double sl = g_lv.task ? g_lv.task->getNodeLat() : 0.0, so = g_lv.task ? g_lv.task->getNodeLon() : 0.0;
+    const lv_coord_t rw0 = (lv_disp_get_hor_res(nullptr) - 24) - 2 * 10 - 8;
+    if (teamOnMapFill(s_map_contacts_list, rw0, sl, so) == 0) {
+      lv_obj_t* empty = lv_label_create(s_map_contacts_list);
+      lv_label_set_text(empty, TR("No teammates, pins or watched\nreports on the map yet."));
+      lv_obj_set_style_text_color(empty, lv_color_hex(COLOR_SUB), LV_PART_MAIN);
+      lv_obj_set_style_text_font(empty, &g_font_14, LV_PART_MAIN);
+    }
+    return;
+  }
+  const uint8_t want_type = s_map_contacts_tab == MC_TAB_REPEATERS ? ADV_TYPE_REPEATER
+                          : s_map_contacts_tab == MC_TAB_COMPANIONS ? ADV_TYPE_CHAT
+                          : s_map_contacts_tab == MC_TAB_ROOMS ? ADV_TYPE_ROOM : ADV_TYPE_SENSOR;
+#endif
 
   // Collect GPS-bearing contacts + their distance/age keys.
   static MapContactEntry* ents = (MapContactEntry*)psAlloc(sizeof(MapContactEntry) * 64);
@@ -40331,6 +40392,9 @@ static void mapContactsFillList() {
     ContactInfo c;
     if (!the_mesh.getContactByIdx(i, c)) continue;
     if (c.gps_lat == 0 && c.gps_lon == 0) continue;
+#if CAP_TAK_EXTRAS
+    if (c.type != want_type) continue;
+#endif
     MapContactEntry& e = ents[n];
     e.midx = (int)i;
     e.type = c.type;
@@ -40368,7 +40432,7 @@ static void mapContactsFillList() {
 
   if (n == 0) {
     lv_obj_t* empty = lv_label_create(s_map_contacts_list);
-    lv_label_set_text(empty, TR("No contacts have shared\na GPS location yet."));
+    lv_label_set_text(empty, TR("None of these have shared\na GPS location yet."));
     lv_obj_set_style_text_color(empty, lv_color_hex(COLOR_SUB), LV_PART_MAIN);
     lv_obj_set_style_text_font(empty, &g_font_14, LV_PART_MAIN);
     return;
@@ -40484,11 +40548,46 @@ static void openMapContactsList() {
   lv_obj_set_style_text_color(s_map_contacts_sort_lbl, lv_color_hex(COLOR_TEXT), LV_PART_MAIN);
   lv_obj_center(s_map_contacts_sort_lbl);
 
+  // Tabs: ours, then the mesh's nodes by kind (a row that scrolls sideways).
+#if CAP_TAK_EXTRAS
+  const lv_coord_t list_y = 66;
+  {
+    lv_obj_t* row = lv_obj_create(card);
+    lv_obj_remove_style_all(row);
+    lv_obj_set_size(row, card_w - 2 * pad, 28);
+    lv_obj_set_pos(row, 0, 32);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_style_pad_column(row, 4, LV_PART_MAIN);
+    lv_obj_set_scroll_dir(row, LV_DIR_HOR);
+    lv_obj_set_scrollbar_mode(row, LV_SCROLLBAR_MODE_OFF);
+    static const char* const names[MC_TAB_COUNT] = {"Team & watch", "Repeaters", "Companions", "Rooms", "Sensors"};
+    for (int t = 0; t < MC_TAB_COUNT; t++) {
+      lv_obj_t* b = lv_btn_create(row);
+      styleButton(b);
+      lv_obj_set_size(b, LV_SIZE_CONTENT, 26);
+      lv_obj_set_style_pad_hor(b, 8, LV_PART_MAIN);
+      lv_obj_add_event_cb(b, [](lv_event_t* e) {
+        if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+        s_map_contacts_tab = (uint8_t)(uintptr_t)lv_event_get_user_data(e);
+        mapContactsFillList();
+      }, LV_EVENT_CLICKED, (void*)(uintptr_t)t);
+      lv_obj_t* l = lv_label_create(b);
+      lv_label_set_text(l, TR(names[t]));
+      lv_obj_set_style_text_font(l, &g_font_12, LV_PART_MAIN);
+      lv_obj_set_style_text_color(l, lv_color_hex(COLOR_TEXT), LV_PART_MAIN);
+      lv_obj_center(l);
+      s_map_contacts_tabs[t] = b;
+    }
+  }
+#else
+  const lv_coord_t list_y = 34;
+#endif
+
   // Scrollable list (filled + re-filled by mapContactsFillList).
   s_map_contacts_list = lv_obj_create(card);
   lv_obj_remove_style_all(s_map_contacts_list);
-  lv_obj_set_size(s_map_contacts_list, card_w - 2 * pad, card_h - 2 * pad - 34);
-  lv_obj_set_pos(s_map_contacts_list, 0, 34);
+  lv_obj_set_size(s_map_contacts_list, card_w - 2 * pad, card_h - 2 * pad - list_y);
+  lv_obj_set_pos(s_map_contacts_list, 0, list_y);
   lv_obj_set_flex_flow(s_map_contacts_list, LV_FLEX_FLOW_COLUMN);
   lv_obj_set_style_pad_row(s_map_contacts_list, 6, LV_PART_MAIN);
   lv_obj_set_scroll_dir(s_map_contacts_list, LV_DIR_VER);
@@ -44329,6 +44428,14 @@ static void openMessageInfoPopup(int msg_idx) {
         blen = recolorWords(body, blen, (int)sizeof(body), nodeSigColorHex(hashstr), hashstr, &g_font_12, card_w - 28);
     }
   }
+  // Teammates who said they heard it, from their beacons (MESSAGE_REACH.md).
+  if (CAP_TAK_EXTRAS && m.outgoing && m.channel && teamReachActive() && blen < (int)sizeof(body) - 64) {
+    char names[6][21];
+    const int k = teamHeardBy(m.ts, m.text, names, nullptr, nullptr, 6);
+    blen += snprintf(body + blen, sizeof(body) - blen, "\n%s", k ? TR("Teammates who heard it:") : TR("No teammate has said they heard it yet."));
+    for (int i = 0; i < k && blen < (int)sizeof(body) - 32; i++)
+      blen += snprintf(body + blen, sizeof(body) - blen, "%s%s", i ? ", " : " ", names[i]);
+  }
   if (blen >= (int)sizeof(body)) blen = sizeof(body) - 1;
   body[blen] = '\0';
 
@@ -44954,7 +45061,12 @@ static bool voxIsTalk(const VoxWire::Envelope& env, const char* cap, size_t cap_
 // Waveforms, worked out off the UI task (decoding a 20 s clip takes a moment
 // here) and kept for the last few talks shown.
 struct TalkWave { uint32_t sid; volatile uint8_t state; uint8_t bars[kVoxWaveBars]; };   // 1 working, 2 ready, 3 failed
-static TalkWave s_talk_waves[8] = {};
+// 32 of them: with fewer slots, a chat showing more talks than slots evicted one
+// to decode the next, the finished decode repainted the chat, the repaint
+// evicted another... decoding and redrawing the chat over and over.
+static TalkWave s_talk_waves[32] = {};
+static uint32_t s_talk_wave_last_ms = 0;   // one decode started a second at most
+static volatile bool s_talk_wave_retry = false;   // one waited for that: repaint once it may start
 static int s_talk_wave_next = 0;
 static volatile uint32_t s_talk_wave_ver = 0;   // bumped when one is ready: the chat repaints
 static volatile bool s_talk_wave_busy = false;
@@ -44991,7 +45103,9 @@ static const uint8_t* talkWaveFor(uint32_t sid) {
     return __atomic_load_n(&w.state, __ATOMIC_ACQUIRE) == 2 ? w.bars : nullptr;
   }
 #if TALK_WAVES
-  if (s_talk_wave_busy || !VoxPhotos::haveVoice(sid)) return nullptr;
+  if (!VoxPhotos::haveVoice(sid)) return nullptr;
+  if (s_talk_wave_busy || millis() - s_talk_wave_last_ms < 1000) { s_talk_wave_retry = true; return nullptr; }
+  s_talk_wave_last_ms = millis();
   TalkWave& w = s_talk_waves[s_talk_wave_next];
   if (__atomic_load_n(&w.state, __ATOMIC_ACQUIRE) == 1) return nullptr;   // still working on the old one
   s_talk_wave_next = (s_talk_wave_next + 1) % (int)(sizeof s_talk_waves / sizeof s_talk_waves[0]);
@@ -80817,10 +80931,60 @@ const char*   g_ui_stall_tag = "";     // slowest section of the current UITask:
 uint16_t      g_ui_stall_max = 0;
 static const char*  s_ui_cp_tag = "";
 static uint32_t     s_ui_cp_t0  = 0;
+// Where the time goes (Settings > About, "Busy"): each section's share of the
+// last 10 s, in microseconds so a 1 ms section still counts.
+struct PerfSlot { const char* tag; uint32_t us, max_us; };
+static PerfSlot s_perf[28], s_perf_last[28];
+static uint32_t s_perf_win_us = 0, s_perf_last_win_us = 0, s_perf_loops = 0, s_perf_last_loops = 0;
+static uint32_t s_ui_cp_us = 0;
+static void perfAdd(const char* tag, uint32_t us) {
+  for (PerfSlot& p : s_perf) {
+    if (p.tag == tag || !p.tag) {
+      p.tag = tag;
+      p.us += us;
+      if (us > p.max_us) p.max_us = us;
+      return;
+    }
+  }
+}
+static void perfLoopEnd(uint32_t now_us) {
+  static uint32_t win0 = 0;
+  s_perf_loops++;
+  if (!win0) win0 = now_us;
+  if (now_us - win0 < 10000000u) return;
+  memcpy(s_perf_last, s_perf, sizeof s_perf);
+  s_perf_last_win_us = now_us - win0;
+  s_perf_last_loops = s_perf_loops;
+  memset(s_perf, 0, sizeof s_perf);
+  s_perf_loops = 0;
+  win0 = now_us;
+}
+// "Busy (last 10 s): 23 loops/s; ui:lvgl 41%, ui:tak 9% ..."
+static int perfText(char* buf, size_t cap) {
+  if (!s_perf_last_win_us) return snprintf(buf, cap, "Busy\n  measuring...\n\n");
+  int p = snprintf(buf, cap, "Busy (last 10 s, %lu loops/s)\n",
+                   (unsigned long)(s_perf_last_loops * 1000000ull / s_perf_last_win_us));
+  bool used[28] = {false};
+  for (int k = 0; k < 6; k++) {
+    int best = -1;
+    for (int i = 0; i < 28; i++)
+      if (s_perf_last[i].tag && !used[i] && (best < 0 || s_perf_last[i].us > s_perf_last[best].us)) best = i;
+    if (best < 0 || p >= (int)cap) break;
+    used[best] = true;
+    const PerfSlot& x = s_perf_last[best];
+    p += snprintf(buf + p, cap - p, "  %-11s %2lu%%  max %lu ms\n", x.tag,
+                  (unsigned long)(x.us * 100ull / s_perf_last_win_us), (unsigned long)(x.max_us / 1000));
+  }
+  if (p < (int)cap) p += snprintf(buf + p, cap - p, "\n");
+  return p;
+}
 static inline void uiCp(const char* next) {
   const uint32_t nowms = millis();
   const uint32_t dt = nowms - s_ui_cp_t0;
   if (dt > g_ui_stall_max) { g_ui_stall_max = (uint16_t)(dt > 65535 ? 65535 : dt); g_ui_stall_tag = s_ui_cp_tag; }
+  const uint32_t nus = (uint32_t)micros();
+  perfAdd(s_ui_cp_tag, nus - s_ui_cp_us);
+  s_ui_cp_us = nus;
   s_ui_cp_tag = next;
   s_ui_cp_t0  = nowms;
 }
@@ -81365,6 +81529,7 @@ void UITask::loop() {
   }
 #endif
   g_ui_stall_max = 0; g_ui_stall_tag = ""; s_ui_cp_tag = "ui:head"; s_ui_cp_t0 = now;
+  { const uint32_t nus = (uint32_t)micros(); perfAdd("ui:idle", nus - s_ui_cp_us); s_ui_cp_us = nus; perfLoopEnd(nus); }
 #if defined(ESP32)
   // Persist the clock floor every 15 min (coalesced into the next prefs snapshot).
   // Power loss costs at most this window of floor progress — a soft reset keeps the
@@ -82093,19 +82258,28 @@ void UITask::loop() {
       OtpMessenger::setCallbacks(otpui::toastCb, otpui::incomingCb);
       s_vox_store_set = true;
     }
+    uiCp("ui:vox");
     VoxPhotos::tick();
     if (VoxMic::available()) VoxMic::state();   // releases the mic once a recording ends
+    uiCp("ui:otp");
     OtpMessenger::tick();   // sends, retries, sync checks: whether or not the app is open
     wordsSaveTick(now);     // predictive text: the words you send, to the store
+    uiCp("ui:team");
     teamui::loopTick();     // beacons, alert repeats, alarm, Bloodhound, map refresh
+    if (s_map_markers_stale && mapOnScreen()) renderMapMarkers();   // the map came back into view
+    uiCp("ui:mmcov");
     mmcovui::loopTick(now); // MediaMesh coverage: ask the repeaters every 150 m
 #if CAP_FLOCK_YOU
+    uiCp("ui:flock");
     flockui::loopTick();    // Flock You: radios, detections, nearby cameras, channel alerts
+    uiCp("ui:drone");
     droneui::loopTick();    // Drone Detector: Remote ID tracks, the map, channel alerts
 #endif
 #if CAP_SOUND_LINK
+    uiCp("ui:sound");
     soundui::loopTick();    // Sound link: mic, player, heard messages, the bridge
 #endif
+    uiCp("ui:voxpaint");
 #if CAP_LUA_AUDIO && defined(HAS_TDECK_KEYBOARD) && defined(ESP32)
     walkie::keyTick(tdeckKeyboardMicHeld(), now);   // hold Mic to talk (WALKIE.md)
 #endif
@@ -82113,6 +82287,10 @@ void UITask::loop() {
     if (s_vox_voice_sid != s_vox_voice_seen) { s_vox_voice_seen = s_vox_voice_sid; g_lv.dirty_timeline = true; }
     static uint32_t s_talk_wave_seen = 0, s_talk_fill_ms = 0;   // a waveform worked out: repaint
     if (s_talk_wave_ver != s_talk_wave_seen) { s_talk_wave_seen = s_talk_wave_ver; g_lv.dirty_timeline = true; }
+    else if (s_talk_wave_retry && !s_talk_wave_busy && now - s_talk_wave_last_ms >= 1000) {
+      s_talk_wave_retry = false;   // a talk is waiting for its waveform: one more pass
+      g_lv.dirty_timeline = true;
+    }
     // A talk playing: its waveform fills in. Only the open chat's area is redrawn.
     if (s_vox_voice_sid && (uint32_t)(now - s_talk_fill_ms) >= 250) {
       s_talk_fill_ms = now;
