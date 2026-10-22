@@ -49,6 +49,11 @@ jobs:
           g++ -std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined -I src \
               -o /tmp/test_mediamesh test/test_mediamesh_core.cpp
           /tmp/test_mediamesh
+      - name: Quick replies (golden bytes and report hashes shared with Open TAK)
+        run: |
+          g++ -std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined -I src \
+              -o /tmp/test_quick_reply test/test_quick_reply.cpp
+          /tmp/test_quick_reply
       - name: MediaMesh coverage margins (golden values shared with Open TAK)
         run: |
           g++ -std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined -I src \
