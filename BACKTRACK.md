@@ -11,6 +11,8 @@ The track is thinned to the 120 points a route holds: the corners stay, the
 straight stretches lose their in-between points (bends under 30° are "continue").
 Stop it from the Bloodhound strip like any other route.
 
+Not on the ThinkNode M9 or the T-Display P4, whose app space is full (`CAP_TAK_EXTRAS`).
+
 It needs a recorded track from this session (at least two points); after a
 restart, the earlier track is still in its GPX file on the card, but isn't
 followed from there yet.

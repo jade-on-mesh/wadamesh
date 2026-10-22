@@ -39374,6 +39374,7 @@ static void mapOptTrackCb(lv_event_t* e) {
 // Map options > Follow my track back (BACKTRACK.md): this session's recorded
 // track, followed from where you are back to where it began, with the turn
 // cues of a shared route.
+#if CAP_TAK_EXTRAS
 bool teamFollowTrack(const int32_t* lat5, const int32_t* lon5, int n, const char* label);   // TeamUI.inc
 static void mapOptBacktrackCb(lv_event_t* e) {
   if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
@@ -39401,6 +39402,7 @@ static void mapOptBacktrackCb(lv_event_t* e) {
   if (g_lv.task) g_lv.task->showAlert(ok ? TR("Following your track back") : TR("Out of memory"), 1600);
   renderMapMarkers();
 }
+#endif  // CAP_TAK_EXTRAS
 #endif
 static void mapOptFavOnlyCb(lv_event_t* e) {
   if (lv_event_get_code(e) != LV_EVENT_VALUE_CHANGED) return;
@@ -39816,7 +39818,7 @@ static void openMapOptions() {
     lv_obj_align(l, LV_ALIGN_LEFT_MID, 8, 0);
     y += 40;
   }
-#if CAP_TRACKS
+#if CAP_TRACKS && CAP_TAK_EXTRAS
   mk_row_btn(LV_SYMBOL_LOOP "  Follow my track back", mapOptBacktrackCb);
 #endif
   mk_row_btn(LV_SYMBOL_REFRESH "  Reload tiles in view", mapOptReloadCb);
