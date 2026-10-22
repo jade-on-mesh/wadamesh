@@ -16722,6 +16722,7 @@ static void mediaMeshSaveCb(lv_event_t* e) {
   g_lv.task->showAlert(TR("MediaMesh radio saved"), 1100);
 }
 
+static void mmcovBuildRows(lv_obj_t* card);   // MediaMeshCoverageUI.inc, with the map further down
 static void buildMediaMeshCard() {
   lv_obj_t* c = setCard("radio2 (MediaMesh)");
   if (!mediamesh::supported()) {
@@ -16731,6 +16732,7 @@ static void buildMediaMeshCard() {
     s_mm_t_freq_ta = s_mm_t_bw_ta = s_mm_t_sf_ta = s_mm_t_cr_ta = nullptr;
     setNote(c, "This radio can't run a second frequency. It needs an SX1262 board such as the T-Deck or Heltec V4. "
                "The Terminal still takes tempradio.");
+    mmcovBuildRows(c);   // the repeaters' MediaMesh can still be mapped
     return;
   }
   const mediamesh::Config& cfg = mediamesh::config();
@@ -16776,6 +16778,7 @@ static void buildMediaMeshCard() {
   s_mm_find_val = setInfoRow(c, "Found", s_mm_find_timer ? TR("Listening...") : "");
   setNote(c, "Find MediaMesh listens on each preset for about 10 s while nearby repeaters are asked to answer. "
              "MediaMesh repeaters answer on radio2 too, so the preset they're heard on is the one in use here.");
+  mmcovBuildRows(c);   // Map coverage (MediaMeshCoverageUI.inc)
   lv_obj_t* r1 = setFieldRow(c);
   s_mm_freq_ta = setField(r1, "Frequency (MHz)", "MHz", 15, setFieldW(2));
   s_mm_bw_ta   = setField(r1, "Bandwidth (kHz)", "kHz", 10, setFieldW(2));
@@ -38588,6 +38591,19 @@ static void routeHudUpdate();
 static void showRouteHud();
 static void hideRouteHud();
 
+// MediaMesh coverage (Settings > MediaMesh > Map coverage): recorder, map layer, settings rows.
+#if CAP_MM_COVERAGE
+#include "MediaMeshCoverageUI.inc"
+#else
+namespace mmcovui {
+static void loopTick(uint32_t) {}
+static bool recording() { return false; }
+static void freeMapObj() {}
+static void drawOnMap(lv_obj_t*, double, double) {}
+}  // namespace mmcovui
+static void mmcovBuildRows(lv_obj_t*) {}
+#endif
+
 // ---- Discover wardriving coverage overlay (drawn on the map pan layer) ----
 // Plots the Discover app's logged coverage samples (s_disc_track[], populated in discoverWardriveTick)
 // as signal-coloured dots — a personal RF-coverage map: a 0-hop hit means "reachable from that point",
@@ -38672,6 +38688,7 @@ static void freeMapMarkers() {
   }
   s_route_obj_n = 0;
   discoverFreeMapObjs();
+  mmcovui::freeMapObj();
 #if CAP_TRACKS
   trackFreeMapObj();
 #endif
@@ -38902,6 +38919,7 @@ static void renderMapMarkers() {
 
   // Discover wardriving coverage dots (my logged signal samples), under the route overlay.
   if (s_disc_track_n > 0) discoverDrawCoverage(parent, cwx, cwy);
+  mmcovui::drawOnMap(parent, cwx, cwy);   // MediaMesh coverage
 #if CAP_TRACKS
   trackDrawOnMap(parent, cwx, cwy, s_map_zoom, k_map_canvas_w, k_map_canvas_h);   // Record track
 #endif
@@ -77770,6 +77788,7 @@ static uint32_t s_gps_phase_at  = 0;   // millis() the current waking or rest be
 static uint32_t s_gps_fix_since = 0;   // millis() of the first fresh fix in this waking (0: none)
 static bool gpsWantedLive() {
   if (trackRecording()) return true;   // a track needs every position, screen on or off
+  if (mmcovui::recording()) return true;   // MediaMesh coverage samples every 150 m
   if (g_lv.task && !g_lv.task->isScreenOff() && getActiveTab() == MAP_TAB_INDEX) return true;
   if (g_set_modal.gps_status) return true;   // the GPS page is open
   return s_discover_root != nullptr;         // Discover logs positions as it scans
@@ -81872,6 +81891,7 @@ void UITask::loop() {
     if (VoxMic::available()) VoxMic::state();   // releases the mic once a recording ends
     OtpMessenger::tick();   // sends, retries, sync checks: whether or not the app is open
     teamui::loopTick();     // beacons, alert repeats, alarm, Bloodhound, map refresh
+    mmcovui::loopTick(now); // MediaMesh coverage: ask the repeaters every 150 m
 #if CAP_FLOCK_YOU
     flockui::loopTick();    // Flock You: radios, detections, nearby cameras, channel alerts
     droneui::loopTick();    // Drone Detector: Remote ID tracks, the map, channel alerts

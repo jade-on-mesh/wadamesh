@@ -108,6 +108,45 @@ filter tuned for 910.525 (flat about 908.6–912.8 MHz) and 625 kHz above the ma
 channel (the channels' edges about 530 kHz apart). Everyone exchanging
 media has to use the same settings. Radios already set up keep their own.
 
+### Coverage map
+
+*Settings › radio2 (MediaMesh) › Map coverage* maps where the MediaMesh
+repeaters can be reached as you walk or drive, the same as MeshCore Open TAK's
+coverage map. Every 150 m, and never more often than every 40 s, the radio asks
+the repeaters in direct range as Find MediaMesh does (the radio2 flag on
+DISCOVER_REQ) and keeps only the ones that answer with radio2 on. Repeaters
+without MediaMesh, and every other node, are left out.
+
+Each sample is a dot on the map, coloured by the best repeater's margin:
+
+| Colour | Margin | Meaning |
+| --- | --- | --- |
+| Green | 5 dB or more | radio2 reaches it with room to spare |
+| Amber | 0 to 5 dB | just reaches |
+| Red | below 0 | heard on the main mesh, but radio2 likely won't reach it |
+| Grey | no answer | no MediaMesh repeater answered here |
+
+The ask goes out on the main mesh, so radio2's reach is an estimate: the weaker
+of the two directions' SNR (ours of the reply, the repeater's of the ask), less
+the extra noise of radio2's wider bandwidth (10·log10 of radio2's bandwidth over
+the main mesh's), against the lowest SNR radio2's spreading factor decodes
+(SF7 −7.5 dB, each SF step 2.5 dB lower). The sums are in
+`src/helpers/MediaMeshCoverage.h`, with the same golden values as the app's
+test. A margin under a few dB is worth checking by sending a photo there.
+
+It needs a GPS fix (not on the ThinkNode M9, whose flash is full), and the GPS stays on while it records, with the screen off
+too. A Discover scan or Find MediaMesh in progress pauses it. Radios that can't
+run radio2 themselves can still map the repeaters'. The map keeps the last 500
+samples (*Clear coverage map* empties it); every sample is also a line per
+repeater in `/meshcomod/mediamesh_coverage.csv` on the card, read back at
+start-up:
+
+```
+epoch,lat,lon,reach,best_margin,repeater,snr,remote_snr,margin
+1760000000,47.600000,-122.300000,marginal,4.5,First Hill,4.5,3.0,4.5
+1760000040,47.601400,-122.300000,none,,,,,
+```
+
 ## Repeaters
 
 A repeater running MeshCore with radio profiles
@@ -404,3 +443,4 @@ radio2 commands with an error. `tempradio` works on every board.
 | Contact/channel contexts, `tx.user` / `tx.channel`, `#r2-` lookups, `CMD_RUN_CLI_COMMAND` | `src/MyMesh.cpp`, `src/MyMesh.h` |
 | MediaMesh Settings cards, contact ⇄ Radio, channel Send on | `src/ui-touch/UITask.cpp` (`buildMediaMeshCard`, `actionSheetRadioCb`, `chanScopeRadioCb`) |
 | Terminal commands | `MyMesh::handleMeshcomodCommand` |
+| Coverage map: margins, schedule, CSV (host-tested); recorder, map layer, settings rows | `src/helpers/MediaMeshCoverage.h`, `test/test_mediamesh_coverage.cpp`; `src/ui-touch/MediaMeshCoverageUI.inc` |

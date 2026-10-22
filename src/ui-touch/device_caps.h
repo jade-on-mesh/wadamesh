@@ -328,6 +328,16 @@
   #endif
 #endif
 
+// MediaMesh coverage map (MEDIAMESH.md, "Coverage map"): needs a GPS. Not on the
+// ThinkNode M9, whose app slot is full. A board can opt in or out by defining it.
+#ifndef CAP_MM_COVERAGE
+  #if CAP_GPS && !defined(HAS_THINKNODE_M9)
+    #define CAP_MM_COVERAGE 1
+  #else
+    #define CAP_MM_COVERAGE 0
+  #endif
+#endif
+
 // A keyboard that comes and goes at runtime and is routed like the Bluetooth
 // one above (bleKbdDispatch() and friends): Bluetooth itself, an M5Stack CardKB,
 // or the T-Display P4's clip-on keyboard expansion. CAP_BLE_KEYBOARD stays the
