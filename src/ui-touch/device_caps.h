@@ -338,6 +338,17 @@
   #endif
 #endif
 
+// MeshCore Open TAK extras with screens of their own (quick replies, home
+// tiles, predictive text...): not on boards whose app slot is already full,
+// the ThinkNode M9 and the T-Display P4. A board can opt in or out by defining it.
+#ifndef CAP_TAK_EXTRAS
+  #if defined(HAS_THINKNODE_M9) || defined(HAS_TDISPLAY_P4)
+    #define CAP_TAK_EXTRAS 0
+  #else
+    #define CAP_TAK_EXTRAS 1
+  #endif
+#endif
+
 // A keyboard that comes and goes at runtime and is routed like the Bluetooth
 // one above (bleKbdDispatch() and friends): Bluetooth itself, an M5Stack CardKB,
 // or the T-Display P4's clip-on keyboard expansion. CAP_BLE_KEYBOARD stays the

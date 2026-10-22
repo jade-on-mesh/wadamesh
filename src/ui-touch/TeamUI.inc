@@ -1091,6 +1091,142 @@ void teamOnChannelData(int idx, const uint8_t* data, size_t len) {
 // a watched channel goes on the map.
 // MeshCore TEAM's channel text (MESHCORE_TEAM.md): true when it is, so it isn't
 // shown as chat; on the team channel it becomes members, pins and routes.
+// The map's "On map" list, first tab: teammates, team pins, watched reports and
+// pins shared in chats, nearest first (or newest, without a position of our
+// own). A tap centres the map there. Returns how many rows it added.
+struct OnMapRow { double lat, lon; uint32_t age_s; double dist_km; uint32_t color; char name[40]; char kind[40]; };
+static OnMapRow* s_onmap = nullptr;
+static constexpr int kOnMapMax = 96;
+
+int teamOnMapFill(lv_obj_t* list, lv_coord_t rw, double self_lat, double self_lon) {
+  using namespace teamui;
+  if (!s_onmap) s_onmap = (OnMapRow*)psAlloc(sizeof(OnMapRow) * kOnMapMax);
+  if (!s_onmap || !list) return 0;
+  const bool fix = self_lat != 0.0 || self_lon != 0.0;
+  const uint32_t now = millis();
+  const uint32_t epoch = s_io.epoch();
+  int n = 0;
+  auto add = [&](double lat, double lon, uint32_t age_s, uint32_t color, const char* name, const char* kind) {
+    if (n >= kOnMapMax || (lat == 0.0 && lon == 0.0)) return;
+    OnMapRow& r = s_onmap[n++];
+    r.lat = lat;
+    r.lon = lon;
+    r.age_s = age_s;
+    r.dist_km = fix ? TeamWire::distanceM(self_lat, self_lon, lat, lon) / 1000.0 : -1;
+    r.color = color;
+    snprintf(r.name, sizeof r.name, "%s", name && *name ? name : "?");
+    snprintf(r.kind, sizeof r.kind, "%s", kind);
+  };
+  if (team::Core* c = s_core) {
+    for (int i = 0; i < team::kMaxMembers; i++) {
+      team::Member* m = c->member(i);
+      if (!m) continue;
+      char kind[40];
+      c->roleName(m->pos.role, kind, sizeof kind);
+      if (m->pos.sos) snprintf(kind + strlen(kind), sizeof kind - strlen(kind), " \xC2\xB7 SOS");
+      add(m->pos.lat, m->pos.lon, (now - m->heard_ms) / 1000, TeamWire::colorRgb(m->pos.color), m->pos.callsign,
+          kind);
+    }
+    for (int i = 0; i < team::kMaxMarkers; i++) {
+      const TeamWire::Marker* m = c->marker(i);
+      if (!m) continue;
+      const uint32_t age = epoch && m->time && m->time < epoch ? epoch - m->time : 0;
+      add(m->lat, m->lon, age, TeamWire::kindRgb(m->kind), m->label[0] ? m->label : TeamWire::kindName(m->kind),
+          TeamWire::kindName(m->kind));
+    }
+  }
+  if (watchfeed::Store* w = s_watch) {
+    for (int i = 0; i < watchfeed::kMaxItems; i++) {
+      const watchfeed::Item& it = w->items[i];
+      if (!w->live(it, now)) continue;
+      char name[64];
+      if (it.r.track[0]) watchfeed::droneLabel(it.r, it.has_course, it.course, name, sizeof name);
+      else snprintf(name, sizeof name, "%s", it.r.title);
+      add(it.r.lat, it.r.lon, (now - it.at_ms) / 1000, watchfeed::levelRgb(it.r.level), name, channelName(it.channel));
+    }
+  }
+  if (g_lv.task) {
+    const sharedpins::Pin* pins = nullptr;
+    const int k = g_lv.task->sharedPins(&pins);
+    for (int i = 0; pins && i < k; i++) {
+      const sharedpins::Pin& p = pins[i];
+      char kind[48];
+      snprintf(kind, sizeof kind, "%s %s", TR("Shared in"), p.thread);
+      const uint32_t age = epoch && p.ts && p.ts < epoch ? epoch - p.ts : 0;
+      add(p.lat, p.lon, age, 0x7C3AED, p.label[0] ? p.label : p.from, kind);
+    }
+  }
+  // Nearest first; without a position, newest first.
+  for (int i = 1; i < n; i++)
+    for (int j = i; j > 0; j--) {
+      const OnMapRow& a = s_onmap[j];
+      const OnMapRow& b = s_onmap[j - 1];
+      const bool before = fix ? a.dist_km < b.dist_km : a.age_s < b.age_s;
+      if (!before) break;
+      const OnMapRow t = s_onmap[j];
+      s_onmap[j] = s_onmap[j - 1];
+      s_onmap[j - 1] = t;
+    }
+  for (int i = 0; i < n; i++) {
+    const OnMapRow& r = s_onmap[i];
+    lv_obj_t* b = lv_btn_create(list);
+    lv_obj_set_size(b, rw, 46);
+    styleButton(b);
+    lv_obj_set_style_bg_color(b, lv_color_hex(COLOR_CONTROL), LV_PART_MAIN);
+    lv_obj_set_style_pad_all(b, 0, LV_PART_MAIN);
+    lv_obj_set_style_border_side(b, LV_BORDER_SIDE_LEFT, LV_PART_MAIN);
+    lv_obj_set_style_border_width(b, 4, LV_PART_MAIN);
+    lv_obj_set_style_border_color(b, lv_color_hex(r.color), LV_PART_MAIN);
+    lv_obj_add_event_cb(b, [](lv_event_t* e) {
+      if (lv_event_get_code(e) != LV_EVENT_CLICKED || !s_onmap) return;
+      const OnMapRow& x = s_onmap[(int)(intptr_t)lv_event_get_user_data(e)];
+      const double la = x.lat, lo = x.lon;
+      lv_indev_t* a = lv_indev_get_act();
+      if (a) lv_indev_wait_release(a);
+      closeMapContacts();
+      s_map_center_lat = la;
+      s_map_center_lon = lo;
+      s_map_view_inited = true;
+      if (s_map_zoom < 14) s_map_zoom = 14;
+      renderMapTiles();
+      renderMapMarkers();
+      refreshMapInfoLabel();
+    }, LV_EVENT_CLICKED, (void*)(intptr_t)i);
+    lv_obj_t* nl = lv_label_create(b);
+    lv_label_set_text(nl, r.name);
+    lv_label_set_long_mode(nl, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(nl, rw - 96);
+    lv_obj_set_height(nl, lv_font_get_line_height(&g_font_14));
+    lv_obj_set_style_text_font(nl, &g_font_14, LV_PART_MAIN);
+    lv_obj_set_style_text_color(nl, lv_color_hex(COLOR_TEXT), LV_PART_MAIN);
+    useChainedFont(nl);
+    lv_obj_align(nl, LV_ALIGN_TOP_LEFT, 8, 5);
+    char dist[16] = "", age[12], meta[32];
+    if (r.dist_km >= 0) {
+      if (r.dist_km < 1) snprintf(dist, sizeof dist, "%d m", (int)(r.dist_km * 1000));
+      else snprintf(dist, sizeof dist, "%.1f km", r.dist_km);
+    }
+    formatAgeBadge(age, sizeof age, r.age_s);
+    if (dist[0]) snprintf(meta, sizeof meta, "%s \xC2\xB7 %s", dist, age);
+    else snprintf(meta, sizeof meta, "%s", age);
+    lv_obj_t* ml = lv_label_create(b);
+    lv_label_set_text(ml, meta);
+    lv_obj_set_style_text_font(ml, &g_font_12, LV_PART_MAIN);
+    lv_obj_set_style_text_color(ml, lv_color_hex(COLOR_SUB), LV_PART_MAIN);
+    lv_obj_align(ml, LV_ALIGN_TOP_RIGHT, -8, 6);
+    lv_obj_t* kl = lv_label_create(b);
+    lv_label_set_text(kl, r.kind);
+    lv_label_set_long_mode(kl, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(kl, rw - 16);
+    lv_obj_set_height(kl, lv_font_get_line_height(&g_font_12));
+    lv_obj_set_style_text_font(kl, &g_font_12, LV_PART_MAIN);
+    lv_obj_set_style_text_color(kl, lv_color_hex(COLOR_SUB), LV_PART_MAIN);
+    useChainedFont(kl);
+    lv_obj_align(kl, LV_ALIGN_BOTTOM_LEFT, 8, -4);
+  }
+  return n;
+}
+
 bool teamCompatOnChannelText(int idx, const char* text) {
   using namespace teamui;
   if (idx < 0 || !text) return false;

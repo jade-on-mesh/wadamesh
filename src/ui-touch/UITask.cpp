@@ -40026,9 +40026,17 @@ static const char* mapContactsSortName(uint8_t s) {
                case MC_SORT_HEARD: return "Heard"; default: return "?"; }
 }
 
+// The "On map" tabs: our own points (team, pins, watched channels, pins shared
+// in chats; TeamUI.inc fills it), then the mesh's nodes by kind.
+enum : uint8_t { MC_TAB_OURS, MC_TAB_REPEATERS, MC_TAB_COMPANIONS, MC_TAB_ROOMS, MC_TAB_SENSORS, MC_TAB_COUNT };
+static uint8_t s_map_contacts_tab = MC_TAB_OURS;
+static lv_obj_t* s_map_contacts_tabs[MC_TAB_COUNT] = {nullptr};
+int teamOnMapFill(lv_obj_t* list, lv_coord_t rw, double self_lat, double self_lon);   // TeamUI.inc
+
 static void closeMapContacts() {
   if (s_map_contacts_root) { popupClose(&s_map_contacts_root); }
   s_map_contacts_list = nullptr;
+  for (auto& t : s_map_contacts_tabs) t = nullptr;   // deleted with the card
 }
 static void mapContactsBackdropCb(lv_event_t* e) {
   if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
@@ -40118,6 +40126,25 @@ static void mapContactsFillList() {
   if (!s_map_contacts_list) return;
   lv_indev_reset(nullptr, nullptr);   // #27: abort any scroll-throw before freeing these rows (UAF on telemetry/position rebuild mid-flick)
   lv_obj_clean(s_map_contacts_list);
+  for (int t = 0; t < MC_TAB_COUNT; t++) {   // the chosen tab, filled in
+    lv_obj_t* b = s_map_contacts_tabs[t];
+    if (!b) continue;
+    lv_obj_set_style_bg_color(b, lv_color_hex(t == s_map_contacts_tab ? COLOR_GLOW : COLOR_CONTROL), LV_PART_MAIN);
+  }
+  if (s_map_contacts_tab == MC_TAB_OURS) {
+    const double sl = g_lv.task ? g_lv.task->getNodeLat() : 0.0, so = g_lv.task ? g_lv.task->getNodeLon() : 0.0;
+    const lv_coord_t rw0 = (lv_disp_get_hor_res(nullptr) - 24) - 2 * 10 - 8;
+    if (teamOnMapFill(s_map_contacts_list, rw0, sl, so) == 0) {
+      lv_obj_t* empty = lv_label_create(s_map_contacts_list);
+      lv_label_set_text(empty, TR("No teammates, pins or watched\nreports on the map yet."));
+      lv_obj_set_style_text_color(empty, lv_color_hex(COLOR_SUB), LV_PART_MAIN);
+      lv_obj_set_style_text_font(empty, &g_font_14, LV_PART_MAIN);
+    }
+    return;
+  }
+  const uint8_t want_type = s_map_contacts_tab == MC_TAB_REPEATERS ? ADV_TYPE_REPEATER
+                          : s_map_contacts_tab == MC_TAB_COMPANIONS ? ADV_TYPE_CHAT
+                          : s_map_contacts_tab == MC_TAB_ROOMS ? ADV_TYPE_ROOM : ADV_TYPE_SENSOR;
 
   // Collect GPS-bearing contacts + their distance/age keys.
   static MapContactEntry* ents = (MapContactEntry*)psAlloc(sizeof(MapContactEntry) * 64);
@@ -40131,6 +40158,7 @@ static void mapContactsFillList() {
     ContactInfo c;
     if (!the_mesh.getContactByIdx(i, c)) continue;
     if (c.gps_lat == 0 && c.gps_lon == 0) continue;
+    if (c.type != want_type) continue;
     MapContactEntry& e = ents[n];
     e.midx = (int)i;
     e.type = c.type;
@@ -40168,7 +40196,7 @@ static void mapContactsFillList() {
 
   if (n == 0) {
     lv_obj_t* empty = lv_label_create(s_map_contacts_list);
-    lv_label_set_text(empty, TR("No contacts have shared\na GPS location yet."));
+    lv_label_set_text(empty, TR("None of these have shared\na GPS location yet."));
     lv_obj_set_style_text_color(empty, lv_color_hex(COLOR_SUB), LV_PART_MAIN);
     lv_obj_set_style_text_font(empty, &g_font_14, LV_PART_MAIN);
     return;
@@ -40284,11 +40312,41 @@ static void openMapContactsList() {
   lv_obj_set_style_text_color(s_map_contacts_sort_lbl, lv_color_hex(COLOR_TEXT), LV_PART_MAIN);
   lv_obj_center(s_map_contacts_sort_lbl);
 
+  // Tabs: ours, then the mesh's nodes by kind (a row that scrolls sideways).
+  {
+    lv_obj_t* row = lv_obj_create(card);
+    lv_obj_remove_style_all(row);
+    lv_obj_set_size(row, card_w - 2 * pad, 28);
+    lv_obj_set_pos(row, 0, 32);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_style_pad_column(row, 4, LV_PART_MAIN);
+    lv_obj_set_scroll_dir(row, LV_DIR_HOR);
+    lv_obj_set_scrollbar_mode(row, LV_SCROLLBAR_MODE_OFF);
+    static const char* const names[MC_TAB_COUNT] = {"Team & watch", "Repeaters", "Companions", "Rooms", "Sensors"};
+    for (int t = 0; t < MC_TAB_COUNT; t++) {
+      lv_obj_t* b = lv_btn_create(row);
+      styleButton(b);
+      lv_obj_set_size(b, LV_SIZE_CONTENT, 26);
+      lv_obj_set_style_pad_hor(b, 8, LV_PART_MAIN);
+      lv_obj_add_event_cb(b, [](lv_event_t* e) {
+        if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+        s_map_contacts_tab = (uint8_t)(uintptr_t)lv_event_get_user_data(e);
+        mapContactsFillList();
+      }, LV_EVENT_CLICKED, (void*)(uintptr_t)t);
+      lv_obj_t* l = lv_label_create(b);
+      lv_label_set_text(l, TR(names[t]));
+      lv_obj_set_style_text_font(l, &g_font_12, LV_PART_MAIN);
+      lv_obj_set_style_text_color(l, lv_color_hex(COLOR_TEXT), LV_PART_MAIN);
+      lv_obj_center(l);
+      s_map_contacts_tabs[t] = b;
+    }
+  }
+
   // Scrollable list (filled + re-filled by mapContactsFillList).
   s_map_contacts_list = lv_obj_create(card);
   lv_obj_remove_style_all(s_map_contacts_list);
-  lv_obj_set_size(s_map_contacts_list, card_w - 2 * pad, card_h - 2 * pad - 34);
-  lv_obj_set_pos(s_map_contacts_list, 0, 34);
+  lv_obj_set_size(s_map_contacts_list, card_w - 2 * pad, card_h - 2 * pad - 66);
+  lv_obj_set_pos(s_map_contacts_list, 0, 66);
   lv_obj_set_flex_flow(s_map_contacts_list, LV_FLEX_FLOW_COLUMN);
   lv_obj_set_style_pad_row(s_map_contacts_list, 6, LV_PART_MAIN);
   lv_obj_set_scroll_dir(s_map_contacts_list, LV_DIR_VER);
