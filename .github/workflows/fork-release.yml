@@ -111,7 +111,8 @@ jobs:
         run: |
           set -euo pipefail
           unset WIFI_SSID WIFI_PWD
-          export PLATFORMIO_BUILD_FLAGS="-DFIRMWARE_RELEASE_TAG='\"${TAG}\"' -DFIRMWARE_VERSION='\"wadamesh-tak ${TAG#tak-}\"'"
+          BUILD_DATE="$(date -u '+%-d %b %Y')"   # e.g. "22 Oct 2026"; without it the About page shows upstream's date
+          export PLATFORMIO_BUILD_FLAGS="-DFIRMWARE_RELEASE_TAG='\"${TAG}\"' -DFIRMWARE_VERSION='\"wadamesh-tak ${TAG#tak-}\"' -DFIRMWARE_BUILD_DATE='\"${BUILD_DATE}\"'"
           pio run -e "${{ matrix.env }}"
           pio run -t mergebin -e "${{ matrix.env }}" || echo "::notice::no merged image for ${{ matrix.env }}"
           mkdir -p dist

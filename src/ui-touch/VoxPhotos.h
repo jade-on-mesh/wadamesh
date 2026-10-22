@@ -51,6 +51,9 @@ bool loadVoice(uint32_t sid, int* mode, uint8_t** frames, size_t* len);
 bool loadFile(uint32_t sid, bool voice, uint8_t** data, size_t* len);
 // Bumped whenever any photo's status changes; the chat redraws on a change.
 uint32_t version();
+// Bumped only when a photo or talk changes state (requesting, complete,
+// failed, recorded), not for each packet of one arriving.
+uint32_t stateVersion();
 
 // ---- Voice clips recorded on this radio --------------------------------------
 // Stores a clip (taking ownership of `bits`, a malloc'd buffer), makes it
