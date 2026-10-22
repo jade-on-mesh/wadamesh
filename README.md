@@ -56,6 +56,7 @@ frequency (MediaMesh, `radio2`) in [MEDIAMESH.md](MEDIAMESH.md). Updating a repe
 the SD card (Mike Carper's LoRa OTA) is in [LORA_UPDATE.md](LORA_UPDATE.md). The Remote ID
 drone detector (app drawer > Drones) is in [DRONES.md](DRONES.md).
 The Team app understands MeshCore TEAM users on the team channel: see [MESHCORE_TEAM.md](MESHCORE_TEAM.md).
+Red light (night vision) is in [NIGHT_MODE.md](NIGHT_MODE.md).
 
 ## Offline map tiles
 
