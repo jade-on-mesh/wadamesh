@@ -32,9 +32,11 @@ suite runs in CI. The Wadamesh glue is `src/ui-touch/DroneCore.h`.
 3. **Puts them on the map.** Drones with a position show on the map like Team's
    Watch reports: an orange square with the drone's label, its operator as a
    small grey dot, and its direction of travel. They stay for Watch's time.
-4. **Tells the mesh.** In **Setup**, pick an alert channel (for example
-   `#dronewatch`; never Public) and turn on **Post drones there**. Each drone is
-   posted at most once a minute, and again only after it moves 200 m:
+4. **Tells the mesh.** The alert channel is `#dronewatch` unless you pick
+   another in **Setup** (never Public). If this standalone hasn't joined
+   `#dronewatch`, **Setup** shows **Join #dronewatch**. Turn on **Post drones
+   there**. Each drone is posted at most once a minute, and again only after it
+   moves 200 m:
 
    ```
    DRONE 1581F9DEV26590296G6G h120m 7.0m/s hdg90
