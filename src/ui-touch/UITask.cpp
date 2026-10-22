@@ -17243,8 +17243,10 @@ extern uint8_t  g_stall_cnt, g_stall_w;
 // (uptime + heap). Kept in their own small label so the 1 Hz refresh only re-lays
 // ~7 lines — re-setting the full ~40-line text made LVGL spend ~340 ms per second
 // rendering while System Information was open (the "ui:lvgl" stall-ring entries).
+static int perfText(char* buf, size_t cap);   // with UITask::loop below
 static void sysInfoTextLive(char* buf, size_t cap) {
   int p = 0;
+  p += perfText(buf, cap);   // where the time goes, first: the slowdown hunt reads it
 #if defined(ESP32)
   const uint32_t up_s = (uint32_t)(esp_timer_get_time() / 1000000ULL);
   const uint32_t up_d = up_s / 86400u;
@@ -17527,7 +17529,7 @@ static void refreshSysInfo(unsigned long now) {
     if (lv_indev_get_scroll_dir(in) != LV_DIR_NONE) { next = now + 120; return; }
   }
   next = now + 1000;
-  char buf[1024];
+  static char buf[1600];   // static: the busy table made it too big for the stack
   sysInfoTextLive(buf, sizeof buf);
   lv_label_set_text(s_sysinfo_lbl, buf);
   // Slow tier: pushing identical text would still invalidate + repaint the whole
@@ -17600,7 +17602,7 @@ static void refreshSleepDiag(unsigned long now) {
 
 static void buildSystemInfoSettings() {
   lv_obj_t* body = createSettingsModal(TR("System Information"), SettingsModalKind::SystemInfo);
-  char buf[1024];
+  static char buf[1600];
 
   // FLEX COLUMN, deliberately not the manual y cursor the rest of this file uses.
   // Both labels below are re-texted AFTER build with text whose LINE COUNT
@@ -38705,7 +38707,18 @@ static void removeMapLocation();
 // Plot self + contacts onto the canvas at their lat/lon. Called every time
 // tiles are re-rendered (pan, zoom, recenter, tab open) so markers stay
 // pinned to the right pixel for the current center.
+// The map isn't on screen: rebuilding its markers there is wasted work (it is
+// hundreds of objects), and the team, watched channels, Flock You, the drone
+// detector and coverage all ask for it as their data changes. Note it instead;
+// the map catches up when it is shown again (mapMarkersCatchUp) or opened
+// (onMapTabActivated renders it anyway).
+static bool s_map_markers_stale = false;
+static bool mapOnScreen() {
+  return s_map_canvas && getActiveTab() == MAP_TAB_INDEX && g_lv.task && !g_lv.task->isScreenOff();
+}
 static void renderMapMarkers() {
+  if (s_map_canvas && !mapOnScreen()) { s_map_markers_stale = true; return; }
+  s_map_markers_stale = false;
   freeMapMarkers();
   if (!s_map_canvas) return;
   if (s_map_center_lat == 0.0 && s_map_center_lon == 0.0) return;
@@ -44754,7 +44767,12 @@ static bool voxIsTalk(const VoxWire::Envelope& env, const char* cap, size_t cap_
 // Waveforms, worked out off the UI task (decoding a 20 s clip takes a moment
 // here) and kept for the last few talks shown.
 struct TalkWave { uint32_t sid; volatile uint8_t state; uint8_t bars[kVoxWaveBars]; };   // 1 working, 2 ready, 3 failed
-static TalkWave s_talk_waves[8] = {};
+// 32 of them: with fewer slots, a chat showing more talks than slots evicted one
+// to decode the next, the finished decode repainted the chat, the repaint
+// evicted another... decoding and redrawing the chat over and over.
+static TalkWave s_talk_waves[32] = {};
+static uint32_t s_talk_wave_last_ms = 0;   // one decode started a second at most
+static volatile bool s_talk_wave_retry = false;   // one waited for that: repaint once it may start
 static int s_talk_wave_next = 0;
 static volatile uint32_t s_talk_wave_ver = 0;   // bumped when one is ready: the chat repaints
 static volatile bool s_talk_wave_busy = false;
@@ -44791,7 +44809,9 @@ static const uint8_t* talkWaveFor(uint32_t sid) {
     return __atomic_load_n(&w.state, __ATOMIC_ACQUIRE) == 2 ? w.bars : nullptr;
   }
 #if TALK_WAVES
-  if (s_talk_wave_busy || !VoxPhotos::haveVoice(sid)) return nullptr;
+  if (!VoxPhotos::haveVoice(sid)) return nullptr;
+  if (s_talk_wave_busy || millis() - s_talk_wave_last_ms < 1000) { s_talk_wave_retry = true; return nullptr; }
+  s_talk_wave_last_ms = millis();
   TalkWave& w = s_talk_waves[s_talk_wave_next];
   if (__atomic_load_n(&w.state, __ATOMIC_ACQUIRE) == 1) return nullptr;   // still working on the old one
   s_talk_wave_next = (s_talk_wave_next + 1) % (int)(sizeof s_talk_waves / sizeof s_talk_waves[0]);
@@ -80611,10 +80631,60 @@ const char*   g_ui_stall_tag = "";     // slowest section of the current UITask:
 uint16_t      g_ui_stall_max = 0;
 static const char*  s_ui_cp_tag = "";
 static uint32_t     s_ui_cp_t0  = 0;
+// Where the time goes (Settings > About, "Busy"): each section's share of the
+// last 10 s, in microseconds so a 1 ms section still counts.
+struct PerfSlot { const char* tag; uint32_t us, max_us; };
+static PerfSlot s_perf[28], s_perf_last[28];
+static uint32_t s_perf_win_us = 0, s_perf_last_win_us = 0, s_perf_loops = 0, s_perf_last_loops = 0;
+static uint32_t s_ui_cp_us = 0;
+static void perfAdd(const char* tag, uint32_t us) {
+  for (PerfSlot& p : s_perf) {
+    if (p.tag == tag || !p.tag) {
+      p.tag = tag;
+      p.us += us;
+      if (us > p.max_us) p.max_us = us;
+      return;
+    }
+  }
+}
+static void perfLoopEnd(uint32_t now_us) {
+  static uint32_t win0 = 0;
+  s_perf_loops++;
+  if (!win0) win0 = now_us;
+  if (now_us - win0 < 10000000u) return;
+  memcpy(s_perf_last, s_perf, sizeof s_perf);
+  s_perf_last_win_us = now_us - win0;
+  s_perf_last_loops = s_perf_loops;
+  memset(s_perf, 0, sizeof s_perf);
+  s_perf_loops = 0;
+  win0 = now_us;
+}
+// "Busy (last 10 s): 23 loops/s; ui:lvgl 41%, ui:tak 9% ..."
+static int perfText(char* buf, size_t cap) {
+  if (!s_perf_last_win_us) return snprintf(buf, cap, "Busy\n  measuring...\n\n");
+  int p = snprintf(buf, cap, "Busy (last 10 s, %lu loops/s)\n",
+                   (unsigned long)(s_perf_last_loops * 1000000ull / s_perf_last_win_us));
+  bool used[28] = {false};
+  for (int k = 0; k < 6; k++) {
+    int best = -1;
+    for (int i = 0; i < 28; i++)
+      if (s_perf_last[i].tag && !used[i] && (best < 0 || s_perf_last[i].us > s_perf_last[best].us)) best = i;
+    if (best < 0 || p >= (int)cap) break;
+    used[best] = true;
+    const PerfSlot& x = s_perf_last[best];
+    p += snprintf(buf + p, cap - p, "  %-11s %2lu%%  max %lu ms\n", x.tag,
+                  (unsigned long)(x.us * 100ull / s_perf_last_win_us), (unsigned long)(x.max_us / 1000));
+  }
+  if (p < (int)cap) p += snprintf(buf + p, cap - p, "\n");
+  return p;
+}
 static inline void uiCp(const char* next) {
   const uint32_t nowms = millis();
   const uint32_t dt = nowms - s_ui_cp_t0;
   if (dt > g_ui_stall_max) { g_ui_stall_max = (uint16_t)(dt > 65535 ? 65535 : dt); g_ui_stall_tag = s_ui_cp_tag; }
+  const uint32_t nus = (uint32_t)micros();
+  perfAdd(s_ui_cp_tag, nus - s_ui_cp_us);
+  s_ui_cp_us = nus;
   s_ui_cp_tag = next;
   s_ui_cp_t0  = nowms;
 }
@@ -81159,6 +81229,7 @@ void UITask::loop() {
   }
 #endif
   g_ui_stall_max = 0; g_ui_stall_tag = ""; s_ui_cp_tag = "ui:head"; s_ui_cp_t0 = now;
+  { const uint32_t nus = (uint32_t)micros(); perfAdd("ui:idle", nus - s_ui_cp_us); s_ui_cp_us = nus; perfLoopEnd(nus); }
 #if defined(ESP32)
   // Persist the clock floor every 15 min (coalesced into the next prefs snapshot).
   // Power loss costs at most this window of floor progress — a soft reset keeps the
@@ -81887,18 +81958,27 @@ void UITask::loop() {
       OtpMessenger::setCallbacks(otpui::toastCb, otpui::incomingCb);
       s_vox_store_set = true;
     }
+    uiCp("ui:vox");
     VoxPhotos::tick();
     if (VoxMic::available()) VoxMic::state();   // releases the mic once a recording ends
+    uiCp("ui:otp");
     OtpMessenger::tick();   // sends, retries, sync checks: whether or not the app is open
+    uiCp("ui:team");
     teamui::loopTick();     // beacons, alert repeats, alarm, Bloodhound, map refresh
+    if (s_map_markers_stale && mapOnScreen()) renderMapMarkers();   // the map came back into view
+    uiCp("ui:mmcov");
     mmcovui::loopTick(now); // MediaMesh coverage: ask the repeaters every 150 m
 #if CAP_FLOCK_YOU
+    uiCp("ui:flock");
     flockui::loopTick();    // Flock You: radios, detections, nearby cameras, channel alerts
+    uiCp("ui:drone");
     droneui::loopTick();    // Drone Detector: Remote ID tracks, the map, channel alerts
 #endif
 #if CAP_SOUND_LINK
+    uiCp("ui:sound");
     soundui::loopTick();    // Sound link: mic, player, heard messages, the bridge
 #endif
+    uiCp("ui:voxpaint");
 #if CAP_LUA_AUDIO && defined(HAS_TDECK_KEYBOARD) && defined(ESP32)
     walkie::keyTick(tdeckKeyboardMicHeld(), now);   // hold Mic to talk (WALKIE.md)
 #endif
@@ -81906,6 +81986,10 @@ void UITask::loop() {
     if (s_vox_voice_sid != s_vox_voice_seen) { s_vox_voice_seen = s_vox_voice_sid; g_lv.dirty_timeline = true; }
     static uint32_t s_talk_wave_seen = 0, s_talk_fill_ms = 0;   // a waveform worked out: repaint
     if (s_talk_wave_ver != s_talk_wave_seen) { s_talk_wave_seen = s_talk_wave_ver; g_lv.dirty_timeline = true; }
+    else if (s_talk_wave_retry && !s_talk_wave_busy && now - s_talk_wave_last_ms >= 1000) {
+      s_talk_wave_retry = false;   // a talk is waiting for its waveform: one more pass
+      g_lv.dirty_timeline = true;
+    }
     // A talk playing: its waveform fills in. Only the open chat's area is redrawn.
     if (s_vox_voice_sid && (uint32_t)(now - s_talk_fill_ms) >= 250) {
       s_talk_fill_ms = now;
