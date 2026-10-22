@@ -39101,6 +39101,10 @@ static void routeFillId(RouteNode& nd, const uint8_t* hash, uint8_t hsz) {
   }
 }
 
+// Who heard one of our channel messages (TeamUI.inc, MESSAGE_REACH.md).
+int teamHeardBy(uint32_t ts, const char* text, char (*names)[21], double* lat, double* lon, int cap);
+bool teamReachActive();
+
 // Build s_route[] from a message's repeater hops. Returns how many nodes have a
 // known position (the button is only offered when >= 2).
 static int buildRouteFromMessage(const UITask::UIMessage& m) {
@@ -39165,6 +39169,21 @@ static int buildRouteFromMessage(const UITask::UIMessage& m) {
       snprintf(s_route[s_route_n].tag, sizeof(s_route[0].tag), "R%u", (unsigned)(r + 1));
       routeFillId(s_route[s_route_n], hh, hs);
       ++s_route_n;
+    }
+    // Teammates who said they heard it, on the same star (MESSAGE_REACH.md).
+    if (CAP_TAK_EXTRAS && m.channel) {
+      char names[6][21];
+      double la[6], lo[6];
+      const int k = teamHeardBy(m.ts, m.text, names, la, lo, 6);
+      for (int i = 0; i < k && s_route_n < k_route_max; ++i) {
+        RouteNode& nd = s_route[s_route_n++];
+        nd.has_pos = la[i] != 0.0 || lo[i] != 0.0;
+        nd.lat = la[i];
+        nd.lon = lo[i];
+        snprintf(nd.tag, sizeof nd.tag, "T%d", i + 1);
+        snprintf(nd.name, sizeof nd.name, "%s", names[i]);
+        snprintf(nd.id, sizeof nd.id, "%s", "heard");
+      }
     }
   }
 
@@ -40039,9 +40058,17 @@ static const char* mapContactsSortName(uint8_t s) {
                case MC_SORT_HEARD: return "Heard"; default: return "?"; }
 }
 
+// The "On map" tabs: our own points (team, pins, watched channels, pins shared
+// in chats; TeamUI.inc fills it), then the mesh's nodes by kind.
+enum : uint8_t { MC_TAB_OURS, MC_TAB_REPEATERS, MC_TAB_COMPANIONS, MC_TAB_ROOMS, MC_TAB_SENSORS, MC_TAB_COUNT };
+static uint8_t s_map_contacts_tab = MC_TAB_OURS;
+static lv_obj_t* s_map_contacts_tabs[MC_TAB_COUNT] = {nullptr};
+int teamOnMapFill(lv_obj_t* list, lv_coord_t rw, double self_lat, double self_lon);   // TeamUI.inc
+
 static void closeMapContacts() {
   if (s_map_contacts_root) { popupClose(&s_map_contacts_root); }
   s_map_contacts_list = nullptr;
+  for (auto& t : s_map_contacts_tabs) t = nullptr;   // deleted with the card
 }
 static void mapContactsBackdropCb(lv_event_t* e) {
   if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
@@ -40131,6 +40158,27 @@ static void mapContactsFillList() {
   if (!s_map_contacts_list) return;
   lv_indev_reset(nullptr, nullptr);   // #27: abort any scroll-throw before freeing these rows (UAF on telemetry/position rebuild mid-flick)
   lv_obj_clean(s_map_contacts_list);
+#if CAP_TAK_EXTRAS
+  for (int t = 0; t < MC_TAB_COUNT; t++) {   // the chosen tab, filled in
+    lv_obj_t* b = s_map_contacts_tabs[t];
+    if (!b) continue;
+    lv_obj_set_style_bg_color(b, lv_color_hex(t == s_map_contacts_tab ? COLOR_GLOW : COLOR_CONTROL), LV_PART_MAIN);
+  }
+  if (s_map_contacts_tab == MC_TAB_OURS) {
+    const double sl = g_lv.task ? g_lv.task->getNodeLat() : 0.0, so = g_lv.task ? g_lv.task->getNodeLon() : 0.0;
+    const lv_coord_t rw0 = (lv_disp_get_hor_res(nullptr) - 24) - 2 * 10 - 8;
+    if (teamOnMapFill(s_map_contacts_list, rw0, sl, so) == 0) {
+      lv_obj_t* empty = lv_label_create(s_map_contacts_list);
+      lv_label_set_text(empty, TR("No teammates, pins or watched\nreports on the map yet."));
+      lv_obj_set_style_text_color(empty, lv_color_hex(COLOR_SUB), LV_PART_MAIN);
+      lv_obj_set_style_text_font(empty, &g_font_14, LV_PART_MAIN);
+    }
+    return;
+  }
+  const uint8_t want_type = s_map_contacts_tab == MC_TAB_REPEATERS ? ADV_TYPE_REPEATER
+                          : s_map_contacts_tab == MC_TAB_COMPANIONS ? ADV_TYPE_CHAT
+                          : s_map_contacts_tab == MC_TAB_ROOMS ? ADV_TYPE_ROOM : ADV_TYPE_SENSOR;
+#endif
 
   // Collect GPS-bearing contacts + their distance/age keys.
   static MapContactEntry* ents = (MapContactEntry*)psAlloc(sizeof(MapContactEntry) * 64);
@@ -40144,6 +40192,9 @@ static void mapContactsFillList() {
     ContactInfo c;
     if (!the_mesh.getContactByIdx(i, c)) continue;
     if (c.gps_lat == 0 && c.gps_lon == 0) continue;
+#if CAP_TAK_EXTRAS
+    if (c.type != want_type) continue;
+#endif
     MapContactEntry& e = ents[n];
     e.midx = (int)i;
     e.type = c.type;
@@ -40181,7 +40232,7 @@ static void mapContactsFillList() {
 
   if (n == 0) {
     lv_obj_t* empty = lv_label_create(s_map_contacts_list);
-    lv_label_set_text(empty, TR("No contacts have shared\na GPS location yet."));
+    lv_label_set_text(empty, TR("None of these have shared\na GPS location yet."));
     lv_obj_set_style_text_color(empty, lv_color_hex(COLOR_SUB), LV_PART_MAIN);
     lv_obj_set_style_text_font(empty, &g_font_14, LV_PART_MAIN);
     return;
@@ -40297,11 +40348,46 @@ static void openMapContactsList() {
   lv_obj_set_style_text_color(s_map_contacts_sort_lbl, lv_color_hex(COLOR_TEXT), LV_PART_MAIN);
   lv_obj_center(s_map_contacts_sort_lbl);
 
+  // Tabs: ours, then the mesh's nodes by kind (a row that scrolls sideways).
+#if CAP_TAK_EXTRAS
+  const lv_coord_t list_y = 66;
+  {
+    lv_obj_t* row = lv_obj_create(card);
+    lv_obj_remove_style_all(row);
+    lv_obj_set_size(row, card_w - 2 * pad, 28);
+    lv_obj_set_pos(row, 0, 32);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_style_pad_column(row, 4, LV_PART_MAIN);
+    lv_obj_set_scroll_dir(row, LV_DIR_HOR);
+    lv_obj_set_scrollbar_mode(row, LV_SCROLLBAR_MODE_OFF);
+    static const char* const names[MC_TAB_COUNT] = {"Team & watch", "Repeaters", "Companions", "Rooms", "Sensors"};
+    for (int t = 0; t < MC_TAB_COUNT; t++) {
+      lv_obj_t* b = lv_btn_create(row);
+      styleButton(b);
+      lv_obj_set_size(b, LV_SIZE_CONTENT, 26);
+      lv_obj_set_style_pad_hor(b, 8, LV_PART_MAIN);
+      lv_obj_add_event_cb(b, [](lv_event_t* e) {
+        if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+        s_map_contacts_tab = (uint8_t)(uintptr_t)lv_event_get_user_data(e);
+        mapContactsFillList();
+      }, LV_EVENT_CLICKED, (void*)(uintptr_t)t);
+      lv_obj_t* l = lv_label_create(b);
+      lv_label_set_text(l, TR(names[t]));
+      lv_obj_set_style_text_font(l, &g_font_12, LV_PART_MAIN);
+      lv_obj_set_style_text_color(l, lv_color_hex(COLOR_TEXT), LV_PART_MAIN);
+      lv_obj_center(l);
+      s_map_contacts_tabs[t] = b;
+    }
+  }
+#else
+  const lv_coord_t list_y = 34;
+#endif
+
   // Scrollable list (filled + re-filled by mapContactsFillList).
   s_map_contacts_list = lv_obj_create(card);
   lv_obj_remove_style_all(s_map_contacts_list);
-  lv_obj_set_size(s_map_contacts_list, card_w - 2 * pad, card_h - 2 * pad - 34);
-  lv_obj_set_pos(s_map_contacts_list, 0, 34);
+  lv_obj_set_size(s_map_contacts_list, card_w - 2 * pad, card_h - 2 * pad - list_y);
+  lv_obj_set_pos(s_map_contacts_list, 0, list_y);
   lv_obj_set_flex_flow(s_map_contacts_list, LV_FLEX_FLOW_COLUMN);
   lv_obj_set_style_pad_row(s_map_contacts_list, 6, LV_PART_MAIN);
   lv_obj_set_scroll_dir(s_map_contacts_list, LV_DIR_VER);
@@ -44141,6 +44227,14 @@ static void openMessageInfoPopup(int msg_idx) {
       } else
         blen = recolorWords(body, blen, (int)sizeof(body), nodeSigColorHex(hashstr), hashstr, &g_font_12, card_w - 28);
     }
+  }
+  // Teammates who said they heard it, from their beacons (MESSAGE_REACH.md).
+  if (CAP_TAK_EXTRAS && m.outgoing && m.channel && teamReachActive() && blen < (int)sizeof(body) - 64) {
+    char names[6][21];
+    const int k = teamHeardBy(m.ts, m.text, names, nullptr, nullptr, 6);
+    blen += snprintf(body + blen, sizeof(body) - blen, "\n%s", k ? TR("Teammates who heard it:") : TR("No teammate has said they heard it yet."));
+    for (int i = 0; i < k && blen < (int)sizeof(body) - 32; i++)
+      blen += snprintf(body + blen, sizeof(body) - blen, "%s%s", i ? ", " : " ", names[i]);
   }
   if (blen >= (int)sizeof(body)) blen = sizeof(body) - 1;
   body[blen] = '\0';
@@ -61256,6 +61350,9 @@ enum HwKind : uint8_t {   // saved in the layout blob: append only, never renumb
   HWK_CHAT = 14, HWK_MENTIONS = 15, HWK_NEAREST = 16, HWK_REMOTE = 17, HWK_SUN = 18,
   HWK_AIRTIME = 19, HWK_POSITION = 20, HWK_NOTE = 21,
   HWK_LUA = 22, HWK_RADAR = 23, HWK_COMPASS = 24,
+  // MeshCore Open TAK's (HOME_TEAM.md): numbered far above upstream's so the two
+  // never collide in a saved layout.
+  HWK_TEAMMATE = 200, HWK_TEAMALERT = 201, HWK_MESHHEALTH = 202,
   HWK_COUNT
 };
 enum : uint8_t { HWS_S = 0, HWS_M = 1, HWS_L = 2 };   // one cell, two across, two by two
@@ -61281,7 +61378,7 @@ struct HwLayout {
 enum : uint8_t { HWCFG_BAR_CLOCK = 0x01 };   // keep the status-bar clock even with a clock widget
 struct HwCfg { uint8_t ver, preset, flags, spare; };
 
-enum : uint8_t { HWP_GLANCE = 0, HWP_COMMANDER = 1, HWP_RADIO = 2, HWP_MINIMAL = 3, HWP_SENSORS = 4, HWP_COUNT };
+enum : uint8_t { HWP_GLANCE = 0, HWP_COMMANDER = 1, HWP_RADIO = 2, HWP_MINIMAL = 3, HWP_SENSORS = 4, HWP_TEAM = 5, HWP_COUNT };
 
 static HwLayout s_hw;                    // the layout on screen (this orientation)
 static bool     s_hw_loaded = false;
@@ -61442,7 +61539,12 @@ static const HwPresetItem kHwPresetSensors[] = {
   { HWK_UNREAD, HWS_S, 0, 0 },          { HWK_REMOTE, HWS_M, 0, 0 }, { HWK_ADVERT, HWS_S, 0, 0 },
   { HWK_APP, HWS_S, HW_APP_DRAWER, 0 },
 };
-static const char* const kHwPresetNames[HWP_COUNT] = { "Glance", "Commander", "Radio", "Minimal", "Sensors" };
+static const HwPresetItem kHwPresetTeam[] = {   // MeshCore Open TAK (HOME_TEAM.md)
+  { HWK_TEAMMATE, HWS_M, 0, 0 },   { HWK_BATTERY, HWS_S, 0, HWK_SYSTEM }, { HWK_UNREAD, HWS_S, 0, 0 },
+  { HWK_TEAMALERT, HWS_M, 0, 0 },  { HWK_CLOCK, HWS_S, 0, 0 },          { HWK_MENTIONS, HWS_S, 0, 0 },
+  { HWK_MESHHEALTH, HWS_M, 0, 0 }, { HWK_GPS, HWS_S, 0, HWK_SIGNAL },   { HWK_APP, HWS_S, HW_APP_DRAWER, 0 },
+};
+static const char* const kHwPresetNames[HWP_COUNT] = { "Glance", "Commander", "Radio", "Minimal", "Sensors", "Team" };
 
 static void hwPresetLayout(uint8_t preset, HwLayout& L) {
   int cols, rows;
@@ -61455,6 +61557,7 @@ static void hwPresetLayout(uint8_t preset, HwLayout& L) {
     case HWP_RADIO:     items = kHwPresetRadio;     n = (int)(sizeof kHwPresetRadio / sizeof kHwPresetRadio[0]);         break;
     case HWP_MINIMAL:   items = kHwPresetMinimal;   n = (int)(sizeof kHwPresetMinimal / sizeof kHwPresetMinimal[0]);     break;
     case HWP_SENSORS:   items = kHwPresetSensors;   n = (int)(sizeof kHwPresetSensors / sizeof kHwPresetSensors[0]);     break;
+    case HWP_TEAM:      items = kHwPresetTeam;      n = (int)(sizeof kHwPresetTeam / sizeof kHwPresetTeam[0]);           break;
     default: break;
   }
   for (int i = 0; i < n && L.n < kHwMax; ++i) {
@@ -64097,6 +64200,189 @@ static void hwNearestUpdate(int i) {
 // link: opening the one contact instead read as the widget not doing what it says.
 static void hwNearestTap(int, lv_event_t*) { openDiscoverPage(); }
 
+#if CAP_TAK_EXTRAS
+// ---- Team (HOME_TEAM.md) ------------------------------------------------------------------
+// Nearest teammate: who, how far and which way, when heard, their battery.
+static int hwMateIdx = -1;
+static team::Member* hwNearestMate(double* dist_m) {
+  hwMateIdx = -1;
+  team::Core* c = teamui::s_core;
+  if (!c || !c->cfg.enabled) return nullptr;
+  double la = 0, lo = 0;
+  const bool fix = teamui::myFix(&la, &lo);
+  team::Member* best = nullptr;
+  double bd = 1e18;
+  for (int k = 0; k < team::kMaxMembers; k++) {
+    team::Member* m = c->member(k);
+    if (!m || c->freshness(*m) == team::Fresh::Lost) continue;
+    const double d = fix ? TeamWire::distanceM(la, lo, m->pos.lat, m->pos.lon) : (double)(millis() - m->heard_ms);
+    if (d < bd) { bd = d; best = m; hwMateIdx = k; }
+  }
+  if (dist_m) *dist_m = fix ? bd : -1;
+  return best;
+}
+static void hwMateBuild(int i) {
+  if (hwI(i).size == HWS_S) hwStatBuild(i, UI_ICON_USERS, COLOR_HUE[HUE_PEOPLE]);
+  else hwCardBuild(i, UI_ICON_USERS, COLOR_HUE[HUE_PEOPLE], 0xFF);
+}
+static void hwMateUpdate(int i) {
+  double d = -1;
+  team::Member* m = hwNearestMate(&d);
+  if (!m) {
+    const bool on = teamui::s_core && teamui::s_core->cfg.enabled;
+    if (hwI(i).size == HWS_S) hwStatSet(i, "--", TR("teammate"), COLOR_SUB);
+    else hwCardSet(i, TR("Nearest teammate"), nullptr, on ? TR("No teammates heard yet") : TR("Team mode is off"), COLOR_SUB);
+    return;
+  }
+  char rb[40] = "", ago[24], det[96];
+  if (d >= 0) teamui::rangeTo(m->pos.lat, m->pos.lon, rb, sizeof rb);
+  hwFmtAgo(ago, sizeof ago, (millis() - m->heard_ms) / 1000u);
+  const char* name = m->pos.callsign[0] ? m->pos.callsign : "?";
+  if (hwI(i).size == HWS_S) {
+    char fig[16];
+    if (d < 0) snprintf(fig, sizeof fig, "%s", ago);
+    else teamroute::distanceText(d, fig, sizeof fig);
+    hwStatSet(i, fig, name, m->pos.sos ? COLOR_STATUS_DANGER_TEXT : COLOR_TEXT);
+    return;
+  }
+  char batt[16] = "";
+  if (m->pos.battery_pct >= 0) snprintf(batt, sizeof batt, " \xC2\xB7 %d%%", m->pos.battery_pct);
+  snprintf(det, sizeof det, "%s%s%s%s", rb[0] ? rb : "", rb[0] ? " \xC2\xB7 " : "", ago, batt);
+  hwCardSet(i, name, m->pos.sos ? "SOS" : TeamWire::statusName(m->pos.status), det,
+            m->pos.sos ? COLOR_STATUS_DANGER_TEXT : 0xFFFFFFFFu, m->pos.sos ? COLOR_STATUS_DANGER_TEXT : 0xFFFFFFFFu);
+}
+static void hwMateTap(int, lv_event_t*) {
+  hwNearestMate(nullptr);
+  if (hwMateIdx >= 0) teamui::memberSheet(hwMateIdx);
+  else if (g_lv.task) g_lv.task->showAlert(TR("No teammates heard yet"), 1500);
+}
+
+// Latest alert: a teammate's alert while one is on, else the newest watched report.
+static int hwAlertKind = 0, hwAlertIdx = -1;   // 1 team alert, 2 watched report
+static void hwAlertFind() {
+  hwAlertKind = 0;
+  hwAlertIdx = -1;
+  uint32_t best = 0;
+  const uint32_t now = millis();
+  if (team::Core* c = teamui::s_core) {
+    for (int k = 0; k < team::kMaxAlerts; k++) {
+      team::AlertRec* r = c->alert(k);
+      if (!r || !r->a.active) continue;
+      if (hwAlertKind != 1 || now - r->heard_ms < now - best) { best = r->heard_ms; hwAlertKind = 1; hwAlertIdx = k; }
+    }
+  }
+  if (hwAlertKind) return;
+  if (watchfeed::Store* w = teamui::s_watch) {
+    for (int k = 0; k < watchfeed::kMaxItems; k++) {
+      const watchfeed::Item& it = w->items[k];
+      if (!w->live(it, now)) continue;
+      if (!hwAlertKind || now - it.at_ms < now - best) { best = it.at_ms; hwAlertKind = 2; hwAlertIdx = k; }
+    }
+  }
+}
+static void hwAlertBuild(int i) {
+  if (hwI(i).size == HWS_S) hwStatBuild(i, UI_ICON_CIRCLE_ALERT, COLOR_STATUS_DANGER_TEXT);
+  else hwCardBuild(i, UI_ICON_CIRCLE_ALERT, COLOR_STATUS_DANGER_TEXT, 0xFF);
+}
+static void hwAlertUpdate(int i) {
+  hwAlertFind();
+  char rb[40] = "", ago[24], det[96], title[64];
+  const bool small = hwI(i).size == HWS_S;
+  if (hwAlertKind == 1) {
+    const team::AlertRec* r = teamui::s_core->alert(hwAlertIdx);
+    if (r->a.has_pos) teamui::rangeTo(r->a.lat, r->a.lon, rb, sizeof rb);
+    hwFmtAgo(ago, sizeof ago, (millis() - r->heard_ms) / 1000u);
+    snprintf(title, sizeof title, "%s: %s", TeamWire::alertName(r->a.type), r->a.callsign[0] ? r->a.callsign : "?");
+    if (small) { hwStatSet(i, TeamWire::alertName(r->a.type), r->a.callsign, COLOR_STATUS_DANGER_TEXT); return; }
+    snprintf(det, sizeof det, "%s%s%s", rb, rb[0] ? " \xC2\xB7 " : "", r->a.note[0] ? r->a.note : ago);
+    hwCardSet(i, title, ago, det, COLOR_STATUS_DANGER_TEXT);
+    return;
+  }
+  if (hwAlertKind == 2) {
+    const watchfeed::Item& it = teamui::s_watch->items[hwAlertIdx];
+    teamui::rangeTo(it.r.lat, it.r.lon, rb, sizeof rb);
+    hwFmtAgo(ago, sizeof ago, (millis() - it.at_ms) / 1000u);
+    if (it.r.track[0]) watchfeed::droneLabel(it.r, it.has_course, it.course, title, sizeof title);
+    else snprintf(title, sizeof title, "%s", it.r.title[0] ? it.r.title : teamui::channelName(it.channel));
+    const uint32_t col = watchfeed::levelRgb(it.r.level);
+    if (small) { hwStatSet(i, ago, title, col); return; }
+    snprintf(det, sizeof det, "%s \xC2\xB7 %s", rb, teamui::channelName(it.channel));
+    hwCardSet(i, title, ago, det, col);
+    return;
+  }
+  if (small) hwStatSet(i, "--", TR("alerts"), COLOR_SUB);
+  else hwCardSet(i, TR("Latest alert"), nullptr, TR("No alerts or watched reports"), COLOR_SUB);
+}
+static void hwAlertTap(int, lv_event_t*) {
+  hwAlertFind();
+  if (hwAlertKind == 1) { if (team::AlertRec* r = teamui::s_core->alert(hwAlertIdx)) teamui::alarmShow(*r); }
+  else if (hwAlertKind == 2) teamui::watchSheet(hwAlertIdx);
+}
+
+// Mesh health, 0-100 each minute: how much was heard (up to 50, 5 a packet) and
+// how well (the last packet's SNR, -15 to +10 dB, up to 50), with its last
+// half hour as a curve.
+static constexpr int kMhN = 30;
+static int16_t s_mh_hist[kMhN] = {0};
+static uint8_t s_mh_n = 0;
+static int s_mh_rx = 0;
+static void hwMeshHealthSample(uint32_t now) {
+  static uint32_t next = 0, last_rx = 0;
+  static bool init = false;
+  const uint32_t rx = the_mesh.getNumRecvFlood() + the_mesh.getNumRecvDirect();
+  if (!init) { last_rx = rx; next = now + 60000u; init = true; return; }
+  if ((int32_t)(now - next) < 0) return;
+  next = now + 60000u;
+  s_mh_rx = (int)(rx >= last_rx ? rx - last_rx : 0);
+  last_rx = rx;
+  int score = LV_MIN(s_mh_rx, 10) * 5;
+  const uint32_t ms = the_mesh.uiSignalMs();
+  if (ms && now - ms < 300000UL && the_mesh.uiSignalSnrQ4() != -128) {
+    const float snr = the_mesh.uiSignalSnrQ4() / 4.0f;
+    score += (int)LV_CLAMP(0, (int)lroundf((snr + 15.0f) * 2.0f), 50);
+  }
+  hwShift16(s_mh_hist, kMhN, (int16_t)score);
+  if (s_mh_n < kMhN) s_mh_n++;
+}
+static void hwMeshHealthBuild(int i) {
+  if (hwI(i).size == HWS_S) hwStatBuild(i, UI_ICON_ACTIVITY, COLOR_HUE[HUE_RADIO]);
+  else hwCardBuild(i, UI_ICON_ACTIVITY, COLOR_HUE[HUE_RADIO], HWF_SPARK);
+}
+static void hwMeshHealthUpdate(int i) {
+  if (!s_mh_n) {
+    if (hwI(i).size == HWS_S) hwStatSet(i, "--", TR("mesh"), COLOR_SUB);
+    else hwCardSet(i, TR("Mesh health"), nullptr, TR("Listening for a minute..."), COLOR_SUB);
+    return;
+  }
+  const int v = s_mh_hist[kMhN - 1];
+  const uint32_t col = v >= 60 ? COLOR_HUE[HUE_DEVICE] : v >= 30 ? COLOR_HUE[HUE_RADIO] : COLOR_STATUS_DANGER_TEXT;
+  const char* word = v >= 60 ? TR("good") : v >= 30 ? TR("fair") : TR("poor");
+  char fig[16], det[64], snr[16] = "--";
+  snprintf(fig, sizeof fig, "%d", v);
+  if (hwI(i).size == HWS_S) { hwStatSet(i, fig, TR("mesh"), col); return; }
+  const uint32_t ms = the_mesh.uiSignalMs();
+  if (ms && millis() - ms < 300000UL) hwFmtSnr(snr, sizeof snr, the_mesh.uiSignalSnrQ4());
+  char title[32];
+  snprintf(title, sizeof title, "%s %s", TR("Mesh"), fig);
+  snprintf(det, sizeof det, "RX %d/min \xC2\xB7 SNR %s", s_mh_rx, snr);
+  hwCardSet(i, title, word, det, col, col);
+  HwInst& w = hwI(i);
+  if (w.fig) {
+    HwFig* f = hwF(i);
+    f->a = s_mh_hist + (kMhN - s_mh_n);
+    f->b = nullptr;
+    f->n = s_mh_n;
+    f->lo = 0;
+    f->hi = 100;
+    f->ca = col;
+    lv_obj_invalidate(w.fig);
+  }
+}
+static void hwMeshHealthTap(int, lv_event_t*) { openSignalInfoPopup(); }
+#else
+static void hwMeshHealthSample(uint32_t) {}
+#endif  // CAP_TAK_EXTRAS
+
 // ---- Remote sensor ----------------------------------------------------------------------
 // The latest telemetry from one node you choose, asked for on a schedule. The
 // readings live in RAM; after a restart the next ask brings them back.
@@ -64826,6 +65112,11 @@ static const HwKindDef k_hw_kinds[] = {
   { HWK_HEARD,    HWG_MESH,  HWSM,  HWS_M, "Heard",         UI_ICON_USERS,       nullptr,        hwHeardBuild,    hwHeardUpdate,    hwHeardTap,    nullptr },
   { HWK_NEAREST,  HWG_MESH,  HWSM,  HWS_M, "Nearest",       UI_ICON_RADIO_TOWER, nullptr,        hwNearestBuild,  hwNearestUpdate,  hwNearestTap,  nullptr },
   { HWK_REMOTE,   HWG_MESH,  HWSM,  HWS_M, "Remote sensor", UI_ICON_THERMOMETER, nullptr,        hwRemoteBuild,   hwRemoteUpdate,   hwRemoteTap,   hwRemoteOptions },
+#if CAP_TAK_EXTRAS
+  { HWK_TEAMMATE,   HWG_MESH, HWSM, HWS_M, "Nearest teammate", UI_ICON_USERS,       nullptr,      hwMateBuild,       hwMateUpdate,       hwMateTap,       nullptr },
+  { HWK_TEAMALERT,  HWG_MESH, HWSM, HWS_M, "Latest alert",     UI_ICON_CIRCLE_ALERT, nullptr,     hwAlertBuild,      hwAlertUpdate,      hwAlertTap,      nullptr },
+  { HWK_MESHHEALTH, HWG_MESH, HWSM, HWS_M, "Mesh health",      UI_ICON_ACTIVITY,    nullptr,      hwMeshHealthBuild, hwMeshHealthUpdate, hwMeshHealthTap, nullptr },
+#endif
 #if defined(HW_HAVE_RADAR)
   { HWK_RADAR,    HWG_MESH,  HWSZ(HWS_M) | HWSZ(HWS_L), HWS_L, "Mesh radar", UI_ICON_RADAR,    nullptr,        hwRadarBuild,    hwRadarUpdate,    hwRadarTap,    nullptr },
 #endif
@@ -65541,6 +65832,7 @@ static void homeWidgetsMake(lv_obj_t* tab) {
 static void homeWidgetsTick() {
   const uint32_t now = millis();
   hwTrafficSample();
+  hwMeshHealthSample(now);
   hwAirSample(now);
   hwNearSample();
 #if defined(HAS_EXPANSION_KIT)
@@ -65588,8 +65880,8 @@ static void hwPresetPick(uint8_t p) {
 }
 template <int P> static void hwPresetT() { hwPresetPick(P); }
 static void hwOpenPresets() {
-  static void (*const fns[HWP_COUNT])() = { hwPresetT<0>, hwPresetT<1>, hwPresetT<2>, hwPresetT<3>, hwPresetT<4> };
-  static const char* const icons[HWP_COUNT] = { UI_ICON_LAYOUT_GRID, UI_ICON_GAUGE, UI_ICON_ANTENNA, UI_ICON_TIMER, UI_ICON_THERMOMETER };
+  static void (*const fns[HWP_COUNT])() = { hwPresetT<0>, hwPresetT<1>, hwPresetT<2>, hwPresetT<3>, hwPresetT<4>, hwPresetT<5> };
+  static const char* const icons[HWP_COUNT] = { UI_ICON_LAYOUT_GRID, UI_ICON_GAUGE, UI_ICON_ANTENNA, UI_ICON_TIMER, UI_ICON_THERMOMETER, UI_ICON_USERS };
   ActItem it[HWP_COUNT];
   int n = 0;
   for (int p = 0; p < HWP_COUNT; ++p) {
