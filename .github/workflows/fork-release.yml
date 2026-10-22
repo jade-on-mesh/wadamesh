@@ -125,6 +125,14 @@ jobs:
         with:
           name: bins-${{ matrix.board }}
           path: dist/*
+      # The ELF, kept with the run (not the release) so a crash report's coredump
+      # from this build can be decoded: espcoredump.py info_corefile -c <dump> <elf>.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: elf-${{ matrix.board }}
+          path: .pio/build/${{ matrix.env }}/firmware.elf
+          retention-days: 90
+          if-no-files-found: ignore
 
   # T-Display P4 with the AMOLED panel: an ESP-IDF build (scripts/build/ci-p4.sh), one
   # image per radio (SX1262 / LR2021) and C6 firmware (esp-hosted / the older ESP-AT).
@@ -180,6 +188,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: dist
+          pattern: bins-*
           merge-multiple: true
       - name: Sign the app images
         env:
