@@ -20,6 +20,15 @@ open, otherwise on the walkie-talkie you opened last. This needs the
 keyboard's current firmware (raw mode, the default); with **Older keyboard
 protocol** on, the keyboard reports no key releases, so use the card's button.
 
+The T-Deck's **trackball** works the same way: press it and hold it still for
+about half a second to talk, and let go to finish. It talks on the same channel
+as the Mic key. With the walkie-talkie card up it always does; elsewhere it
+does while **Hold the trackball to talk** is ticked on the card (it is to start
+with) and there's a channel to talk on. Untick it to give the hold back to
+switching the trackball between scrolling and the cursor. A press you roll is
+still a drag, and a quick click is still a click. The screen must be unlocked
+(holding the ball on the lock screen unlocks it).
+
 Talks play by themselves as they arrive, on any channel, card open or not,
 like a scanner. The card shows who is talking. While someone else is talking, the button waits
 until they finish. It's half duplex: nothing plays while you talk.
@@ -86,6 +95,7 @@ talk with nothing heard for 3.5 s has ended.
 | The card, talking, live playback | `src/ui-touch/WalkieUI.inc` |
 | Mic bytes while recording | `VoxMic::liveBits` (`src/ui-touch/VoxMic.cpp`) |
 | The Mic key | `tdeckKeyboardMicHeld` (`src/helpers/input/TDeckKeyboard.cpp`), `walkie::keyTick` |
+| The trackball hold | `TBH_TALK` in the trackball handler (`UITask.cpp`), `walkie::ballTalks` |
 | The waveform (host-tested) | `voxCodec2Waveform` (`src/ui-touch/VoxVoice.cpp`, `test/test_vox_record.cpp`); drawn by `chatTalkWaveDrawCb` |
 | Keeping a talk heard in full | `VoxPhotos::storeHeard` |
 | From the mesh | `MyMesh::onChannelDataRecv` -> `walkieOnChannelData` |

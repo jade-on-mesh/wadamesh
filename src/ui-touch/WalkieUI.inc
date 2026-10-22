@@ -113,6 +113,7 @@ static bool s_live_all = true;        // talks on every channel play live (unles
 static String s_muted;                // channels whose talks don't play live, one name per line
 static String s_direct;               // channels set to Direct, one name per line
 static char s_last[33] = "";          // the walkie-talkie last opened (the Mic key talks there)
+static bool s_ball_talk = true;       // T-Deck: holding the trackball still talks there too
 static bool s_prefs_loaded = false;
 
 static void prefsLoad() {
@@ -124,6 +125,7 @@ static void prefsLoad() {
   s_muted = p.getString("muted", "");
   s_direct = p.getString("direct", "");
   snprintf(s_last, sizeof s_last, "%s", p.getString("last", "").c_str());
+  s_ball_talk = p.getBool("balltalk", true);
   p.end();
 }
 static void prefsSave() {
@@ -133,6 +135,7 @@ static void prefsSave() {
   p.putString("muted", s_muted);
   p.putString("direct", s_direct);
   p.putString("last", s_last);
+  p.putBool("balltalk", s_ball_talk);
   p.end();
 }
 
@@ -615,6 +618,21 @@ static void listenCb(lv_event_t* e) {
 static void closeCb(lv_event_t* e) {
   if (lv_event_get_code(e) == LV_EVENT_CLICKED) cardClose();
 }
+#if CAP_TRACKBALL && WALKIE_CAN_TALK
+static lv_obj_t* s_ball_lbl = nullptr;
+static void ballText() {
+  if (s_ball_lbl)
+    lv_label_set_text_fmt(s_ball_lbl, "%s %s", s_ball_talk ? LV_SYMBOL_OK : LV_SYMBOL_CLOSE,
+                          TR("Hold the trackball to talk"));
+}
+static void ballCb(lv_event_t* e) {
+  if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+  prefsLoad();
+  s_ball_talk = !s_ball_talk;
+  prefsSave();
+  ballText();
+}
+#endif
 
 static lv_obj_t* rowButton(lv_obj_t* parent, lv_event_cb_t cb, lv_obj_t** label) {
   lv_obj_t* b = lv_btn_create(parent);
@@ -719,6 +737,11 @@ static void cardOpen(int ch) {
   s_live_all_lbl = tmp;
   rowButton(card, listenCb, &tmp);
   s_listen_lbl = tmp;
+#if CAP_TRACKBALL && WALKIE_CAN_TALK
+  rowButton(card, ballCb, &tmp);
+  s_ball_lbl = tmp;
+  ballText();
+#endif
   reachText();
   listenText();
 
@@ -726,8 +749,13 @@ static void cardOpen(int ch) {
   lv_obj_set_width(hint, lv_pct(100));
   lv_label_set_long_mode(hint, LV_LABEL_LONG_WRAP);
 #if defined(HAS_TDECK_KEYBOARD)
+#if CAP_TRACKBALL
+  lv_label_set_text(hint, TR("Up to 20 s a talk, on MediaMesh only. Each one is saved in the chat. "
+                             "From any screen, hold the keyboard's Mic key, or hold the trackball still, to talk."));
+#else
   lv_label_set_text(hint, TR("Up to 20 s a talk, on MediaMesh only. Each one is saved in the chat. "
                              "From any screen, hold the keyboard's Mic key to talk."));
+#endif
 #else
   lv_label_set_text(hint, TR(WALKIE_CAN_TALK ? "Up to 20 s a talk, on MediaMesh only. Each one is saved in the chat."
                                              : "No microphone here: you hear talks as they come."));
@@ -745,6 +773,9 @@ static void cardClose() {
   if (talking() && s_tx_ch == s_card_ch) txRelease();   // the talk still finishes
   if (s_card) lv_obj_del(s_card);
   s_card = s_status = s_bar = s_talk_btn = s_talk_lbl = s_reach_lbl = s_listen_lbl = s_live_all_lbl = nullptr;
+#if CAP_TRACKBALL && WALKIE_CAN_TALK
+  s_ball_lbl = nullptr;
+#endif
 #if CAP_LUA_AUDIO && VOX_CODEC2_AVAILABLE
   if (s_play_sid && !(liveAll() && channelLive(s_card_ch))) playStop();
 #endif
@@ -801,6 +832,19 @@ static int keyChannel() {
   for (int i = 0; i < MAX_GROUP_CHANNELS; ++i)
     if (the_mesh.getChannel(i, cd) && cd.name[0] && strcmp(cd.name, s_last) == 0) return i;
   return -1;
+}
+
+// Whether holding the trackball still should talk (T-Deck): with the walkie-talkie
+// card up, always; elsewhere when it's switched on (it is by default) and there's
+// a channel to talk on. Otherwise the hold switches scroll <-> cursor as usual.
+static bool ballTalks() {
+#if CAP_TRACKBALL && WALKIE_CAN_TALK
+  if (s_card) return true;
+  prefsLoad();
+  return s_ball_talk && keyChannel() >= 0;
+#else
+  return false;
+#endif
 }
 
 static void keyTick(bool held, uint32_t now) {

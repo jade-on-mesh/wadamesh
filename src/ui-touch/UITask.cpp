@@ -174,7 +174,7 @@ static_assert(ChannelSenderSplit::kMaxWireName >= (size_t)UITask::MAX_SENDER_NAM
   #include <lvgl.h>
   #include <src/draw/sw/lv_draw_sw.h>   // the software blend: the aurora draws its rows with it
   #include "../helpers/input/HeltecV4CapTouch.h"
-  #if CAP_TRACKBALL
+#if CAP_TRACKBALL
     #include "../helpers/input/TDeckTrackball.h"   // QUOTED: this tree's copy (tdeckTrackballSetEnabled), not the lib's older one
   #endif
   #if defined(HAS_TDECK_KEYBOARD)
@@ -3373,6 +3373,7 @@ static unsigned long s_live_diag_next_ms = 0;
 static unsigned long s_sig_probe_at = 4000;
 /** Keep live diag overlay available but hidden by default; flip true for field debugging. */
 constexpr bool k_show_live_diag_overlay = false;
+[[maybe_unused]] static bool s_tb_ball_talk = false;   // the trackball held still to talk (walkie::ballTalks)
 
 #if CAP_TRACKBALL
 // ---- T-Deck trackball cursor ----
@@ -3412,6 +3413,7 @@ constexpr unsigned long kTbCursorHideMs   = 800;   // auto-hide after idle
 constexpr int           kTbScrollStepPx   = 18;    // px of scroll per encoder step (scroll mode)
 constexpr float         kTbScrollSmoothMs = 45.0f; // ease time-constant for scroll mode
 constexpr unsigned long kTbModeHoldMs     = 600;   // hold the ball still this long: scroll <-> cursor
+constexpr unsigned long kTbTalkHoldMs     = 250;   // ...or this long to talk, when it talks (WALKIE.md)
 
 // True while the trackball cursor is visible AND the touch is within the tab
 // bar (the bottom strip, or the right-edge rail with Condense Nav). Used to
@@ -81546,19 +81548,25 @@ void UITask::loop() {
       // cursor mode the click is held back until it is clearly a click (released
       // before the hold) or a drag (the ball rolls while pressed), so a hold never
       // also long-presses whatever sits under the cursor.
-      enum : uint8_t { TBH_IDLE, TBH_PENDING, TBH_DRAG, TBH_DONE };
+      enum : uint8_t { TBH_IDLE, TBH_PENDING, TBH_DRAG, TBH_DONE, TBH_TALK };
       static uint8_t       s_tbh      = TBH_IDLE;
       static unsigned long s_tbh_down = 0;
+      static int8_t        s_tbh_talks = -1;            // walkie::ballTalks(), asked once a press
       const bool down    = tb_pressed && !s_tb_wake_consume;
       const bool hold_ok = !s_tb_nav && !SnakeGame::isOpen() && !luaAppIsOpen();
       if (!hold_ok) {
         s_tbh = TBH_IDLE;
+        s_tb_ball_talk = false;
         s_tb_click_press = down;
       } else if (down) {
-        if (s_tbh == TBH_IDLE) { s_tbh = TBH_PENDING; s_tbh_down = now; }
+        if (s_tbh == TBH_IDLE) { s_tbh = TBH_PENDING; s_tbh_down = now; s_tbh_talks = -1; }
         if (s_tbh == TBH_PENDING) {
           if ((long)(s_tb_motion_ms - s_tbh_down) > 0) {
             s_tbh = TBH_DRAG;                             // rolled while pressed: a drag
+          } else if (now - s_tbh_down >= kTbTalkHoldMs &&
+                     (s_tbh_talks < 0 ? (s_tbh_talks = walkie::ballTalks() ? 1 : 0) : s_tbh_talks) == 1) {
+            s_tbh = TBH_TALK;                             // held still: push to talk until let go
+            s_tb_ball_talk = true;
           } else if (now - s_tbh_down >= kTbModeHoldMs) {
             s_tbh = TBH_DONE;                             // the rest of this press is spent
             tbApplyMode(s_tb_scroll ? TB_MODE_CURSOR : TB_MODE_SCROLL);
@@ -81570,6 +81578,7 @@ void UITask::loop() {
         if (s_tbh == TBH_PENDING && !s_tb_scroll && getActiveTab() != MAP_TAB_INDEX)
           s_tb_click_pulse = true;                        // released in time: a click
         s_tbh = TBH_IDLE;
+        s_tb_ball_talk = false;
         s_tb_click_press = false;
       }
       if (down) { s_tb_last_active_ms = now; noteUserInput(); }
@@ -81980,7 +81989,7 @@ void UITask::loop() {
 #endif
     uiCp("ui:voxpaint");
 #if CAP_LUA_AUDIO && defined(HAS_TDECK_KEYBOARD) && defined(ESP32)
-    walkie::keyTick(tdeckKeyboardMicHeld(), now);   // hold Mic to talk (WALKIE.md)
+    walkie::keyTick(tdeckKeyboardMicHeld() || s_tb_ball_talk, now);   // hold Mic or the ball to talk (WALKIE.md)
 #endif
     static uint32_t s_vox_voice_seen = 0;   // repaint the bubble when playback starts or ends
     if (s_vox_voice_sid != s_vox_voice_seen) { s_vox_voice_seen = s_vox_voice_sid; g_lv.dirty_timeline = true; }
