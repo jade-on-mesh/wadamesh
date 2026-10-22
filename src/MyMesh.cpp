@@ -3576,6 +3576,8 @@ void MyMesh::onChannelMessageRecv(const mesh::GroupChannel &channel, mesh::Packe
   }
 #endif
 #ifdef DISPLAY_CLASS
+  // MeshCore TEAM's tracking text: members and pins on the team channel, never chat.
+  if (resolved_idx >= 0 && teamCompatOnChannelText(resolved_idx, text)) return;
   if (resolved_idx >= 0) VoxPhotos::onChannelText(text, resolved_idx);
   if (resolved_idx >= 0) teamOnChannelText(resolved_idx, text, timestamp);   // watched channels on the map
   if (resolved_idx >= 0) soundLinkOnChannelText(resolved_idx, text);   // Sound link: play the bridged channel

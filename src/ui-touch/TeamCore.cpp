@@ -321,6 +321,7 @@ bool Core::sendPosition() {
   beaconed_ = true;
   last_beacon_ms_ = io_->nowMs();
   last_fix_ = f;
+  compatAfterBeacon();
   io_->changed();
   return true;
 }
@@ -364,6 +365,10 @@ void Core::cancelAlert() {
 void Core::tick() {
   const uint32_t now = io_->nowMs();
   if (!active()) return;
+  if (cap_due_ && (int32_t)(now - cap_due_ms_) >= 0) {   // just found TEAM users: introduce ourselves
+    cap_due_ = false;
+    compatCap(true);
+  }
   updateFollow();
   // Own alert: three sends (radio collisions happen), then it rides on every position.
   if (own_active_ && own_sends_ < 3 && (int32_t)(now - own_next_ms_) >= 0) {
@@ -524,6 +529,7 @@ TeamWire::Marker* Core::putMarker(TeamWire::Marker* existing, uint8_t kind, doub
   onMarker(m);
   uint8_t buf[TeamWire::kMaxPayload];
   sendRaw(buf, TeamWire::encode(m, buf, sizeof buf));
+  compatMarker(m);
   for (int i = 0; i < kMaxMarkers; i++)
     if (mused_[i] && keyEq(markers_[i].key4, m.key4) && markers_[i].id == m.id) return &markers_[i];
   return nullptr;
@@ -578,6 +584,236 @@ bool Core::hound(double* lat, double* lon, char* label, size_t cap) {
     }
   }
   return false;
+}
+
+// ---- MeshCore TEAM interop (MESHCORE_TEAM.md) -----------------------------------
+// TEAM users on the team channel show as members, markers and routes, the
+// way our own traffic shows; once one is heard (for 12 hours) we also send
+// TEAM's #TEL with our beacons, #CAP with our callsign, our pins as #WAY.
+
+static constexpr uint32_t kCompatActiveMs = 12UL * 3600UL * 1000UL;
+
+static uint32_t fnv32(const char* s) {
+  uint32_t h = 0x811c9dc5u;
+  for (; *s; s++) { h ^= (uint8_t)*s; h *= 0x01000193u; }
+  return h;
+}
+
+bool Core::compatActive() const {
+  return compat_heard_ && io_->nowMs() - compat_heard_ms_ < kCompatActiveMs;
+}
+
+int Core::compatPeerCount() const {
+  int n = 0;
+  for (const CompatPeer& p : peers_) if (p.used) n++;
+  return n;
+}
+
+CompatPeer* Core::compatPeer(const char* name, bool create) {
+  for (CompatPeer& p : peers_) if (p.used && strcmp(p.name, name) == 0) return &p;
+  if (!create) return nullptr;
+  CompatPeer* pick = &peers_[0];
+  for (CompatPeer& p : peers_) {
+    if (!p.used) { pick = &p; break; }
+    if ((int32_t)(p.heard_ms - pick->heard_ms) < 0) pick = &p;
+  }
+  *pick = CompatPeer();
+  pick->used = true;
+  snprintf(pick->name, sizeof pick->name, "%s", name);
+  compatKey(*pick);
+  return pick;
+}
+
+// Its #CAP key, else a contact by its name, else a number made from the name
+// (what the app does too, so both file it alike).
+void Core::compatKey(CompatPeer& p) {
+  if (p.has_key) return;
+  if (io_->contactKey4(p.name, p.key4)) return;
+  char b[48];
+  snprintf(b, sizeof b, "TEAM:%s", p.name);
+  const uint32_t h = fnv32(b);
+  for (int i = 0; i < 4; i++) p.key4[i] = (uint8_t)(h >> (24 - 8 * i));
+}
+
+void Core::compatShow(CompatPeer& p) {
+  if (!p.has_pos) return;
+  TeamWire::Position x;
+  memcpy(x.key4, p.key4, 4);
+  x.lat = p.pos.lat;
+  x.lon = p.pos.lon;
+  x.battery_pct = teamcompat::batteryPct(p.pos.mv());
+  x.from_radio = p.pos.autonomous;
+  const char* cs = p.alias[0] ? p.alias : p.name;
+  teamcompat::field(cs, cs + strlen(cs), x.callsign, sizeof x.callsign);   // cut on a character
+  onPosition(x);
+}
+
+bool Core::onText(const char* channel, const char* sender, const char* body) {
+  if (!body || !teamcompat::isCompatText(body)) return false;
+  teamcompat::Pos pos;
+  teamcompat::Cap cap;
+  teamcompat::CapReq req;
+  const bool is_pos = teamcompat::parsePos(body, pos);
+  const bool is_cap = !is_pos && teamcompat::parseCap(body, cap);
+  const bool is_req = !is_pos && !is_cap && teamcompat::parseCapReq(body, req);
+  const bool is_way = teamcompat::startsWith(body, "#WAY:") || teamcompat::startsWith(body, "#WRC:");
+  if (!is_pos && !is_cap && !is_req && !is_way) return false;   // not really TEAM's: chat
+  if (!cfg.enabled || !channel || strcmp(channel, cfg.channel) != 0) return true;
+  if (!sender || !sender[0] || strcmp(sender, io_->nodeName()) == 0) return true;
+  const uint32_t now = io_->nowMs();
+  if (!compatActive()) {   // just found them: introduce ourselves after a moment
+    cap_due_ = true;
+    cap_due_ms_ = now + 2000 + io_->random32() % 6000;
+  }
+  compat_heard_ = true;
+  compat_heard_ms_ = now;
+  if (is_req) {
+    if (strcmp(req.name, io_->nodeName()) != 0) return true;
+    if (advert_sent_ && now - advert_ms_ < 10UL * 60000UL) return true;
+    advert_sent_ = true;
+    advert_ms_ = now;
+    io_->advert();
+    compatCap(true);
+    return true;
+  }
+  CompatPeer* p = compatPeer(sender, true);
+  p->heard_ms = now;
+  if (is_pos) {
+    p->pos = pos;
+    p->has_pos = true;
+    compatShow(*p);
+  } else if (is_cap) {
+    if (cap.key[0]) {
+      uint8_t k[4];
+      for (int i = 0; i < 4; i++) {
+        char h[3] = {cap.key[2 * i], cap.key[2 * i + 1], 0};
+        k[i] = (uint8_t)strtoul(h, nullptr, 16);
+      }
+      if (memcmp(k, p->key4, 4) != 0) {   // filed under a made-up key until now: move it
+        for (Member& m : members_)
+          if (m.used && memcmp(m.pos.key4, p->key4, 4) == 0) m.used = false;
+        memcpy(p->key4, k, 4);
+      }
+      p->has_key = true;
+    }
+    if (cap.has_alias) snprintf(p->alias, sizeof p->alias, "%s", cap.alias);
+    compatShow(*p);
+  } else {
+    if (!asm_) asm_ = new teamcompat::Assembler();
+    teamcompat::Way* w = new teamcompat::Way();
+    if (asm_ && w && asm_->accept(sender, body, now, *w)) compatWay(*p, *w);
+    delete w;
+  }
+  return true;
+}
+
+void Core::compatWay(CompatPeer& p, const teamcompat::Way& w) {
+  char idb[64];
+  snprintf(idb, sizeof idb, "%s", w.mesh_id[0] ? w.mesh_id : "");
+  if (!idb[0]) snprintf(idb, sizeof idb, "name:%s", w.name);
+  const uint32_t id = fnv32(idb);
+  uint32_t t = io_->epoch();
+  if (!t) t = 1;
+  if (w.isRoute()) {
+    // As our route drawing, in the team colour nearest theirs; long routes
+    // thinned to fit one team payload.
+    TeamWire::Shape* sh = new TeamWire::Shape();
+    if (!sh) return;
+    memcpy(sh->key4, p.key4, 4);
+    sh->id = id;
+    sh->kind = TeamWire::kShapeRoute;
+    sh->time = t;
+    teamcompat::field(w.name, w.name + strlen(w.name), sh->label, sizeof sh->label);
+    int best = 7;   // purple
+    long bestd = -1;
+    if (w.has_color) {
+      for (int c = 0; c < TeamWire::kColors; c++) {
+        const uint32_t rgb = TeamWire::colorRgb(c);
+        const long dr = (long)((rgb >> 16) & 0xFF) - (long)((w.color >> 16) & 0xFF);
+        const long dg = (long)((rgb >> 8) & 0xFF) - (long)((w.color >> 8) & 0xFF);
+        const long db = (long)(rgb & 0xFF) - (long)(w.color & 0xFF);
+        const long d = dr * dr + dg * dg + db * db;
+        if (bestd < 0 || d < bestd) { bestd = d; best = c; }
+      }
+    }
+    sh->color = (uint8_t)best;
+    const int n = w.n >= 2 ? w.n : 0;
+    uint8_t buf[TeamWire::kMaxPayload];
+    size_t len = 0;
+    for (int step = 1; n && step <= n && !len; step++) {   // every point, then every 2nd...
+      sh->n = 0;
+      for (int i = 0; i < n && sh->n < TeamWire::kMaxShapePoints; i += step) {
+        sh->lat5[sh->n] = (int32_t)lround(w.rlat[i] * 1e5);
+        sh->lon5[sh->n] = (int32_t)lround(w.rlon[i] * 1e5);
+        sh->n++;
+      }
+      if ((n - 1) % step && sh->n < TeamWire::kMaxShapePoints) {   // keep the end
+        sh->lat5[sh->n] = (int32_t)lround(w.rlat[n - 1] * 1e5);
+        sh->lon5[sh->n] = (int32_t)lround(w.rlon[n - 1] * 1e5);
+        sh->n++;
+      }
+      len = TeamWire::encode(*sh, buf, sizeof buf);
+    }
+    delete sh;
+    if (len) onShape(buf, len);
+    return;
+  }
+  TeamWire::Marker m;
+  memcpy(m.key4, p.key4, 4);
+  m.id = id;
+  m.kind = teamcompat::markerKindForType(w.type);
+  m.lat = w.lat;
+  m.lon = w.lon;
+  for (int i = 0; i < kMaxMarkers; i++)   // a re-sent waypoint: newer than the copy we have
+    if (mused_[i] && keyEq(markers_[i].key4, m.key4) && markers_[i].id == m.id && t <= markers_[i].time)
+      t = markers_[i].time + 1;
+  m.time = t;
+  snprintf(m.label, sizeof m.label, "%s", w.name);
+  snprintf(m.note, sizeof m.note, "%s", w.desc);
+  onMarker(m);
+}
+
+bool Core::compatSend(const char* text) { return active() && io_->sendText(cfg.channel, text); }
+
+void Core::compatCap(bool force) {
+  if (!force && !compatActive()) return;
+  // Our radio key's first 6 bytes, which TEAM files us under ("-" if unknown).
+  char key12[13] = {0};
+  uint8_t k[6];
+  if (io_->selfKey6(k)) for (int i = 0; i < 6; i++) snprintf(key12 + 2 * i, 3, "%02x", k[i]);
+  char text[96];
+  if (!teamcompat::encodeCap(key12, callsign(), text, sizeof text)) return;
+  if (compatSend(text)) {
+    cap_sent_ = true;
+    cap_ms_ = io_->nowMs();
+    snprintf(cap_alias_, sizeof cap_alias_, "%s", callsign());
+  }
+}
+
+void Core::compatAfterBeacon() {
+  if (!compatActive() || !cfg.share) return;
+  const uint32_t now = io_->nowMs();
+  if (tel_sent_ && now - tel_ms_ < 15000UL) return;
+  char text[40];
+  if (!teamcompat::encodeTel(last_fix_.lat, last_fix_.lon, io_->batteryMv(), -1, text, sizeof text)) return;
+  if (!compatSend(text)) return;
+  tel_sent_ = true;
+  tel_ms_ = now;
+  if (!cap_sent_ || strcmp(cap_alias_, callsign()) != 0 || now - cap_ms_ > 6UL * 3600UL * 1000UL) {
+    cap_due_ = true;   // a couple of seconds after the #TEL
+    cap_due_ms_ = now + 2000;
+  }
+}
+
+void Core::compatMarker(const TeamWire::Marker& m) {
+  if (!compatActive() || m.deleted) return;
+  char id[24];
+  snprintf(id, sizeof id, "%02x%02x%02x%02x-%lx", m.key4[0], m.key4[1], m.key4[2], m.key4[3], (unsigned long)m.id);
+  char text[160];
+  const size_t overhead = strlen(io_->nodeName()) + 2;
+  if (teamcompat::encodeWay(id, m.label[0] ? m.label : TeamWire::kindName(m.kind), m.lat, m.lon, m.note,
+                            teamcompat::typeForMarkerKind(m.kind), overhead, text, sizeof text))
+    compatSend(text);
 }
 
 }  // namespace team
