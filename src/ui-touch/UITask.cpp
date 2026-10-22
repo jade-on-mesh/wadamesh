@@ -44330,6 +44330,7 @@ struct ChatBubbleDisplay {
   char retro_sender[UITask::MAX_SENDER_NAME + 1];
   char san_sender[UITask::MAX_SENDER_NAME + 8];
   char san_text[UITask::MAX_MSG_TEXT + 8];
+  uint32_t talk_sid = 0;   // a push-to-talk: its waveform goes on the second line
 };
 
 struct ChatVirtLayout {
@@ -44679,6 +44680,127 @@ static void chatVirtEnsureMsgIdx() {
 }
 
 static volatile uint32_t s_vox_voice_sid = 0;   // voice clip playing, 0 when quiet (player below)
+// How far the playing clip is: codec bytes decoded of its length (the talk
+// waveform fills in with it).
+static volatile uint32_t s_vox_voice_done = 0, s_vox_voice_len = 0;
+
+// ---- Push-to-talk in the chat: "Talk" with a waveform -------------------------
+// A talk's voice message is announced with the "PTT" caption (WALKIE.md); one
+// heard live counts too, for senders without it.
+#if CAP_LUA_AUDIO
+namespace walkie { static bool heardTalk(uint32_t sid); }   // WalkieUI.inc
+#else
+namespace walkie { static bool heardTalk(uint32_t) { return false; } }
+#endif
+static bool voxIsTalk(const VoxWire::Envelope& env, const char* cap, size_t cap_len) {
+  if (env.kind != VoxWire::kCodec2) return false;
+  return (cap && cap_len == 3 && !strncmp(cap, "PTT", 3)) || walkie::heardTalk(env.sid);
+}
+
+// Waveforms, worked out off the UI task (decoding a 20 s clip takes a moment
+// here) and kept for the last few talks shown.
+struct TalkWave { uint32_t sid; volatile uint8_t state; uint8_t bars[kVoxWaveBars]; };   // 1 working, 2 ready, 3 failed
+static TalkWave s_talk_waves[8] = {};
+static int s_talk_wave_next = 0;
+static volatile uint32_t s_talk_wave_ver = 0;   // bumped when one is ready: the chat repaints
+static volatile bool s_talk_wave_busy = false;
+
+#if VOX_CODEC2_AVAILABLE
+static void talkWaveTask(void* arg) {
+  TalkWave* w = static_cast<TalkWave*>(arg);
+  int mode = 0;
+  uint8_t* frames = nullptr;
+  size_t len = 0;
+  uint8_t bars[kVoxWaveBars];
+  bool ok = false;
+  if (VoxPhotos::loadVoice(w->sid, &mode, &frames, &len)) {
+    ok = voxCodec2Waveform(mode, frames, len, bars, kVoxWaveBars);
+    free(frames);
+  }
+  if (ok) memcpy(w->bars, bars, sizeof bars);
+  __atomic_store_n(&w->state, (uint8_t)(ok ? 2 : 3), __ATOMIC_RELEASE);
+  s_talk_wave_ver++;
+  s_talk_wave_busy = false;
+  vTaskDelete(nullptr);
+}
+#endif
+
+// The talk's bars (0..100) once worked out; null before (and starts working
+// them out when the clip is stored here and nothing else is being worked out).
+static const uint8_t* talkWaveFor(uint32_t sid) {
+  if (!sid) return nullptr;
+  for (TalkWave& w : s_talk_waves) {
+    if (w.sid != sid) continue;
+    return __atomic_load_n(&w.state, __ATOMIC_ACQUIRE) == 2 ? w.bars : nullptr;
+  }
+#if VOX_CODEC2_AVAILABLE
+  if (s_talk_wave_busy || !VoxPhotos::haveVoice(sid)) return nullptr;
+  TalkWave& w = s_talk_waves[s_talk_wave_next];
+  if (__atomic_load_n(&w.state, __ATOMIC_ACQUIRE) == 1) return nullptr;   // still working on the old one
+  s_talk_wave_next = (s_talk_wave_next + 1) % (int)(sizeof s_talk_waves / sizeof s_talk_waves[0]);
+  w.sid = sid;
+  w.state = 1;
+  s_talk_wave_busy = true;
+  // Codec2 needs ~9 KB of decode stack (test/build_vox_record_test.sh).
+  if (xTaskCreate(talkWaveTask, "talk_wave", 12 * 1024, &w, 1, nullptr) != pdPASS) {
+    w.state = 3;
+    s_talk_wave_busy = false;
+  }
+#endif
+  return nullptr;
+}
+
+// Spaces as wide as the waveform: the bubble's line for it, so the bubble is
+// measured with room for it (chatTalkWaveDrawCb draws over them).
+static const char* talkWaveSpaces() {
+  static char buf[72];
+  const lv_font_t* font = chatMessageFont();
+  const lv_coord_t sw = LV_MAX((lv_coord_t)1, (lv_coord_t)lv_font_get_glyph_width(font, ' ', ' '));
+  int n = (int)(SC(140) / sw);
+  n = n < 8 ? 8 : (n > (int)sizeof buf - 1 ? (int)sizeof buf - 1 : n);
+  memset(buf, ' ', (size_t)n);
+  buf[n] = 0;
+  return buf;
+}
+
+// Draws the waveform over a talk bubble's second line (its spaces).
+static void chatTalkWaveDrawCb(lv_event_t* e) {
+  lv_obj_t* lbl = lv_event_get_target(e);
+  lv_draw_ctx_t* dc = lv_event_get_draw_ctx(e);
+  const uint32_t sid = (uint32_t)(uintptr_t)lv_event_get_user_data(e);
+  if (!dc || !sid) return;
+  const char* txt = lv_label_get_text(lbl);
+  const char* nl = txt ? strchr(txt, '\n') : nullptr;
+  if (!nl) return;
+  lv_point_t pos;
+  lv_label_get_letter_pos(lbl, _lv_txt_encoded_get_char_id(txt, (uint32_t)(nl - txt)) + 1, &pos);
+  lv_area_t a;
+  lv_obj_get_content_coords(lbl, &a);
+  const lv_font_t* font = lv_obj_get_style_text_font(lbl, LV_PART_MAIN);
+  const lv_coord_t lh = lv_font_get_line_height(font);
+  const lv_coord_t x0 = a.x1 + pos.x, mid = a.y1 + pos.y + lh / 2;
+  const lv_coord_t w = LV_MIN((lv_coord_t)SC(140), (lv_coord_t)(a.x2 - x0));
+  if (w < kVoxWaveBars) return;
+  const uint8_t* bars = talkWaveFor(sid);
+  int played = -1;   // bars already played, while this one plays
+  if (s_vox_voice_sid == sid && s_vox_voice_len)
+    played = (int)((uint64_t)s_vox_voice_done * kVoxWaveBars / s_vox_voice_len);
+  lv_draw_rect_dsc_t rd;
+  lv_draw_rect_dsc_init(&rd);
+  rd.bg_opa = LV_OPA_COVER;
+  const lv_coord_t bw = LV_MAX((lv_coord_t)1, (lv_coord_t)(w * 3 / (kVoxWaveBars * 5)));
+  rd.radius = bw / 2;
+  for (int i = 0; i < kVoxWaveBars; i++) {
+    const int v = bars ? bars[i] : 8;
+    const lv_coord_t h = LV_MAX((lv_coord_t)2, (lv_coord_t)((lh - 2) * v / 100));
+    const lv_coord_t x = x0 + (lv_coord_t)((int32_t)w * (2 * i + 1) / (2 * kVoxWaveBars)) - bw / 2;
+    const lv_area_t r = {x, (lv_coord_t)(mid - h / 2), (lv_coord_t)(x + bw - 1), (lv_coord_t)(mid - h / 2 + h - 1)};
+    const bool done = i < played;
+    rd.bg_color = lv_color_hex(done ? COLOR_ACCENT : COLOR_SUB);
+    rd.bg_opa = done ? LV_OPA_COVER : (bars ? LV_OPA_80 : LV_OPA_40);
+    lv_draw_rect(dc, &rd, &r);
+  }
+}
 static void voxBubbleTextState(const VoxWire::Envelope& env, bool outgoing, char* out, size_t cap);
 
 // What a photo or voice bubble says, from the clip's download / playback state,
@@ -44729,6 +44851,7 @@ static void chatParseMessageDisplay(const UITask::UIMessage& m, bool channel_mod
   d.show_sender = m.sender;
   d.show_text   = m.text;
   d.retro_sender[0] = '\0';
+  d.talk_sid = 0;
   if (!m.outgoing &&
       (thread_is_room ||
        (channel_mode &&
@@ -44750,9 +44873,21 @@ static void chatParseMessageDisplay(const UITask::UIMessage& m, bool channel_mod
     voxBubbleText(vox_env, m.outgoing, st, sizeof st);
     size_t cap_len = 0;
     const char* cap = VoxWire::envelopeCaption(d.show_text, &cap_len);
-    snprintf(vox_line, sizeof vox_line, "%s  %s%s%.*s",
-             vox_env.kind == VoxWire::kImage ? LV_SYMBOL_IMAGE : LV_SYMBOL_AUDIO, st,
-             cap_len ? "\n" : "", (int)cap_len, cap ? cap : "");
+    if (voxIsTalk(vox_env, cap, cap_len)) {
+      // A push-to-talk: "Talk", a line for its waveform (drawn over it by
+      // chatTalkWaveDrawCb), how it got here; its "PTT" caption isn't shown.
+      const char* via = strchr(st, '\n');
+      const int first = via ? (int)(via - st) : (int)strlen(st);
+      const bool voice_word = first > 6 && !strncmp(st, "Voice ", 6);
+      snprintf(vox_line, sizeof vox_line, "%s  %s%s%.*s\n%s%s", LV_SYMBOL_AUDIO, TR("Talk"),
+               voice_word ? " " : " - ", voice_word ? first - 6 : first, voice_word ? st + 6 : st,
+               talkWaveSpaces(), via ? via : "");
+      d.talk_sid = vox_env.sid;
+    } else {
+      snprintf(vox_line, sizeof vox_line, "%s  %s%s%.*s",
+               vox_env.kind == VoxWire::kImage ? LV_SYMBOL_IMAGE : LV_SYMBOL_AUDIO, st,
+               cap_len ? "\n" : "", (int)cap_len, cap ? cap : "");
+    }
     d.show_text = vox_line;
   }
   // The label is the sender's nickname when it has one; show_sender (its colour, its
@@ -46408,6 +46543,8 @@ static lv_coord_t chatVirtCreateBubble(LvChatPanel* p, int logical_i, int ring_i
 #endif
                               LV_PART_MAIN);
   lv_label_set_text(tlbl, d.san_text);
+  if (d.talk_sid)
+    lv_obj_add_event_cb(tlbl, chatTalkWaveDrawCb, LV_EVENT_DRAW_MAIN_END, (void*)(uintptr_t)d.talk_sid);
   // Detect every actionable span before layout; the overlay draws only link glyphs
   // while the plain label supplies normal text and the hit-test coordinate map.
   int _ua, _ub; const bool has_url = chatUrlSpan(d.san_text, 0, &_ua, &_ub);
@@ -46534,6 +46671,8 @@ static lv_coord_t chatVirtCreateCompactRow(LvChatPanel* p, int logical_i, int ri
   lv_label_set_long_mode(row, LV_LABEL_LONG_WRAP);
   lv_obj_set_width(row, s_chat_virt.content_w);
   lv_label_set_text(row, line);
+  if (d.talk_sid)
+    lv_obj_add_event_cb(row, chatTalkWaveDrawCb, LV_EVENT_DRAW_MAIN_END, (void*)(uintptr_t)d.talk_sid);
   lv_obj_set_style_pad_hor(row, 3, LV_PART_MAIN);
   // Compact rows lean on the alternating row tint to show where one message
   // ends. E-paper has no tint to lean on, so consecutive messages ran into each
@@ -72876,7 +73015,9 @@ static void voxVoiceJob(void* arg) {
     size_t n_out = 0;
     uint32_t phase = 0;
     bool failed = false;
+    s_vox_voice_len = (uint32_t)pb->len;
     for (size_t i = 0; i + bpf <= pb->len && !s_vox_voice_stop && !failed; i += bpf) {
+      s_vox_voice_done = (uint32_t)i;
       codec.decode(pb->frames + i, pcm);
       for (int k = 0; k < spf && !failed; k++) {
         int32_t v = (int32_t)((float)pcm[k] * sink.gain);
@@ -72902,6 +73043,7 @@ static void voxVoiceJob(void* arg) {
   free(pb->frames);
   free(pb);
   __atomic_store_n(&s_lua_audio_active, false, __ATOMIC_RELEASE);
+  s_vox_voice_len = s_vox_voice_done = 0;
   s_vox_voice_sid = 0;
 }
 static void voxVoiceTask(void* arg) {   // when the audio worker is busy or missing
@@ -81678,6 +81820,14 @@ void UITask::loop() {
 #endif
     static uint32_t s_vox_voice_seen = 0;   // repaint the bubble when playback starts or ends
     if (s_vox_voice_sid != s_vox_voice_seen) { s_vox_voice_seen = s_vox_voice_sid; g_lv.dirty_timeline = true; }
+    static uint32_t s_talk_wave_seen = 0, s_talk_fill_ms = 0;   // a waveform worked out: repaint
+    if (s_talk_wave_ver != s_talk_wave_seen) { s_talk_wave_seen = s_talk_wave_ver; g_lv.dirty_timeline = true; }
+    // A talk playing: its waveform fills in. Only the open chat's area is redrawn.
+    if (s_vox_voice_sid && (uint32_t)(now - s_talk_fill_ms) >= 250) {
+      s_talk_fill_ms = now;
+      LvChatPanel* cp = g_lv.ch.detail_open ? &g_lv.ch : (g_lv.dm.detail_open ? &g_lv.dm : nullptr);
+      if (cp && cp->msgs) lv_obj_invalidate(cp->msgs);
+    }
     const uint32_t v = VoxPhotos::version();
     if (v != s_vox_seen && (uint32_t)(now - s_vox_paint_ms) >= 1000) {
       s_vox_seen = v;

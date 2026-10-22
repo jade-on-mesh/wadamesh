@@ -5,10 +5,12 @@
 //
 // Hold the button and talk: the mic is encoded to Codec2 1200 as it's
 // captured (VoxMic), and each second goes out on the channel as soon as it's
-// there. Talks heard on a channel whose walkie-talkie is open (or which is set
-// to keep listening) play as they arrive, through the audio worker. When the
-// button is let go the talk is posted as a voice message with the same session
-// id; a talk heard in full is kept, so its message plays with nothing to fetch.
+// there. Talks on any channel play as they arrive, through the audio worker,
+// unless "Play talks live" is off or the channel is muted (then only while its
+// walkie-talkie is open). When the button is let go the talk is posted as a
+// voice message with the same session id and the "PTT" caption, which the chat
+// shows as a talk with a waveform; a talk heard in full is kept, so its message
+// plays with nothing to fetch.
 // Everything here runs on the loop task except the playback job.
 
 #include "WalkieWire.h"
@@ -90,8 +92,25 @@ static void heardMaybeStore(Heard& h) {
   h.stored = VoxPhotos::storeHeard(h.sid, WalkieWire::kMode, h.bits, len);
 }
 
+// Session ids heard (or sent) as talks: their voice messages show as talks
+// even when announced without the "PTT" caption.
+static uint32_t s_talk_sids[32] = {0};
+static int s_talk_sids_next = 0;
+static void noteTalk(uint32_t sid) {
+  if (!sid) return;
+  for (uint32_t t : s_talk_sids) if (t == sid) return;
+  s_talk_sids[s_talk_sids_next] = sid;
+  s_talk_sids_next = (s_talk_sids_next + 1) % (int)(sizeof s_talk_sids / sizeof s_talk_sids[0]);
+}
+static bool heardTalk(uint32_t sid) {
+  if (!sid) return false;
+  for (uint32_t t : s_talk_sids) if (t == sid) return true;
+  return false;
+}
+
 // ---- settings ----------------------------------------------------------------
-static char s_listen[33] = "";        // the channel that keeps playing with the walkie closed
+static bool s_live_all = true;        // talks on every channel play live (unless muted)
+static String s_muted;                // channels whose talks don't play live, one name per line
 static String s_direct;               // channels set to Direct, one name per line
 static bool s_prefs_loaded = false;
 
@@ -100,14 +119,16 @@ static void prefsLoad() {
   s_prefs_loaded = true;
   SdNvsPrefs p;
   if (!p.begin("walkie", true)) return;
-  snprintf(s_listen, sizeof s_listen, "%s", p.getString("listen", "").c_str());
+  s_live_all = p.getBool("liveall", true);
+  s_muted = p.getString("muted", "");
   s_direct = p.getString("direct", "");
   p.end();
 }
 static void prefsSave() {
   SdNvsPrefs p;
   if (!p.begin("walkie", false)) return;
-  p.putString("listen", s_listen);
+  p.putBool("liveall", s_live_all);
+  p.putString("muted", s_muted);
   p.putString("direct", s_direct);
   p.end();
 }
@@ -119,40 +140,41 @@ static bool channelName(int ch, char* out, size_t cap) {
   return true;
 }
 
-static bool isDirect(int ch) {
+// A channel name in a one-name-per-line list.
+static bool listHas(const String& list, int ch) {
   prefsLoad();
   char n[33];
   if (!channelName(ch, n, sizeof n)) return false;
   String line = String("\n") + n + "\n";
-  return (String("\n") + s_direct + "\n").indexOf(line) >= 0;
+  return (String("\n") + list + "\n").indexOf(line) >= 0;
 }
-static void setDirect(int ch, bool on) {
+static void listSet(String& list, int ch, bool on) {
   char n[33];
-  if (!channelName(ch, n, sizeof n) || isDirect(ch) == on) return;
-  String all = String("\n") + s_direct + "\n";
+  if (!channelName(ch, n, sizeof n) || listHas(list, ch) == on) return;
+  String all = String("\n") + list + "\n";
   if (on) all += String(n) + "\n";
   else all.replace(String("\n") + n + "\n", "\n");
   all.trim();
-  s_direct = all;
+  list = all;
   prefsSave();
 }
 
-static bool keepsListening(int ch) {
+static bool isDirect(int ch) { return listHas(s_direct, ch); }
+static void setDirect(int ch, bool on) { listSet(s_direct, ch, on); }
+
+// The channel's talks play live while "Play talks live" is on (not muted).
+static bool channelLive(int ch) { return !listHas(s_muted, ch); }
+static void setChannelLive(int ch, bool on) { listSet(s_muted, ch, !on); }
+static bool liveAll() { prefsLoad(); return s_live_all; }
+static void setLiveAll(bool on) {
   prefsLoad();
-  char n[33];
-  return s_listen[0] && channelName(ch, n, sizeof n) && strcmp(n, s_listen) == 0;
-}
-static void setKeepListening(int ch, bool on) {
-  char n[33];
-  if (!channelName(ch, n, sizeof n)) return;
-  if (on) snprintf(s_listen, sizeof s_listen, "%s", n);
-  else if (strcmp(n, s_listen) == 0) s_listen[0] = 0;
+  s_live_all = on;
   prefsSave();
 }
 
 // ---- live playback -----------------------------------------------------------
 static int s_card_ch = -1;   // the channel whose walkie-talkie is open
-static bool listensTo(int ch) { return ch == s_card_ch || keepsListening(ch); }
+static bool listensTo(int ch) { return ch == s_card_ch || (liveAll() && channelLive(ch)); }
 
 #if CAP_LUA_AUDIO && VOX_CODEC2_AVAILABLE
 struct Chunk { uint16_t len; uint8_t data[kPktBytes]; };
@@ -423,6 +445,11 @@ static void txAnnounce() {
     if (g_lv.task) g_lv.task->showAlert(TR("Couldn't save the talk"), 1800);
     return;
   }
+  // The "PTT" caption marks it as a talk (WALKIE.md); versions that don't know
+  // it show "Voice message: PTT".
+  const size_t used = strlen(env);
+  if (used + 4 < sizeof env) memcpy(env + used, " PTT", 5);
+  noteTalk(sid);
   ChannelDetails cd;
   if (!the_mesh.getChannel(s_tx_ch, cd) || !cd.name[0]) return;
   const uint32_t ts = the_mesh.getRTCClock()->getCurrentTimeUnique();
@@ -494,6 +521,7 @@ static lv_obj_t*   s_bar = nullptr;
 static lv_obj_t*   s_talk_btn = nullptr;
 static lv_obj_t*   s_talk_lbl = nullptr;
 static lv_obj_t*   s_reach_lbl = nullptr;
+static lv_obj_t*   s_live_all_lbl = nullptr;
 static lv_obj_t*   s_listen_lbl = nullptr;
 static lv_timer_t* s_timer = nullptr;
 static int         s_talk_style = -1;   // 0 idle, 1 on air, 2 busy
@@ -559,18 +587,26 @@ static void reachText() {
                         isDirect(s_card_ch) ? TR("Reach: direct (no repeaters)") : TR("Reach: through repeaters"));
 }
 static void listenText() {
-  if (!s_listen_lbl) return;
-  lv_label_set_text_fmt(s_listen_lbl, "%s %s", keepsListening(s_card_ch) ? LV_SYMBOL_OK : LV_SYMBOL_CLOSE,
-                        TR("Keep listening when closed"));
+  if (s_live_all_lbl)
+    lv_label_set_text_fmt(s_live_all_lbl, "%s %s", liveAll() ? LV_SYMBOL_OK : LV_SYMBOL_CLOSE,
+                          TR("Play talks live (all channels)"));
+  if (s_listen_lbl)
+    lv_label_set_text_fmt(s_listen_lbl, "%s %s", liveAll() && channelLive(s_card_ch) ? LV_SYMBOL_OK : LV_SYMBOL_CLOSE,
+                          liveAll() ? TR("Play this channel's talks live") : TR("This channel: only while open"));
 }
 static void reachCb(lv_event_t* e) {
   if (lv_event_get_code(e) != LV_EVENT_CLICKED || talking()) return;
   setDirect(s_card_ch, !isDirect(s_card_ch));
   reachText();
 }
-static void listenCb(lv_event_t* e) {
+static void liveAllCb(lv_event_t* e) {
   if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
-  setKeepListening(s_card_ch, !keepsListening(s_card_ch));
+  setLiveAll(!liveAll());
+  listenText();
+}
+static void listenCb(lv_event_t* e) {
+  if (lv_event_get_code(e) != LV_EVENT_CLICKED || !liveAll()) return;
+  setChannelLive(s_card_ch, !channelLive(s_card_ch));
   listenText();
 }
 static void closeCb(lv_event_t* e) {
@@ -672,6 +708,8 @@ static void cardOpen(int ch) {
   lv_obj_t* tmp = nullptr;
   rowButton(card, reachCb, &tmp);
   s_reach_lbl = tmp;
+  rowButton(card, liveAllCb, &tmp);
+  s_live_all_lbl = tmp;
   rowButton(card, listenCb, &tmp);
   s_listen_lbl = tmp;
   reachText();
@@ -694,9 +732,9 @@ static void cardOpen(int ch) {
 static void cardClose() {
   if (talking() && s_tx_ch == s_card_ch) txRelease();   // the talk still finishes
   if (s_card) lv_obj_del(s_card);
-  s_card = s_status = s_bar = s_talk_btn = s_talk_lbl = s_reach_lbl = s_listen_lbl = nullptr;
+  s_card = s_status = s_bar = s_talk_btn = s_talk_lbl = s_reach_lbl = s_listen_lbl = s_live_all_lbl = nullptr;
 #if CAP_LUA_AUDIO && VOX_CODEC2_AVAILABLE
-  if (s_play_sid && !keepsListening(s_card_ch)) playStop();
+  if (s_play_sid && !(liveAll() && channelLive(s_card_ch))) playStop();
 #endif
   s_card_ch = -1;
 }
@@ -736,6 +774,7 @@ static void onPayload(const uint8_t* data, size_t len, int ch) {
   if (data[0] == WalkieWire::kStartMagic) {
     WalkieWire::Start s;
     if (!WalkieWire::parseStart(data, len, &s) || s.sid == s_tx_sid) return;
+    noteTalk(s.sid);
     Heard* h = heardGet(s.sid, ch, now);
     if (!h) return;
     snprintf(h->name, sizeof h->name, "%s", s.name);
@@ -744,6 +783,7 @@ static void onPayload(const uint8_t* data, size_t len, int ch) {
   }
   WalkieWire::Audio a;
   if (!WalkieWire::parseAudio(data, len, &a) || a.sid == s_tx_sid) return;
+  noteTalk(a.sid);
   Heard* h = heardGet(a.sid, ch, now);
   if (!h) return;
   h->last_ms = now;

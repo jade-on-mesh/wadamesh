@@ -34,6 +34,14 @@ size_t voxCodec2Samples(int wire_mode, size_t len);
 // codec couldn't start, or `out` is too small.
 long voxCodec2Decode(int wire_mode, const uint8_t* bits, size_t len, int16_t* out, size_t out_cap);
 
+// A clip's loudness as `n_bars` bars, 0..100 (a voice message's waveform, as
+// MeshCore Open TAK draws it: each bar the RMS of its slice of the decoded
+// audio, square-rooted against the loudest; all 0 for silence). Decodes frame
+// by frame (Codec2's decode stack, no PCM buffer). False if the mode can't be
+// decoded or the codec couldn't start.
+constexpr int kVoxWaveBars = 40;
+bool voxCodec2Waveform(int wire_mode, const uint8_t* bits, size_t len, uint8_t* bars, int n_bars);
+
 // Frame-by-frame decoding, for streaming a clip straight to the speaker.
 class VoxCodec2Stream {
  public:
