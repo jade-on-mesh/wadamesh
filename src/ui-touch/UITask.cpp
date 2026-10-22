@@ -42457,13 +42457,15 @@ static void buildAboutSettings() {
     if (FIRMWARE_OTA_ENV[0] && firmwareReleaseN() >= 0 && touchHasOtaUpdateSlot()) {
       s_ota_btn = setButton(c, LV_SYMBOL_DOWNLOAD, "Install update", otaInstallLatestCb, nullptr, SET_PRIMARY);
       s_ota_btn_lbl = nullptr;   // setPrimaryFace inks every label in the button
+      s_ota_status_lbl = setNote(c, "");
+      lv_obj_add_flag(s_ota_status_lbl, LV_OBJ_FLAG_HIDDEN);   // otaStatusText shows it when there is news
 #if CAP_OTA
       // Shown once the check finds an earlier beta to go back to (otaButtonRefreshState).
+      // Under the status line, so "Updating... Do not power off." sits right below
+      // Install update.
       s_ota_prev_btn = setActionRow(c, UI_ICON_HISTORY, "Install a previous version", nullptr, otaPrevVersionsCb);
       lv_obj_add_flag(s_ota_prev_btn, LV_OBJ_FLAG_HIDDEN);
 #endif
-      s_ota_status_lbl = setNote(c, "");
-      lv_obj_add_flag(s_ota_status_lbl, LV_OBJ_FLAG_HIDDEN);   // otaStatusText shows it when there is news
       otaButtonRefreshState();   // primary or plain, and the previous-version row, from what is known
     }
     // The beta channel. Outside the OTA-slot gate on purpose: Launcher installs have no
