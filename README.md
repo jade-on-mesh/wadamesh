@@ -20,6 +20,13 @@ MeshCore fork via PlatformIO `lib_deps`.
 See **[DEVICES.md](DEVICES.md)** for the full support matrix, install paths and
 per-board status.
 
+**One USB install on the T-Deck (Plus), ThinkNode M9 and T-LoRa Pager.** In this
+fork their app slots are 4.375 MB, the extra taken from the map tile cache. A
+standalone moves to the new layout only with the full merged image over USB
+(the web flasher). Its user data (settings, contacts, channels, chats) is kept;
+cached map tiles are cleared and fill again. Until then, an update over Wi-Fi
+stops with "too big for this radio's slots: install once over USB".
+
 - LilyGo T-Deck / T-Deck Plus: env `LilyGo_TDeck_companion_radio_touch` (stable)
 - Heltec V4 + TFT + CHSC6x touch: env `heltec_v4_tft_companion_radio_usb_tcp_touch` (stable)
 - Tanmatsu (ESP32-P4): built from `tanmatsu/` (ESP-IDF), ships via the Tanmatsu app store; [sideload guide](TANMATSU_SIDELOAD.md) for running your own build
