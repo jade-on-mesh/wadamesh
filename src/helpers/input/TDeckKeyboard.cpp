@@ -58,7 +58,12 @@ static int keyboardRead(uint8_t* out, size_t count) {
   return read;
 }
 
+// The Mic key (column 0, row 6) held without Sym (column 0, row 2): push-to-talk.
+static volatile bool s_mic_held = false;
+bool tdeckKeyboardMicHeld() { return s_mic_held; }
+
 static void processRawFrame(const uint8_t frame[TDeckKeyboardState::COLS], uint32_t now_ms) {
+  s_mic_held = (frame[0] & (1u << 6)) && !(frame[0] & (1u << 2));
   uint8_t keys[16];
   portENTER_CRITICAL(&s_keyboard_mux);
   const uint32_t generation = s_modifier_mode_generation;

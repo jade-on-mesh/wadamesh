@@ -81879,6 +81879,9 @@ void UITask::loop() {
 #if CAP_SOUND_LINK
     soundui::loopTick();    // Sound link: mic, player, heard messages, the bridge
 #endif
+#if CAP_LUA_AUDIO && defined(HAS_TDECK_KEYBOARD) && defined(ESP32)
+    walkie::keyTick(tdeckKeyboardMicHeld(), now);   // hold Mic to talk (WALKIE.md)
+#endif
     static uint32_t s_vox_voice_seen = 0;   // repaint the bubble when playback starts or ends
     if (s_vox_voice_sid != s_vox_voice_seen) { s_vox_voice_seen = s_vox_voice_sid; g_lv.dirty_timeline = true; }
     static uint32_t s_talk_wave_seen = 0, s_talk_fill_ms = 0;   // a waveform worked out: repaint

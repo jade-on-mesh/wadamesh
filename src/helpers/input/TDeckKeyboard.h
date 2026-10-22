@@ -34,6 +34,11 @@ void tdeckKeyboardPoll();
 /** Pop the next buffered key (ASCII), or 0 if none. Safe from the UI thread. */
 int tdeckKeyboardReadKey();
 
+/** The Mic key (the one with the microphone; Sym + it types 0) held down on its
+ *  own, for push-to-talk. Raw keyboard mode only: the older protocol reports no
+ *  releases, so this stays false there. Safe from the UI thread. */
+bool tdeckKeyboardMicHeld();
+
 /** Cancel one-shot/locked modifiers and suppress a later release from a
  * currently held modifier. Call when queued input is intentionally discarded. */
 void tdeckKeyboardDiscardModifiers();
