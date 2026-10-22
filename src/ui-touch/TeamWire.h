@@ -20,6 +20,9 @@
 //            [labelLen][label <= 24][geofence u8][param varint (route method; a
 //            circle's radius)][n u8][first lat i32][first lon i32 (degrees x 1e5)]
 //            [n-1 x (dlat, dlon) zigzag varints]   (app: team_shape_wire.dart)
+//   reply    [0x51][key4][toKey4][refKind u8 (1 alert, 2 report, 3 pin)][refId u32]
+//            [code u8][arg u8 (ETA minutes)][callsignLen][callsign]
+//            (a quick reply, QuickReply.h; app: team_reply_wire.dart)
 //
 // Roles 0-9 are the defaults, 10-24 roles a team added. A position's role is the
 // high nibble; 15 and up write 15 there, set flag 0x20 and put the role id in
@@ -39,6 +42,7 @@ namespace TeamWire {
 constexpr uint16_t kDataType = 0x5654;
 constexpr uint8_t kPosition = 0x50, kAlert = 0x53, kMarker = 0x4D, kReport = 0x52, kRole = 0x4C;
 constexpr uint8_t kShape = 0x44;
+constexpr uint8_t kReply = 0x51;
 // Shapes: line freehand polygon rectangle circle route (the app's ShapeKind).
 constexpr int kShapeRoute = 5;
 constexpr size_t kMaxShapeLabel = 24;
@@ -319,6 +323,47 @@ inline bool parse(const uint8_t* p, size_t n, Alert& x) {
   if (x.type >= kAlertTypes) x.type = 0;
   if (!r.str(x.callsign, sizeof x.callsign)) x.callsign[0] = 0;
   if (!r.str(x.note, sizeof x.note)) x.note[0] = 0;
+  return true;
+}
+
+// A quick reply to a teammate's alert, report or pin.
+struct Reply {
+  uint8_t key4[4] = {0};      // who answers
+  uint8_t to4[4] = {0};       // the item's author
+  uint8_t ref = 0;            // 1 alert, 2 report, 3 pin
+  uint32_t ref_id = 0;        // the alert id, report id or marker id
+  uint8_t code = 0;           // quickreply::Code
+  uint8_t arg = 0;            // ETA minutes
+  char callsign[kMaxCallsign + 1] = {0};
+};
+constexpr uint8_t kRefAlert = 1, kRefReport = 2, kRefPin = 3;
+constexpr uint8_t kReplyCodes = 7;   // copy onMyWay eta cantHelp seenIt needBackup allClear
+
+inline size_t encode(const Reply& x, uint8_t* out, size_t cap) {
+  W w(out, cap);
+  w.u8(kReply);
+  w.raw(x.key4, 4);
+  w.raw(x.to4, 4);
+  w.u8(x.ref);
+  w.u32(x.ref_id);
+  w.u8(x.code);
+  w.u8(x.arg);
+  w.str(x.callsign, kMaxCallsign);
+  return w.ok ? w.n : 0;
+}
+
+inline bool parse(const uint8_t* p, size_t n, Reply& x) {
+  R r(p, n);
+  if (!r.has(16) || r.u8() != kReply) return false;
+  memcpy(x.key4, p + 1, 4);
+  memcpy(x.to4, p + 5, 4);
+  r.o = 9;
+  x.ref = (uint8_t)r.u8();
+  x.ref_id = r.u32();
+  x.code = (uint8_t)r.u8();
+  x.arg = (uint8_t)r.u8();
+  if (x.ref < kRefAlert || x.ref > kRefPin || x.code >= kReplyCodes) return false;
+  if (!r.str(x.callsign, sizeof x.callsign)) x.callsign[0] = 0;
   return true;
 }
 

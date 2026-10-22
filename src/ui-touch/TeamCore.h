@@ -79,6 +79,7 @@ class Io {
   virtual bool writeFile(const char* name, const uint8_t* data, size_t len) = 0;
   virtual void changed() = 0;                   // redraw map / roster
   virtual void alarm(const AlertRec& r) = 0;    // a teammate's alert just went active
+  virtual void reply(const TeamWire::Reply& r) { (void)r; }   // a quick reply heard (QuickReply.h)
   // MeshCore TEAM interop (MESHCORE_TEAM.md): channel text straight to the
   // radio (not into our chat), the radio's battery, an advert, and the key of
   // a contact by name.
@@ -139,6 +140,8 @@ class Core {
   bool sosActive() const { return own_active_; }
   const TeamWire::Alert& ownAlert() const { return own_; }
   void raiseAlert(uint8_t type, const char* note);
+  // A quick reply to a teammate's alert, report or pin (TeamWire::Reply).
+  bool sendReply(uint8_t ref, const uint8_t to4[4], uint32_t ref_id, uint8_t code, uint8_t arg);
   void cancelAlert();
 
   // pins
