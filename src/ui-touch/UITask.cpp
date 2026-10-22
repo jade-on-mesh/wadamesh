@@ -8554,6 +8554,7 @@ static void hideKb();
 static void accentExit();      // long-press accent picker (issue #22, dead on touch)
 static void accentBoxHide();   // tap-to-pick accent box (issue #22)
 static void mentionBoxHide();  // tap-to-pick @-mention contact picker (issue #42)
+static void wordBoxHide();     // predictive text's word suggestions (PREDICTIVE_TEXT.md)
 static void txtMenuHide();     // cut/copy/paste/select-all edit menu
 static void showKb(LvChatPanel* p, bool reveal = true);
 static void closeSettingsModal();
@@ -11078,6 +11079,7 @@ static void mentionNavConfirm() {
     lv_event_send(s_mentionbox_cells[s_mentionnav_idx], LV_EVENT_CLICKED, nullptr);
   } else {
     mentionBoxHide();
+    wordBoxHide();
   }
 }
 #endif
@@ -11191,11 +11193,13 @@ static void mentionBoxCellCb(lv_event_t* e) {
     }
   }
   mentionBoxHide();
+  wordBoxHide();
 }
 // Show the recent-name picker for the @token at the caret. Returns true
 // when a picker is shown (so the caller suppresses the accent box).
 static bool mentionBoxMaybeShow(lv_obj_t* ta) {
   mentionBoxHide();
+  wordBoxHide();
   if (!ta) return false;
   const char* text = lv_textarea_get_text(ta);
   MentionToken token{};
@@ -11269,9 +11273,195 @@ static bool mentionBoxMaybeShow(lv_obj_t* ta) {
   lv_obj_move_foreground(s_mentionbox);
   return true;
 }
+// ---- Predictive text (PREDICTIVE_TEXT.md) -----------------------------------------
+// Up to three words that finish the one being typed, over the composer; a tap puts
+// one in with a space. From a built-in list and the words you send (kept in
+// /words on the internal store).
+#if CAP_TAK_EXTRAS
+#include <new>
+#include "PredictText.h"
+static fs::FS* backupInternalFs();
+static predict::Dict* s_words = nullptr;
+static bool s_words_on = true, s_words_loaded = false, s_words_dirty = false;
+static uint32_t s_words_dirty_ms = 0;
+static lv_obj_t* s_wordbox = nullptr;
+static lv_obj_t* s_wordbox_ta = nullptr;
+static char s_word_sugg[predict::kSuggest][predict::kWordMax];
+
+static predict::Dict* wordsDict() {
+  if (!s_words) {
+    void* m = heap_caps_malloc(sizeof(predict::Dict), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!m) m = malloc(sizeof(predict::Dict));
+    if (m) s_words = new (m) predict::Dict();
+  }
+  if (s_words && !s_words_loaded) {
+    s_words_loaded = true;
+#if defined(ESP32)
+    SdNvsPrefs pr;
+    if (pr.begin("predict", true)) { s_words_on = pr.getBool("on", true); pr.end(); }
+    if (fs::FS* fs = backupInternalFs()) {
+      if (fs->exists("/words")) {
+        File f = fs->open("/words", "r");
+        if (f) {
+          const size_t n = f.size() < 6000 ? f.size() : 6000;
+          char* buf = (char*)malloc(n + 1);
+          if (buf) { const size_t got = f.read((uint8_t*)buf, n); buf[got] = 0; s_words->load(buf, got); free(buf); }
+          f.close();
+        }
+      }
+    }
+#endif
+  }
+  return s_words;
+}
+// From the loop: the learned words go to the store a while after the last send.
+static void wordsSaveTick(uint32_t now) {
+  if (!s_words_dirty || now - s_words_dirty_ms < 30000 || !s_words) return;
+  s_words_dirty = false;
+#if defined(ESP32)
+  fs::FS* fs = backupInternalFs();
+  char* buf = (char*)malloc(6000);
+  if (!fs || !buf) { free(buf); return; }
+  const size_t n = s_words->save(buf, 6000);
+  WdtHeavyGuard guard;
+  File f = fs->open("/words", "w");
+  if (f) { f.write((const uint8_t*)buf, n); f.close(); }
+  free(buf);
+#endif
+}
+static void predictLearn(const char* text) {
+  if (!s_words_on || !text) return;
+  predict::Dict* d = wordsDict();
+  if (!d) return;
+  d->learnText(text);
+  s_words_dirty = true;
+  s_words_dirty_ms = millis();
+}
+static void wordBoxHide() {
+  if (s_wordbox) { if (lv_obj_is_valid(s_wordbox)) lv_obj_del(s_wordbox); s_wordbox = nullptr; }
+  s_wordbox_ta = nullptr;
+}
+static void wordBoxCellCb(lv_event_t* e) {
+  if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+  const int k = (int)(intptr_t)lv_event_get_user_data(e);
+  lv_obj_t* ta = s_wordbox_ta;
+  if (!ta || !lv_obj_is_valid(ta) || k < 0 || k >= predict::kSuggest) { wordBoxHide(); return; }
+  const char* text = lv_textarea_get_text(ta);
+  if (!text) { wordBoxHide(); return; }
+  const size_t len = strlen(text);
+  size_t caret = taCpToByte(text, lv_textarea_get_cursor_pos(ta));
+  if (caret > len) caret = len;
+  size_t wl;
+  const size_t at = predict::wordAt(text, caret, &wl);
+  const char* word = s_word_sugg[k];
+  const size_t nl = strlen(word);
+  const bool add_space = text[caret] != ' ';
+  if (at + nl + 1 + (len - caret) > UITask::MAX_MSG_TEXT) { wordBoxHide(); return; }
+  char out[UITask::MAX_MSG_TEXT + 1];
+  size_t o = 0;
+  memcpy(out, text, at); o = at;
+  memcpy(out + o, word, nl); o += nl;
+  if (add_space) out[o++] = ' ';
+  const size_t caret_byte = add_space ? o : o + 1;
+  memcpy(out + o, text + caret, len - caret + 1);
+  wordBoxHide();   // setting the text fires VALUE_CHANGED: tear down first
+  if (ta == s_kb_mirror_ta) {
+    lv_textarea_set_text(ta, out);
+    lv_textarea_set_cursor_pos(ta, (int32_t)taByteToCp(out, caret_byte));
+    kbMirrorSyncToReal();
+    if (s_kb_bind_ta) lv_textarea_set_cursor_pos(s_kb_bind_ta, (int32_t)taByteToCp(out, caret_byte));
+  } else {
+    setTextareaSynced(ta, out);
+    lv_textarea_set_cursor_pos(ta, (int32_t)taByteToCp(out, caret_byte));
+    if (s_kb_bind_ta == ta && s_kb_mirror_ta)
+      lv_textarea_set_cursor_pos(s_kb_mirror_ta, (int32_t)taByteToCp(out, caret_byte));
+  }
+}
+static bool wordBoxMaybeShow(lv_obj_t* ta) {
+  wordBoxHide();
+  if (!s_words_on || !ta) return false;
+  predict::Dict* d = wordsDict();
+  const char* text = lv_textarea_get_text(ta);
+  if (!d || !text || !*text) return false;
+  const size_t len = strlen(text);
+  size_t caret = taCpToByte(text, lv_textarea_get_cursor_pos(ta));
+  if (caret > len) caret = len;
+  if (caret < len && predict::wordChar(text[caret])) return false;   // in the middle of a word
+  size_t wl;
+  const size_t at = predict::wordAt(text, caret, &wl);
+  const int n = d->suggest(text + at, wl, s_word_sugg);
+  if (n == 0) return false;
+  s_wordbox_ta = ta;
+  s_wordbox = lv_obj_create(lv_layer_top());
+  lv_obj_add_flag(s_wordbox, NAV_SKIP_FLAG);
+  lv_obj_remove_style_all(s_wordbox);
+  lv_obj_set_style_bg_color(s_wordbox, lv_color_hex(COLOR_PANEL), LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(s_wordbox, LV_OPA_COVER, LV_PART_MAIN);
+  lv_obj_set_style_radius(s_wordbox, 8, LV_PART_MAIN);
+  lv_obj_set_style_border_color(s_wordbox, lv_color_hex(COLOR_ACCENT_BORDER), LV_PART_MAIN);
+  lv_obj_set_style_border_width(s_wordbox, 1, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(s_wordbox, 3, LV_PART_MAIN);
+  lv_obj_set_style_pad_column(s_wordbox, 3, LV_PART_MAIN);
+  lv_obj_set_flex_flow(s_wordbox, LV_FLEX_FLOW_ROW);
+  lv_obj_clear_flag(s_wordbox, LV_OBJ_FLAG_SCROLLABLE);
+  const lv_coord_t sw = lv_disp_get_hor_res(nullptr);
+  const lv_coord_t cw = (lv_coord_t)LV_MIN(110, (sw - 24) / 3);
+  for (int i = 0; i < n; ++i) {
+    lv_obj_t* b = lv_btn_create(s_wordbox);
+    lv_obj_add_flag(b, NAV_SKIP_FLAG);
+    lv_obj_set_size(b, cw, 28);
+    lv_obj_set_style_radius(b, 5, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(b, lv_color_hex(COLOR_ACCENT_SURFACE), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(b, lv_color_hex(COLOR_ACCENT), LV_PART_MAIN | LV_STATE_PRESSED);
+    lv_obj_add_event_cb(b, wordBoxCellCb, LV_EVENT_CLICKED, (void*)(intptr_t)i);
+    lv_obj_t* l = lv_label_create(b);
+    lv_label_set_text(l, s_word_sugg[i]);
+    lv_obj_set_style_text_font(l, &g_font_14, LV_PART_MAIN);
+    lv_obj_set_style_text_color(l, lv_color_hex(COLOR_TEXT), LV_PART_MAIN);
+    lv_label_set_long_mode(l, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(l, cw - 8);
+    lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_obj_center(l);
+  }
+  lv_obj_set_size(s_wordbox, n * cw + (n - 1) * 3 + 6, 34);
+  // Above the composer, clear of the keyboard (as the @-mention box).
+  lv_area_t a;
+  lv_obj_get_coords(ta, &a);
+  const lv_coord_t bw = lv_obj_get_width(s_wordbox), bh = 34;
+  lv_coord_t by = a.y1 - bh - 4;
+  if (g_lv.keyboard && !lv_obj_has_flag(g_lv.keyboard, LV_OBJ_FLAG_HIDDEN)) {
+    lv_coord_t limit = lv_disp_get_ver_res(nullptr) - chatKbH() - 2;
+    if (s_kb_panel) limit -= s_comp_h;
+    if (by + bh > limit) by = limit - bh;
+  }
+  if (by < STATUSBAR_H + 2) by = STATUSBAR_H + 2;
+  lv_obj_set_pos(s_wordbox, (sw - bw) / 2, by);
+  lv_obj_move_foreground(s_wordbox);
+  return true;
+}
+static void predictToggleCb(lv_event_t* e) {
+  if (lv_event_get_code(e) != LV_EVENT_VALUE_CHANGED) return;
+  wordsDict();
+  s_words_on = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED);
+#if defined(ESP32)
+  SdNvsPrefs pr;
+  if (pr.begin("predict", false)) { pr.putBool("on", s_words_on); pr.end(); }
+#endif
+  if (!s_words_on) wordBoxHide();
+}
+static bool predictOn() { wordsDict(); return s_words_on; }
+#else
+static void wordBoxHide() {}
+static bool wordBoxMaybeShow(lv_obj_t*) { return false; }
+static void predictLearn(const char*) {}
+static void wordsSaveTick(uint32_t) {}
+#endif
+
 static void composerMentionRefresh(lv_obj_t* ta) {
+  wordBoxHide();
   if (mentionBoxMaybeShow(ta)) { accentBoxHide(); return; }
   mentionBoxHide();
+  wordBoxHide();
   // Fall through to the accent box, as this function's predecessor did. Losing
   // this is what killed accent popups for anyone typing on a PHYSICAL keyboard
   // (#338): those keystrokes reach the composer's own VALUE_CHANGED, which ends
@@ -11279,6 +11469,7 @@ static void composerMentionRefresh(lv_obj_t* ta) {
   // call. Cheap to call twice, since accentBoxMaybeShow() hides the previous
   // box before deciding whether to show one.
   accentBoxMaybeShow();
+  if (!s_accbox) wordBoxMaybeShow(ta);   // word suggestions when no accent box is up
 }
 static void composerSuggestChangedCb(lv_event_t* e) {
   lv_obj_t* ta = lv_event_get_target(e);
@@ -12192,6 +12383,8 @@ static void composerSendFromPanel(LvChatPanel* p) {
   if (!g_lv.task || !p || !p->composer_ta) return;
   const char* text = lv_textarea_get_text(p->composer_ta);
   if (!text || !text[0]) return;
+  predictLearn(text);   // the words you send are suggested first (PREDICTIVE_TEXT.md)
+  wordBoxHide();
   g_lv.task->setComposerMode(true);
   g_lv.task->composerReset();
   for (const char* cp = text; *cp; ++cp) g_lv.task->composerAppendChar(*cp);
@@ -12216,6 +12409,8 @@ static void sendFromPanelCb(lv_event_t* e) {
   if (!p || !p->composer_ta) return;
   const char* text = lv_textarea_get_text(p->composer_ta);
   if (!text || !text[0]) return;
+  predictLearn(text);   // the words you send are suggested first (PREDICTIVE_TEXT.md)
+  wordBoxHide();
   g_lv.task->setComposerMode(true);
   g_lv.task->composerReset();
   for (const char* cp = text; *cp; ++cp) g_lv.task->composerAppendChar(*cp);
@@ -19754,6 +19949,10 @@ static void buildKeyboardPage() {
                  s_accent_popups,
 #endif
                  accentPopupsToggleCb);
+#if CAP_TAK_EXTRAS
+    setSwitchRow(c, "Word suggestions", "Up to three words that finish the one you're typing, over the message. "
+                 "The words you send come first.", predictOn(), predictToggleCb);
+#endif
 #if defined(HAS_TDECK_KEYBOARD) || defined(HAS_M9_KEYBOARD)
     setSwitchRow(c, "Enter key sends message", "Off: Enter adds a new line, and Send sends.",
 #if defined(ESP32)
@@ -26580,6 +26779,7 @@ static bool terminalHandleVirtualKeyboardReady() {
   accentExit();
   accentBoxHide();
   mentionBoxHide();
+  wordBoxHide();
   terminalSubmit();
   hideKb();
   return true;
@@ -48815,6 +49015,7 @@ static void updatePagerAltBackspaceChord() {
   // first so a stray overlay doesn't keep floating over the Home screen.
   accentBoxHide();
   mentionBoxHide();
+  wordBoxHide();
   navGoToMainTab(HOME_TAB_INDEX);
   if (g_lv.task) g_lv.task->noteUserInput();
 }
@@ -53474,6 +53675,7 @@ if (g_lv.task && g_lv.task->isManualLock()) {
     // goes through hideKb(); this covers the physical-keyboard Enter.
     accentBoxHide();
     mentionBoxHide();
+    wordBoxHide();
 #if defined(HAS_TDECK_GT911) || defined(HAS_TDECK_PRO) || defined(TLORA_PAGER) || defined(HAS_M9_KEYBOARD)
     if (s_editor_ta && ta == s_editor_ta) {
       lv_textarea_add_char(ta, '\n');   // multiline editor: Enter inserts a newline
@@ -53703,6 +53905,7 @@ static void bleKbdDispatch(int key) {
         s_nav_ta_editing = false;
         accentBoxHide();
         mentionBoxHide();
+        wordBoxHide();
       }
       bleKbdBack();
       break;
@@ -53747,6 +53950,7 @@ static void bleKbdTouchDelete(lv_obj_t* ta, bool forward) {
 static void bleKbdTouchEnter(lv_obj_t* ta) {
   accentBoxHide();
   mentionBoxHide();
+  wordBoxHide();
   if (s_editor_ta && ta == s_editor_ta) {           // multiline editor
     lv_textarea_add_char(ta, '\n');
   } else if (cmdLineEnter()) {                       // terminal / admin CLI: run it, keep the field
@@ -53973,6 +54177,7 @@ static void bleKbdDispatch(int key) {
         s_nav_ta_editing = false;
         accentBoxHide();
         mentionBoxHide();
+        wordBoxHide();
       }
       bleKbdBack();
       break;
@@ -79776,6 +79981,7 @@ static void maxGlanceTapCb(lv_event_t*) { s_max_glance_tapped = true; }
 static void maxGoHome() {
   accentBoxHide();
   mentionBoxHide();
+  wordBoxHide();
   for (int i = 0; i < 4 && anyPopupOpen(); ++i) hwKeyDismissTopPopup();
   if (s_apppage_close) s_apppage_close();
   if (LvChatPanel* cp = navOpenChatPanel()) closeChatPanel(cp);
@@ -81890,6 +82096,7 @@ void UITask::loop() {
     VoxPhotos::tick();
     if (VoxMic::available()) VoxMic::state();   // releases the mic once a recording ends
     OtpMessenger::tick();   // sends, retries, sync checks: whether or not the app is open
+    wordsSaveTick(now);     // predictive text: the words you send, to the store
     teamui::loopTick();     // beacons, alert repeats, alarm, Bloodhound, map refresh
     mmcovui::loopTick(now); // MediaMesh coverage: ask the repeaters every 150 m
 #if CAP_FLOCK_YOU

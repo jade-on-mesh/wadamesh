@@ -58,6 +58,7 @@ drone detector (app drawer > Drones) is in [DRONES.md](DRONES.md).
 The Team app understands MeshCore TEAM users on the team channel: see [MESHCORE_TEAM.md](MESHCORE_TEAM.md).
 Sharing a whole team setup in one QR code or Sound link is in [TEAM_SETUP.md](TEAM_SETUP.md).
 Red light (night vision) is in [NIGHT_MODE.md](NIGHT_MODE.md).
+Word suggestions while typing are in [PREDICTIVE_TEXT.md](PREDICTIVE_TEXT.md).
 
 ## Offline map tiles
 
