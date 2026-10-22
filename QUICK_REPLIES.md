@@ -5,7 +5,7 @@ watched report gets an answer without typing on the keyboard while walking.
 MeshCore Open TAK sends and shows the same replies
 (`documentation/quick-replies.md` there).
 
-Not on the ThinkNode M9 or the T-Display P4: their app space is full
+Not on the T-Display P4: its app space is full
 (`CAP_TAK_EXTRAS` in `device_caps.h`).
 
 ## Where
