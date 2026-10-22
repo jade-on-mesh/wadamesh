@@ -58,6 +58,8 @@ drone detector (app drawer > Drones) is in [DRONES.md](DRONES.md).
 The Team app understands MeshCore TEAM users on the team channel: see [MESHCORE_TEAM.md](MESHCORE_TEAM.md).
 Sharing a whole team setup in one QR code or Sound link is in [TEAM_SETUP.md](TEAM_SETUP.md).
 Red light (night vision) is in [NIGHT_MODE.md](NIGHT_MODE.md).
+One-tap answers to alerts, reports, pins and watched reports are in [QUICK_REPLIES.md](QUICK_REPLIES.md).
+Who heard your channel messages (repeaters and teammates) is in [MESSAGE_REACH.md](MESSAGE_REACH.md).
 Home widgets for the team (nearest teammate, latest alert, mesh health) are in [HOME_TEAM.md](HOME_TEAM.md).
 
 ## Offline map tiles
