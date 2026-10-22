@@ -9,6 +9,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "TeamCompat.h"
 #include "TeamRoute.h"
 #include "TeamWire.h"
 
@@ -78,11 +79,35 @@ class Io {
   virtual bool writeFile(const char* name, const uint8_t* data, size_t len) = 0;
   virtual void changed() = 0;                   // redraw map / roster
   virtual void alarm(const AlertRec& r) = 0;    // a teammate's alert just went active
+  // MeshCore TEAM interop (MESHCORE_TEAM.md): channel text straight to the
+  // radio (not into our chat), the radio's battery, an advert, and the key of
+  // a contact by name.
+  virtual bool sendText(const char* channel, const char* text) { (void)channel; (void)text; return false; }
+  virtual int batteryMv() { return -1; }
+  virtual void advert() {}
+  virtual bool contactKey4(const char* name, uint8_t out[4]) { (void)name; (void)out; return false; }
+  virtual bool selfKey6(uint8_t out[6]) { (void)out; return false; }   // for TEAM's #CAP
 };
+
+// A MeshCore TEAM user heard on the team channel.
+struct CompatPeer {
+  bool used = false;
+  char name[33] = {0};           // its radio name (what channel text carries)
+  bool has_key = false;          // from its #CAP
+  uint8_t key4[4] = {0};         // what its member is filed under now
+  char alias[teamcompat::kMaxAlias * 2 + 1] = {0};
+  bool has_pos = false;
+  teamcompat::Pos pos;
+  uint32_t heard_ms = 0;
+};
+constexpr int kMaxCompatPeers = 16;
 
 class Core {
  public:
   explicit Core(Io* io) : io_(io) {}
+  ~Core() { delete asm_; }
+  Core(const Core&) = delete;
+  Core& operator=(const Core&) = delete;
   void begin();
   Settings cfg;
   void saveSettings();
@@ -92,6 +117,13 @@ class Core {
 
   // incoming GRP_DATA on `channel`
   void onPayload(const char* channel, const uint8_t* p, size_t n);
+  // Incoming channel text on `channel` from `sender` (the body, without
+  // "Name: "): true when it's MeshCore TEAM's, which isn't shown as chat.
+  bool onText(const char* channel, const char* sender, const char* body);
+  // A TEAM user was heard on the team channel in the last 12 hours: we send
+  // TEAM's formats too.
+  bool compatActive() const;
+  int compatPeerCount() const;
   void tick();
   bool sendPosition();
 
@@ -187,6 +219,23 @@ class Core {
   void loadRoutes();
 
   bool sendRaw(const uint8_t* p, size_t n);
+
+  // MeshCore TEAM interop
+  CompatPeer peers_[kMaxCompatPeers];
+  bool compat_heard_ = false;
+  uint32_t compat_heard_ms_ = 0;
+  uint32_t tel_ms_ = 0, cap_ms_ = 0, advert_ms_ = 0, cap_due_ms_ = 0;
+  bool tel_sent_ = false, cap_sent_ = false, advert_sent_ = false, cap_due_ = false;
+  char cap_alias_[TeamWire::kMaxCallsign + 1] = {0};
+  teamcompat::Assembler* asm_ = nullptr;
+  CompatPeer* compatPeer(const char* name, bool create);
+  void compatKey(CompatPeer& p);
+  void compatShow(CompatPeer& p);
+  void compatWay(CompatPeer& p, const teamcompat::Way& w);
+  bool compatSend(const char* text);
+  void compatCap(bool force);
+  void compatAfterBeacon();
+  void compatMarker(const TeamWire::Marker& m);
   void onPosition(const TeamWire::Position& p);
   void onAlert(const TeamWire::Alert& a);
   void onMarker(const TeamWire::Marker& m);
@@ -206,3 +255,6 @@ void teamOnChannelData(int channel_idx, const uint8_t* data, size_t len);
 // Called by MyMesh for channel text: reports with a position on watched channels
 // go on the map (WatchFeed.h; defined in the UI glue).
 void teamOnChannelText(int channel_idx, const char* text, uint32_t sent_epoch);
+// Called by MyMesh for channel text first: true when it's MeshCore TEAM's
+// (MESHCORE_TEAM.md), which isn't stored or shown as chat.
+bool teamCompatOnChannelText(int channel_idx, const char* text);

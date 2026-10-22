@@ -87,6 +87,32 @@ class Io : public team::Io {
   }
   void changed() override { s_version++; }
   void alarm(const team::AlertRec&) override { s_alarm_pending = true; }
+  // MeshCore TEAM interop (MESHCORE_TEAM.md).
+  bool sendText(const char* name, const char* text) override {
+    const int idx = channelIdx(name);
+    ChannelDetails cd;
+    if (idx < 0 || !the_mesh.getChannel(idx, cd)) return false;
+    const uint32_t ts = the_mesh.getRTCClock()->getCurrentTimeUnique();
+    const char* me = the_mesh.getNodePrefs()->node_name;
+    return sendGroupMessageScoped(idx, cd, ts, me && *me ? me : "me", text);   // not into our chat
+  }
+  int batteryMv() override {
+    const uint16_t mv = batteryMvSmoothed();
+    return mv ? (int)mv : -1;
+  }
+  void advert() override { the_mesh.sendAdvert(true); }
+  bool contactKey4(const char* name, uint8_t out[4]) override {
+    const int nc = the_mesh.getNumContacts();
+    for (int k = 0; k < nc; k++) {
+      ContactInfo c;
+      if (the_mesh.getContactByIdx((uint32_t)k, c) && !strcmp(c.name, name)) {
+        memcpy(out, c.id.pub_key, 4);
+        return true;
+      }
+    }
+    return false;
+  }
+  bool selfKey6(uint8_t out[6]) override { memcpy(out, the_mesh.getSelfPubKey(), 6); return true; }
 
   static int channelIdx(const char* name) {
     if (!name || !*name) return -1;
@@ -1062,6 +1088,20 @@ void teamOnChannelData(int idx, const uint8_t* data, size_t len) {
 
 // Called by MyMesh for every channel text message: a report with a position on
 // a watched channel goes on the map.
+// MeshCore TEAM's channel text (MESHCORE_TEAM.md): true when it is, so it isn't
+// shown as chat; on the team channel it becomes members, pins and routes.
+bool teamCompatOnChannelText(int idx, const char* text) {
+  using namespace teamui;
+  if (idx < 0 || !text) return false;
+  char sender[40];
+  const char* body = watchfeed::messageText(text, sender, sizeof sender);
+  if (!body || !teamcompat::isCompatText(body)) return false;
+  ChannelDetails cd;
+  if (!the_mesh.getChannel(idx, cd)) return false;
+  team::Core* c = core();
+  return c ? c->onText(cd.name, sender, body) : true;
+}
+
 void teamOnChannelText(int idx, const char* text, uint32_t sent) {
   using namespace teamui;
   if (idx < 0 || !text) return;
