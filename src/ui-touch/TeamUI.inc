@@ -1784,8 +1784,11 @@ static void pageOpen() {
 static void loopTick() {
   team::Core* c = core();
   if (!c) return;
-  c->tick();
   const uint32_t now = millis();
+  // Four times a second is plenty for beacons, alert repeats and route cues;
+  // every pass of the UI loop read the GPS (and its motion) for nothing.
+  static uint32_t last_core = 0;
+  if (now - last_core >= 250) { last_core = now; c->tick(); }
   static uint32_t map_seen = 0, last_map = 0;
   if (Io::s_version != map_seen && now - last_map > 1500) {
     map_seen = Io::s_version;
