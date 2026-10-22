@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "TeamCore.h"
+#include "device_caps.h"   // CAP_TAK_EXTRAS: who-heard-what is off where the app slot is full
 
 #include <new>
 
@@ -314,10 +315,12 @@ bool Core::sendPosition() {
   p.from_radio = true;
   p.sos = own_active_;
   snprintf(p.callsign, sizeof p.callsign, "%s", callsign());
+#if CAP_TAK_EXTRAS
   p.has_name_hash = true;
   p.name_hash = nameHash(io_->nodeName());
   p.heard_n = heard_recent_n_;
   for (uint8_t i = 0; i < heard_recent_n_; i++) p.heard[i] = heard_recent_[i];
+#endif
   uint8_t buf[TeamWire::kMaxPayload];
   const size_t n = TeamWire::encode(p, buf, sizeof buf);
   if (!sendRaw(buf, n)) return false;
@@ -429,6 +432,10 @@ void Core::onPayload(const char* channel, const uint8_t* p, size_t n) {
 }
 
 void Core::noteChannelText(const char* channel, const char* sender, uint32_t sent, const char* body) {
+#if !CAP_TAK_EXTRAS
+  (void)channel; (void)sender; (void)sent; (void)body;
+  return;
+#endif
   if (!active() || !sender || !body) return;
   const uint16_t from = nameHash(sender);
   bool teammate = channel && !strcmp(channel, cfg.channel);
@@ -463,7 +470,7 @@ int Core::heardBy(uint16_t msg, uint8_t (*keys)[4], uint32_t* ms, int cap) const
 void Core::onPosition(const TeamWire::Position& x) {
   // What this teammate heard (MESSAGE_REACH.md).
   const uint32_t at = io_->nowMs();
-  for (uint8_t k = 0; k < x.heard_n; k++) {
+  for (uint8_t k = 0; CAP_TAK_EXTRAS && k < x.heard_n; k++) {
     HeardRec* slot = nullptr;
     for (HeardRec& r : heard_by_)
       if (r.used && r.msg == x.heard[k] && keyEq(r.key4, x.key4)) { slot = &r; break; }
