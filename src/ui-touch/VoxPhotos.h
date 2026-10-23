@@ -93,6 +93,20 @@ bool saveThumb(uint32_t sid, const uint16_t* src, int sw, int sh);
 // finished photo download asks on its own. The UI takes them one at a time
 // (0 when none), decoding in the background.
 void requestThumb(uint32_t sid);
+
+// The photos stored on this radio (downloaded ones), newest first by file time
+// (directory order where the filesystem keeps none), at most `cap`.
+struct StoredPhoto { uint32_t sid; uint32_t mtime; uint32_t bytes; };
+int listPhotos(StoredPhoto* out, int cap);
+// Removes a stored photo and its thumbnail.
+bool deletePhoto(uint32_t sid);
+// The VI1 envelope that sends a stored photo: post it as a message and this
+// radio serves the photo to whoever asks (it becomes ours to serve). False
+// when the photo isn't stored or isn't a photo payload.
+bool photoEnvelope(uint32_t sid, char* out, size_t cap);
+// Stores a photo payload ([0x01][AV1 OBUs], a .vi1 file) under a new sid, so
+// it can be sent and appears in Photos.
+bool importPhoto(const uint8_t* data, size_t len, uint32_t* sid_out);
 uint32_t nextThumbWanted();
 
 }  // namespace VoxPhotos

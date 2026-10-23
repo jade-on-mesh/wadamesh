@@ -28617,6 +28617,46 @@ static void fmActToggleHiddenCb(lv_event_t* e) {
   fmRefresh();
 }
 
+#if VOX_AV1_AVAILABLE
+namespace photosui { static void sendPick(uint32_t sid); }   // PhotosUI.inc
+static bool fmIsVoxPhoto(const char* name);
+// Files: send a photo (.vi1, the mesh photo format) to a chat. One already in
+// the photo store (vox_<sid>.vi1) goes as itself; any other .vi1 is copied
+// into the store under a new id first, so this radio can serve it.
+static void fmActSendPhotoCb(lv_event_t* e) {
+  if (lv_event_get_code(e) != LV_EVENT_CLICKED || !s_fm_fs || !s_fm_sel_name[0]) return;
+  lv_indev_t* a = lv_indev_get_act(); if (a) lv_indev_wait_release(a);
+  char path[200];
+  fmFullPath(s_fm_sel_name, path, sizeof path);
+  fmCloseActions();
+  uint32_t sid = 0;
+  const char* b = strrchr(path, '/');
+  b = b ? b + 1 : path;
+  if (strlen(b) == 16 && !strncmp(b, "vox_", 4) && !strcasecmp(b + 12, ".vi1")) {
+    char hex[9];
+    memcpy(hex, b + 4, 8);
+    hex[8] = 0;
+    const uint32_t s = (uint32_t)strtoul(hex, nullptr, 16);
+    char probe[48];
+    if (s && VoxPhotos::photoEnvelope(s, probe, sizeof probe)) sid = s;   // it's in the store
+  }
+  if (!sid) {
+    File f = s_fm_fs->open(path, "r");
+    const size_t sz = f ? f.size() : 0;
+    uint8_t* buf = sz && sz <= 64 * 1024 ? (uint8_t*)heap_caps_malloc(sz, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) : nullptr;
+    const bool rd = buf && f.read(buf, sz) == sz;
+    if (f) f.close();
+    const bool ok = rd && VoxPhotos::importPhoto(buf, sz, &sid);
+    if (buf) heap_caps_free(buf);
+    if (!ok) {
+      if (g_lv.task) g_lv.task->showAlert(TR("Not a photo that can be sent (too big or not a mesh photo)"), 2500);
+      return;
+    }
+  }
+  photosui::sendPick(sid);
+}
+#endif
+
 static void fmOpenActions(const char* name, bool isdir) {
   fmCloseActions();
   if (name) { snprintf(s_fm_sel_name, sizeof s_fm_sel_name, "%s", name); s_fm_sel_isdir = isdir; }
@@ -28660,6 +28700,9 @@ static void fmOpenActions(const char* name, bool isdir) {
   lv_obj_set_style_text_font(tl, &g_font_12, LV_PART_MAIN);
 
   if (name) {
+#if VOX_AV1_AVAILABLE
+    if (!isdir && fmIsVoxPhoto(name)) fmActionBtn(card, TR("Send to a chat"), fmActSendPhotoCb, 0x2D4A2D);
+#endif
     fmActionBtn(card, TR("Rename"), fmActRenameCb, 0x2B3440);
     fmActionBtn(card, TR("Copy"), fmActCopyCb, 0x2B3440);
     fmActionBtn(card, TR("Cut"), fmActCutCb, 0x2B3440);
@@ -58646,6 +58689,7 @@ enum AppDrawerAction {
   APPACT_FLOCK,
   APPACT_SOUND,
   APPACT_DRONE,
+  APPACT_PHOTOS,
   APPACT_LUA_BASE = 100,   // APPACT_LUA_BASE + i = installed Lua app s_lua_inst[i]
 };
 // OTP Messenger (app drawer -> APPACT_OTP): the screens; protocol in OtpCore.cpp.
@@ -58671,6 +58715,10 @@ __attribute__((unused)) static bool bgListenerResetOnce(const char* key) {
 #include "FlockYouUI.inc"
 // Drone Detector (app drawer -> APPACT_DRONE): Remote ID on Flock You's radios; glue in DroneCore.h.
 #include "DroneUI.inc"
+#if VOX_AV1_AVAILABLE
+// Photos (app drawer -> APPACT_PHOTOS): downloaded mesh photos as a thumbnail grid.
+#include "PhotosUI.inc"
+#endif
 #if CAP_SOUND_LINK
 // Sound link (app drawer -> APPACT_SOUND): SoundLinkUI.inc, included further down,
 // after the audio sink it plays through.
@@ -58695,6 +58743,9 @@ static const AppTileDef k_app_tiles[] = {
   { UI_ICON_AT_SIGN,            "Mentions",  APPACT_MENTIONS,  HUE_MSG },
   { UI_ICON_MAP_PIN,            "Map",       APPACT_MAP,       HUE_PLACE },
   { UI_ICON_USERS,              "Team",      APPACT_TEAM,      HUE_PLACE },   // teammates, SOS, pins, Bloodhound
+#if VOX_AV1_AVAILABLE
+  { UI_ICON_IMAGE,              "Photos",    APPACT_PHOTOS,    HUE_MSG },     // photos downloaded from the mesh
+#endif
 #if CAP_FLOCK_YOU
   { UI_ICON_EYE,                "Flock You", APPACT_FLOCK,     HUE_RADIO },   // Flock ALPR detector + known cameras
   { UI_ICON_CROSSHAIR,          "Drones",    APPACT_DRONE,     HUE_RADIO },   // Remote ID drone detector
@@ -59097,6 +59148,9 @@ static void appLaunch(int act, lv_event_t* e) {
     case APPACT_MENTIONS:  openMentionsScreen();  return;
     case APPACT_OTP:       otpui::open();         return;   // one-time-pad messenger
     case APPACT_TEAM:      teamui::pageOpen();    return;   // team awareness
+#if VOX_AV1_AVAILABLE
+    case APPACT_PHOTOS:    photosui::pageOpen();  return;   // downloaded mesh photos
+#endif
 #if CAP_FLOCK_YOU
     case APPACT_FLOCK:     flockui::pageOpen();   return;   // Flock ALPR detector
     case APPACT_DRONE:     droneui::pageOpen();   return;   // Remote ID drone detector
