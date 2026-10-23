@@ -60,5 +60,5 @@ set_source_files_properties("${APP}/ui-touch/UITask.cpp" PROPERTIES COMPILE_OPTI
 # lvgl component and variants/tdisplay_p4/, which stay -O2), nor the radio driver
 # (RadioLib, the meshcore component).
 set(APP_OS_SRCS ${APP_SRCS})
-list(FILTER APP_OS_SRCS INCLUDE REGEX "^${APP}/")
+list(FILTER APP_OS_SRCS EXCLUDE REGEX "/variants/")   # APP_SRCS is src/ plus variants/tdisplay_p4/
 set_source_files_properties(${APP_OS_SRCS} PROPERTIES COMPILE_OPTIONS "-Os")
