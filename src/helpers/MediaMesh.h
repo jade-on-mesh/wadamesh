@@ -20,6 +20,10 @@ namespace mediamesh {
 
 /** True when this build's radio can run a second profile (SX126x on ESP32). */
 bool supported();
+/** Why not, when !supported(), for the settings: "needs an SX1262", or for an
+ * SX1262 whose DIO1 is polled (behind an I/O expander, as on the T-Display P4)
+ * that the radio can't flag packets to the processor. */
+bool sx1262Polled();
 
 /** The saved settings (loaded on first use). */
 const Config& config();

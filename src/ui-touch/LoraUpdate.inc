@@ -695,7 +695,9 @@ void openPage(const uint8_t* pub32, const char* nm) {
   build(page);
   if (!timer) timer = lv_timer_create(tick, 500, nullptr);
   if (!mediamesh::supported()) {
-    setLine(TR("This radio can't run a temporary radio (needs an SX1262), so it can't serve updates."));
+    setLine(mediamesh::sx1262Polled()
+                ? TR("This radio can't run a temporary radio (its SX1262 signals packets through an I/O expander), so it can't serve updates.")
+                : TR("This radio can't run a temporary radio (needs an SX1262), so it can't serve updates."));
     if (w_start) lv_obj_add_state(w_start, LV_STATE_DISABLED);
   }
   render();
