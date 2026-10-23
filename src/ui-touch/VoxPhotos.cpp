@@ -354,8 +354,14 @@ class ServeIo : public VoxServeIo {
 
   bool loadClip(uint32_t sid, uint8_t* mode, uint8_t** bits, size_t* len) override {
     int m = 0;
-    if (!loadVoice(sid, &m, bits, len)) return false;
-    *mode = (uint8_t)m;
+    if (loadVoice(sid, &m, bits, len)) {
+      *mode = (uint8_t)m;
+      return true;
+    }
+    // A photo this radio sent (sendPhoto), or one it downloaded: served the same
+    // way, in 156-byte packets (wire mode 40).
+    if (!loadFile(sid, false, bits, len)) return false;
+    *mode = (uint8_t)VoxWire::kImageModeId;
     return true;
   }
   void freeClip(uint8_t* bits) override { free(bits); }
@@ -562,6 +568,106 @@ bool haveVoice(uint32_t sid) { return storeHas(sid, true); }
 // ---- thumbnails: /vox_<sid>.vt1 = [w][h][w*h RGB565], at most kThumbMax a side ----
 
 void requestThumb(uint32_t sid) { wantThumb(sid); }
+
+int listPhotos(StoredPhoto* out, int cap) {
+  if (!g_fs || !out || cap <= 0) return 0;
+  File dir = g_fs->open(g_root[0] ? g_root : "/");
+  if (!dir || !dir.isDirectory()) return 0;
+  int n = 0;
+  for (File f = dir.openNextFile(); f; f = dir.openNextFile()) {
+    const char* nm = f.name();
+    const char* b = strrchr(nm, '/');
+    b = b ? b + 1 : nm;
+    if (!f.isDirectory() && strlen(b) == 16 && !strncmp(b, "vox_", 4) && !strcmp(b + 12, ".vi1")) {
+      char hex[9];
+      memcpy(hex, b + 4, 8);
+      hex[8] = 0;
+      const StoredPhoto p{(uint32_t)strtoul(hex, nullptr, 16), (uint32_t)f.getLastWrite(), (uint32_t)f.size()};
+      haveSet(p.sid, false, true);
+      if (n < cap) {
+        out[n++] = p;
+      } else {   // full: keep the newest (replace the oldest kept)
+        int o = 0;
+        for (int i = 1; i < n; i++) if (out[i].mtime < out[o].mtime) o = i;
+        if (p.mtime > out[o].mtime) out[o] = p;
+      }
+    }
+    f.close();
+  }
+  dir.close();
+  // Newest first (the order the directory lists them in when there are no times).
+  for (int i = 1; i < n; i++) {
+    const StoredPhoto x = out[i];
+    int j = i - 1;
+    while (j >= 0 && out[j].mtime < x.mtime) { out[j + 1] = out[j]; --j; }
+    out[j + 1] = x;
+  }
+  return n;
+}
+
+bool photoEnvelope(uint32_t sid, char* out, size_t cap) {
+  if (!g_fs || !sid || !out) return false;
+  char path[40];
+  storePath(sid, false, path, sizeof path);
+  File f = g_fs->open(path, "r");
+  if (!f) return false;
+  const size_t len = f.size();
+  uint8_t ver = 0;
+  const bool ok = len > 1 && f.read(&ver, 1) == 1 && ver == VoxWire::kImagePayloadVersion;
+  f.close();
+  if (!ok) return false;
+  const int pb = VoxWire::packetBytes(VoxWire::kImageModeId);
+  const int total = (int)((len + (size_t)pb - 1) / (size_t)pb);
+  if (total < 1 || total > VoxWire::kMaxPackets) return false;
+  // width * 100 / height, from the thumbnail (made when the photo was first
+  // decoded); square when there is none yet.
+  int tw = 0, th = 0;
+  const uint32_t aspect = thumbSize(sid, &tw, &th) && th > 0 ? (uint32_t)(tw * 100 / th) : 100u;
+  char buf[48];
+  int n = snprintf(buf, sizeof buf, "VI1:");
+  n += VoxWire::toBase36(sid, buf + n);
+  buf[n++] = ':';
+  n += VoxWire::toBase36((uint32_t)VoxWire::kImageModeId, buf + n);
+  buf[n++] = ':';
+  n += VoxWire::toBase36((uint32_t)total, buf + n);
+  buf[n++] = ':';
+  n += VoxWire::toBase36(aspect, buf + n);
+  if ((size_t)n + 1 > cap) return false;
+  memcpy(out, buf, (size_t)n + 1);
+  // Ours to serve from now on (VoxServe answers for it as its author), and
+  // known as a photo so the bubble reads "Photo sent".
+  VoxWire::Envelope env;
+  if (VoxWire::parseEnvelope(out, &env)) remember(env);
+  g_serve.markOwn(sid);
+  return true;
+}
+
+bool importPhoto(const uint8_t* data, size_t len, uint32_t* sid_out) {
+  if (!g_fs || !data || len < 2 || data[0] != VoxWire::kImagePayloadVersion) return false;
+  const int pb = VoxWire::packetBytes(VoxWire::kImageModeId);
+  if ((len + (size_t)pb - 1) / (size_t)pb > (size_t)VoxWire::kMaxPackets) return false;
+  uint32_t sid = 0;
+  while (!sid) sid = esp_random();
+  char path[40];
+  storePath(sid, false, path, sizeof path);
+  if (!writeStore(path, nullptr, data, len)) return false;
+  wantThumb(sid);
+  bumpState();
+  if (sid_out) *sid_out = sid;
+  return true;
+}
+
+bool deletePhoto(uint32_t sid) {
+  if (!g_fs || !sid) return false;
+  char path[40];
+  storePath(sid, false, path, sizeof path);
+  const bool ok = g_fs->remove(path);
+  haveSet(sid, false, false);
+  thumbPath(sid, path, sizeof path);
+  if (g_fs->remove(path)) haveSetKind(sid, 2, false);
+  bumpState();
+  return ok;
+}
 
 uint32_t nextThumbWanted() {
   if (!g_thumb_want_n) return 0;
