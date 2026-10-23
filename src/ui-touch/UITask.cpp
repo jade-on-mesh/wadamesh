@@ -17570,7 +17570,9 @@ static void sysInfoTextLive(char* buf, size_t cap) {
 #if defined(ESP32)
   // MediaMesh: what radio2 sent and heard, what never went out, and how much of
   // the radio's (and on the T-Deck, the display's shared SPI bus's) time the
-  // scan takes, since the last look at this page.
+  // scan takes, since the last look at this page. Only where the radio can run
+  // MediaMesh (the P4 builds can't, and their app slot has no room to spare).
+#if defined(MEDIAMESH_RADIO)
   if (mediamesh::supported()) {
     const mediamesh::Status ms = mediamesh::status();
     static uint32_t s_seen_ms = 0, s_seen_busy = 0, s_seen_sw = 0;
@@ -17580,14 +17582,16 @@ static void sysInfoTextLive(char* buf, size_t cap) {
     const uint32_t sw_s = s_seen_ms && dt ? (uint32_t)((uint64_t)(ms.switches - s_seen_sw) * 1000 / dt) : 0;
     s_seen_ms = now; s_seen_busy = ms.scan_busy_us; s_seen_sw = ms.switches;
     p += snprintf(buf + p, cap - p,
-                  "MediaMesh\n  radio2 %s%s\n  TX main %lu, radio2 %lu\n  RX main %lu, radio2 %lu\n"
+                  "MediaMesh\n  radio2 %s%s\n  %.3f MHz, %g kHz, SF%u, CR4/%u\n  TX main %lu, radio2 %lu\n  RX main %lu, radio2 %lu\n"
                   "  not sent %lu\n  scan %lu switches/s, radio %lu%%\n\n",
                   ms.mode == mediamesh::MODE_RXTX ? "on" : ms.mode == mediamesh::MODE_RX ? "listen only" : "off",
                   ms.mode == mediamesh::MODE_OFF ? "" : ms.scanning ? (ms.timing_valid ? ", scanning" : ", NO TIMING")
                                                                     : ", NOT SCANNING",
+                  (double)ms.r2.freq, (double)ms.r2.bw, (unsigned)ms.r2.sf, (unsigned)ms.r2.cr,
                   (unsigned long)ms.tx[0], (unsigned long)ms.tx[1], (unsigned long)ms.rx[0], (unsigned long)ms.rx[1],
                   (unsigned long)ms.dropped, (unsigned long)sw_s, (unsigned long)busy_pct);
   }
+#endif   // MEDIAMESH_RADIO
 #endif
 #if defined(ESP32)
   const uint32_t up_s = (uint32_t)(esp_timer_get_time() / 1000000ULL);

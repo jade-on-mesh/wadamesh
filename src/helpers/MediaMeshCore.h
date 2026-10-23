@@ -1206,6 +1206,12 @@ inline CliResult handleCli(const char* cmd, Runtime& r, const Env& env, char* re
         const size_t used = strlen(reply);
         if (used < cap) snprintf(reply + used, cap - used, " drop=%lu", (unsigned long)env.stats.dropped);
       }
+      {   // radio2's settings: two radios that hear nothing from each other on radio2 differ here
+        const size_t used = strlen(reply);
+        if (used < cap)
+          snprintf(reply + used, cap - used, " r2=%.3f/%g/SF%u/CR%u", (double)active.p.freq, (double)active.p.bw,
+                   (unsigned)active.p.sf, (unsigned)active.p.cr);
+      }
       if (t.valid) {
         const size_t used = strlen(reply);
         const uint8_t s = env.stats.samples > kSwitchSamples ? kSwitchSamples : env.stats.samples;

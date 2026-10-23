@@ -528,6 +528,7 @@ Status status() {
   s.timing_valid = radio_driver.mediaMeshTimingValid();
 #endif
   s.mode = s_rt.active2().mode;
+  s.r2 = s_rt.active2().p;
   return s;
 }
 
