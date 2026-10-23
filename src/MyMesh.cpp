@@ -3624,8 +3624,14 @@ void MyMesh::onChannelDataRecv(const mesh::GroupChannel &channel, mesh::Packet *
 #ifdef DISPLAY_CLASS
   if (data_type == VoxWire::kChannelDataType && WalkieWire::isLive(data, data_len))
     walkieOnChannelData(resolved_idx, data, data_len);   // push-to-talk (WALKIE.md)
-  else if (data_type == VoxWire::kChannelDataType)
-    VoxPhotos::onPayload(data, data_len, resolved_idx, rxVia(), pkt->isRouteFlood() ? (int)pkt->getPathHashCount() : 0);
+  else if (data_type == VoxWire::kChannelDataType) {
+    // A flood's path lists the repeaters it came through; the last one handed
+    // it to us (shown on a MediaMesh download: "Received via MediaMesh (1ffb)").
+    const bool flood = pkt->isRouteFlood();
+    const uint8_t hn = flood ? pkt->getPathHashCount() : 0, hs = pkt->getPathHashSize();
+    const uint8_t* last = hn && hs <= 3 ? &pkt->path[(hn - 1) * hs] : nullptr;
+    VoxPhotos::onPayload(data, data_len, resolved_idx, rxVia(), flood ? (int)hn : 0, last, last ? hs : 0);
+  }
   if (data_type == TeamWire::kDataType) teamOnChannelData(resolved_idx, data, data_len);   // Open TAK team
   if (_ui) _ui->onChannelData((uint8_t)resolved_idx, data_type, data, data_len, pkt->isRouteFlood());
 #endif
