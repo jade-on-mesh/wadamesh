@@ -1,0 +1,133 @@
+name: flasher-pages
+
+# Publishes the MediaMesh Flasher (flasher/index.html) to GitHub Pages together
+# with copies of the newest Wadamesh TAK USB images (releases.json) and every
+# Spectra-Cascadia DX-LR30 image (spectra-releases.json; they are tiny).
+#
+# Why a copy: GitHub's release downloads (github.com/.../releases/download/...)
+# send no CORS headers, so a web page can't fetch them. GitHub Pages serves
+# everything with `Access-Control-Allow-Origin: *`, so the flasher works from
+# Pages itself and from any other site that embeds or copies it.
+#
+# The site is pushed to the gh-pages branch (one commit, replaced each run, so the
+# firmware copies don't pile up in history). Pages serves it at
+# https://jade-on-mesh.github.io/wadamesh-tak/ (Settings > Pages: branch gh-pages, / (root)).
+#
+# Runs after every successful fork-release, when the flasher changes, or by hand.
+# A new Spectra-Cascadia release shows up on the next run; run this workflow by
+# hand (Actions > flasher-pages > Run workflow) to publish one right away.
+# (A release created by fork-release with GITHUB_TOKEN does not fire `release`
+# events, which is why this listens for the workflow run instead.)
+
+on:
+  workflow_run:
+    workflows: [fork-release]
+    types: [completed]
+  push:
+    branches: [main]
+    paths:
+      - "flasher/**"
+      - ".github/workflows/flasher-pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: flasher-pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    env:
+      KEEP: "6"   # how many of the newest releases get their bins mirrored
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Mirror the newest releases' USB images
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          mkdir -p site/firmware
+          cp flasher/index.html site/index.html
+          touch site/.nojekyll
+          gh api "repos/$REPO/releases?per_page=60" > releases-all.json
+          python3 - <<'PY'
+          import hashlib, json, os, subprocess
+          repo, keep = os.environ["REPO"], int(os.environ["KEEP"])
+          rels = [r for r in json.load(open("releases-all.json"))
+                  if r["tag_name"].startswith("tak-beta_") and not r["draft"]]
+          rels.sort(key=lambda r: r["published_at"], reverse=True)
+          out = []
+          for i, r in enumerate(rels):
+              tag, mirrored = r["tag_name"], i < keep
+              assets = [a for a in r["assets"] if a["name"].endswith("-merged.bin")]
+              if mirrored and assets:
+                  d = f"site/firmware/{tag}"
+                  os.makedirs(d, exist_ok=True)
+                  subprocess.run(["gh", "release", "download", tag, "-R", repo,
+                                  "-p", "*-merged.bin", "-D", d], check=True)
+              entry = {k: r.get(k) for k in ("tag_name", "name", "published_at", "prerelease", "html_url", "body")}
+              entry["mirrored"] = mirrored and bool(assets)
+              entry["assets"] = []
+              for a in assets:
+                  digest = a.get("digest")
+                  path = f"site/firmware/{tag}/{a['name']}"
+                  if entry["mirrored"] and os.path.exists(path):
+                      sha = hashlib.sha256(open(path, "rb").read()).hexdigest()
+                      if digest and digest != "sha256:" + sha:
+                          raise SystemExit(f"{tag}/{a['name']}: download does not match GitHub's digest")
+                      digest = "sha256:" + sha
+                  entry["assets"].append({"name": a["name"], "size": a["size"], "digest": digest,
+                                          "browser_download_url": a["browser_download_url"]})
+              out.append(entry)
+          json.dump(out, open("site/releases.json", "w"), indent=1)
+          print(f"{len(out)} releases listed, {sum(e['mirrored'] for e in out)} mirrored")
+          PY
+
+      - name: Mirror Spectra-Cascadia (DX-LR30) releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SPECTRA: jade-on-mesh/spectra-cascadia
+        run: |
+          set -euo pipefail
+          gh api "repos/$SPECTRA/releases?per_page=30" > spectra-all.json
+          python3 - <<'PY2'
+          import hashlib, json, os, subprocess
+          repo = os.environ["SPECTRA"]
+          out = []
+          for r in json.load(open("spectra-all.json")):
+              assets = [a for a in r["assets"] if a["name"].startswith("spectra-cascadia-") and a["name"].endswith((".bin", ".hex"))]
+              if r["draft"] or not assets:
+                  continue
+              d = f"site/spectra/{r['tag_name']}"
+              os.makedirs(d, exist_ok=True)
+              subprocess.run(["gh", "release", "download", r["tag_name"], "-R", repo, "-p", "spectra-cascadia-*", "-D", d], check=True)
+              entry = {k: r.get(k) for k in ("tag_name", "name", "published_at", "prerelease", "html_url", "body")}
+              entry["mirrored"] = True
+              entry["assets"] = []
+              for a in assets:
+                  sha = "sha256:" + hashlib.sha256(open(f"{d}/{a['name']}", "rb").read()).hexdigest()
+                  if a.get("digest") and a["digest"] != sha:
+                      raise SystemExit(f"{r['tag_name']}/{a['name']}: download does not match GitHub's digest")
+                  entry["assets"].append({"name": a["name"], "size": a["size"], "digest": sha,
+                                          "browser_download_url": a["browser_download_url"]})
+              out.append(entry)
+          out.sort(key=lambda e: e["published_at"], reverse=True)
+          json.dump(out, open("site/spectra-releases.json", "w"), indent=1)
+          print(f"{len(out)} Spectra-Cascadia releases mirrored")
+          PY2
+          du -sh site
+
+      - name: Publish to the gh-pages branch
+        uses: peaceiris/actions-gh-pages@v4.1.0
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./site
+          publish_branch: gh-pages
+          force_orphan: true
+          commit_message: "MediaMesh Flasher site"
