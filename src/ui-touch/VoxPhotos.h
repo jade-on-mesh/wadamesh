@@ -52,6 +52,8 @@ bool loadVoice(uint32_t sid, int* mode, uint8_t** frames, size_t* len);
 bool loadFile(uint32_t sid, bool voice, uint8_t** data, size_t* len);
 // Bumped whenever any photo's status changes; the chat redraws on a change.
 uint32_t version();
+// Filesystem lookups made for photo/voice state since boot (About's chat-open timing).
+uint32_t fsChecks();
 // Bumped only when a photo or talk changes state (requesting, complete,
 // failed, recorded), not for each packet of one arriving.
 uint32_t stateVersion();

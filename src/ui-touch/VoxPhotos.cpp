@@ -80,6 +80,7 @@ void storePath(uint32_t sid, bool voice, char* out, size_t cap) {
 // The answers live here; every write and remove below keeps them true.
 struct HaveEntry { uint32_t sid; uint8_t bits; };   // bits: 1/4 photo/voice known, 2/8 present
 static HaveEntry g_have[128];
+static uint32_t g_fs_checks = 0;   // exists() calls made (About: chat open timing)
 static uint8_t g_have_next = 0;
 
 static void haveClear() { memset(g_have, 0, sizeof g_have); g_have_next = 0; }
@@ -126,6 +127,7 @@ static bool storeHas(uint32_t sid, bool voice) {
   }
   char path[40];
   storePath(sid, voice, path, sizeof path);
+  ++g_fs_checks;
   const bool present = g_fs->exists(path);
   haveSet(sid, voice, present);
   return present;
@@ -445,6 +447,7 @@ bool loadFile(uint32_t sid, bool voice, uint8_t** data, size_t* len) {
 }
 
 uint32_t version() { return g_version; }
+uint32_t fsChecks() { return g_fs_checks; }
 
 uint32_t stateVersion() {
   for (int i = 0; i < g_touched_n; i++) {
