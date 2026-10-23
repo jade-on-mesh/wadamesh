@@ -77,6 +77,8 @@ class MediaMeshRadio : public Base {
   uint32_t _switch_stalls = 0;      // retunes held up past kStallUs (not used for the timing)
   uint32_t _tx_count[2] = {};
   uint32_t _rx_count[2] = {};
+  uint32_t _r2_refused = 0;         // radio2 sends refused: the scan wasn't running (or no timing)
+  volatile uint32_t _scan_busy_us = 0;   // time the scan has held the radio (and its SPI bus)
   TaskHandle_t _task = nullptr;
   MediaMeshClassifier _classify = nullptr;
   MediaMeshPeek _peek = nullptr;
@@ -340,6 +342,7 @@ class MediaMeshRadio : public Base {
         continue;
       }
       vTaskDelay(visitTicks(_cur));
+      const uint32_t held0 = micros();
       this->radioAcquire();
       if (_scan && !_paused && !_tx && this->isInRecvMode()) {
         // Stay while a packet is arriving, and while a finished one waits for
@@ -357,6 +360,7 @@ class MediaMeshRadio : public Base {
           const uint32_t limit = header ? maxHoldMs(_cur) : preamble ? preambleHoldMs(_cur) : 50;
           if (now - _hold_start < limit) {
             this->radioRelease();
+            _scan_busy_us += micros() - held0;
             vTaskDelay(1);
             continue;
           }
@@ -371,6 +375,7 @@ class MediaMeshRadio : public Base {
         _hold_start = 0;
       }
       this->radioRelease();
+      _scan_busy_us += micros() - held0;
     }
   }
 
@@ -469,6 +474,9 @@ class MediaMeshRadio : public Base {
   uint8_t mediaMeshSwitchSamples() const { return _switch_samples; }
   uint32_t mediaMeshTxCount(uint8_t profile) const { return _tx_count[profile & 1]; }
   uint32_t mediaMeshRxCount(uint8_t profile) const { return _rx_count[profile & 1]; }
+  uint32_t mediaMeshRefused() const { return _r2_refused; }
+  uint32_t mediaMeshScanBusyUs() const { return _scan_busy_us; }
+  bool mediaMeshTimingValid() const { return _timing.valid; }
   const Params& mainParams() const { return _main; }
   const Params& mainSavedParams() const { return _main_saved; }
   uint16_t mainPreambleSymbols() const { return mainPreamble(); }
@@ -521,7 +529,10 @@ class MediaMeshRadio : public Base {
 
   bool startSendRaw(const uint8_t* bytes, int len) override {
     uint8_t mask = _classify ? _classify(bytes, len) : 1;
-    if (!_scan || !_timing.valid) mask &= 1;
+    if (!_scan || !_timing.valid) {
+      if (mask & 2) ++_r2_refused;   // for radio2, but radio2 isn't running: radio2.status drop=
+      mask &= 1;
+    }
     if (!mask) return false;
     _first_finished = false;
     _copy_profile = 0xFF;

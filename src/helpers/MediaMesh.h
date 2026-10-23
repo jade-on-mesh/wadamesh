@@ -182,6 +182,10 @@ struct Status {
   uint32_t switch_errors = 0;
   Profile2 temp2_prof;            // the temporary radio2, when temp2
   Timing timing;
+  uint8_t mode = 0;               // radio2 in use: off / rx / rxtx
+  uint32_t dropped = 0;           // radio2 packets that never went out
+  uint32_t scan_busy_us = 0;      // the scan's time holding the radio (and its SPI bus), since boot
+  bool timing_valid = false;
 };
 Status status();
 

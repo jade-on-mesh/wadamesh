@@ -43,6 +43,10 @@ bool s_applied2_known = false;
 Params s_applied1;
 bool s_applied1_temp = false;
 
+// Queued packets dropped before sending: their profile changed, or radio2
+// couldn't transmit (radio2.status drop=, About's MediaMesh lines).
+uint32_t s_queue_dropped = 0;
+
 // The packet the dispatcher is about to send (getNextOutbound -> startSendRaw).
 uint8_t s_next_mask = 1;
 bool s_next_valid = false;
@@ -180,6 +184,7 @@ Env makeEnv() {
   e.stats.typ_us = radio_driver.mediaMeshSwitchTypUs();
   if (s_r2_heard) e.stats.heard_s = (uint32_t)(millis() - s_r2_heard_ms) / 1000;
   e.stats.samples = radio_driver.mediaMeshSwitchSamples();
+  e.stats.dropped = radio_driver.mediaMeshRefused() + s_queue_dropped;
 #else
   e.main_saved = savedPrimary();
   e.main = s_rt.temp1 ? s_rt.temp1_p : e.main_saved;
@@ -402,6 +407,7 @@ mesh::Packet* MarkingPacketManager::getNextOutbound(uint32_t now) {
     if (mask == 0) {
       // Its profile changed or went away since it was queued, or its choice
       // can't be sent now (radio2 while rx-only): drop it, as a failed send.
+      ++s_queue_dropped;
       free(p);
       continue;
     }
@@ -517,7 +523,11 @@ Status status() {
   s.switch_samples = radio_driver.mediaMeshSwitchSamples();
   s.switch_budget_us = radio_driver.mediaMeshSwitchBudgetUs();
   s.switch_errors = radio_driver.mediaMeshSwitchErrors();
+  s.dropped = radio_driver.mediaMeshRefused() + s_queue_dropped;
+  s.scan_busy_us = radio_driver.mediaMeshScanBusyUs();
+  s.timing_valid = radio_driver.mediaMeshTimingValid();
 #endif
+  s.mode = s_rt.active2().mode;
   return s;
 }
 
