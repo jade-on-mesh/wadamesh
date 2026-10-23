@@ -12,9 +12,11 @@
 #include "CrowPanel50Board.h"
 #include "CrowPanel50Display.h"
 
+#include "../../src/helpers/MediaMeshRadio.h"   // RADIO_DRIVER_CLASS (MediaMesh radio2 scan)
+
 extern CrowPanel50Board board;
 extern RADIO_CLASS radio;
-extern WRAPPER_CLASS radio_driver;
+extern RADIO_DRIVER_CLASS radio_driver;   // MediaMesh-capable wrapper where supported
 extern ClockFloorRTC rtc_clock;
 extern EnvironmentSensorManager sensors;
 extern CrowPanel50Display display;

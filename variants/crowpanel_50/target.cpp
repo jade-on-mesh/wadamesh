@@ -5,7 +5,7 @@
 CrowPanel50Board board;
 static SPIClass radioSpi(FSPI);
 RADIO_CLASS radio = new Module(P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY, radioSpi);
-WRAPPER_CLASS radio_driver(radio, board);
+RADIO_DRIVER_CLASS radio_driver(radio, board);
 
 ESP32RTCClock fallback_clock;
 ClockFloorRTC rtc_clock(fallback_clock);
