@@ -17564,9 +17564,11 @@ extern uint8_t  g_stall_cnt, g_stall_w;
 // ~7 lines — re-setting the full ~40-line text made LVGL spend ~340 ms per second
 // rendering while System Information was open (the "ui:lvgl" stall-ring entries).
 static int perfText(char* buf, size_t cap);   // with UITask::loop below
+static int chatOpenText(char* buf, size_t cap);   // with refreshChatDetail
 static void sysInfoTextLive(char* buf, size_t cap) {
   int p = 0;
   p += perfText(buf, cap);   // where the time goes, first: the slowdown hunt reads it
+  p += chatOpenText(buf + p, cap - p);
 #if defined(ESP32)
   // MediaMesh: what radio2 sent and heard, what never went out, and how much of
   // the radio's (and on the T-Deck, the display's shared SPI bus's) time the
@@ -47629,6 +47631,18 @@ static void chatVirtJumpToLatest(LvChatPanel* p) {
 
 static bool chatSeenByUser();   // fwd: screen on, unlocked, not just a glance (defined with the glance state)
 
+// The last chat open's cost, for About ("Chat open"): how many messages were
+// laid out, how long that took, and how many filesystem lookups it made.
+static int      s_chat_open_msgs = -1;
+static uint32_t s_chat_open_layout_ms = 0, s_chat_open_fs = 0, s_chat_open_at_ms = 0;
+static int chatOpenText(char* buf, size_t cap) {
+  if (s_chat_open_msgs < 0 || !cap) return 0;
+  const int n = snprintf(buf, cap, "Last chat open (%lus ago)\n  %d messages, layout %lu ms\n  file checks %lu\n\n",
+                         (unsigned long)((millis() - s_chat_open_at_ms) / 1000), s_chat_open_msgs,
+                         (unsigned long)s_chat_open_layout_ms, (unsigned long)s_chat_open_fs);
+  return n < 0 ? 0 : (n >= (int)cap ? (int)cap - 1 : n);
+}
+
 static void refreshChatDetail(LvChatPanel& p) {
   if (!g_lv.task || !p.msgs) return;
   const bool       opening         = s_chat_just_opened;
@@ -47708,7 +47722,18 @@ static void refreshChatDetail(LvChatPanel& p) {
     lv_indev_reset(nullptr, nullptr);
     s_chat_virt.last_i0 = -1;
     s_chat_virt.last_i1 = -1;
-    if (!chatVirtRebuildLayout(&p, n, divider_i)) {
+    const uint32_t lay_t0 = millis();
+    const uint32_t lay_fs0 = VoxPhotos::fsChecks();
+    const bool lay_ok = chatVirtRebuildLayout(&p, n, divider_i);
+    if (opening) {
+      s_chat_open_msgs = n;
+      s_chat_open_layout_ms = millis() - lay_t0;
+      s_chat_open_fs = VoxPhotos::fsChecks() - lay_fs0;
+      s_chat_open_at_ms = millis();
+      Serial.printf("[CHAT] open: %d messages, layout %lu ms, %lu file checks\n", n,
+                    (unsigned long)s_chat_open_layout_ms, (unsigned long)s_chat_open_fs);
+    }
+    if (!lay_ok) {
       chatVirtResetToPlaceholder(p, "Low memory");
       return;
     }
