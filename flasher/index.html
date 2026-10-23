@@ -147,6 +147,16 @@ pre.log .e{color:#FF9C90} pre.log .w{color:#F0C96A} pre.log .o{color:#A6CC8A} pr
 .help{font-size:.9rem;color:var(--mut)}
 .help summary{cursor:pointer;color:var(--ink);font-weight:600}
 .help ul{margin:8px 0 0;padding-left:20px;display:flex;flex-direction:column;gap:6px}
+/* video */
+.video{background:var(--surface);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+.video summary{cursor:pointer;list-style:none;display:flex;align-items:center;gap:10px;padding:12px 16px;font-weight:600}
+.video summary::-webkit-details-marker{display:none}
+.video summary::before{content:"";width:0;height:0;border-left:9px solid var(--accent);border-top:6px solid transparent;border-bottom:6px solid transparent;transition:transform .15s}
+.video[open] summary::before{transform:rotate(90deg)}
+.video summary small{font-weight:400;color:var(--mut)}
+.video .frame{position:relative;width:100%;max-width:100%;aspect-ratio:16/9;background:#000}
+.video iframe{position:absolute;inset:0;width:100%;height:100%;border:0}
+@media (prefers-reduced-motion:reduce){.video summary::before{transition:none}}
 footer{color:var(--mut);font-size:.85rem;padding-bottom:40px}
 footer .wrap{display:flex;flex-wrap:wrap;gap:6px 18px}
 </style>
@@ -168,6 +178,13 @@ footer .wrap{display:flex;flex-wrap:wrap;gap:6px 18px}
 </div>
 
 <main class="wrap">
+  <details class="video" id="video" open>
+    <summary>Video <small id="videoHint">Hide</small></summary>
+    <div class="frame">
+      <iframe src="https://www.youtube-nocookie.com/embed/YB6AKfYkQNI?rel=0" title="CascadiaMesh video" loading="lazy" referrerpolicy="strict-origin-when-cross-origin" allow="accelerometer; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen></iframe>
+    </div>
+  </details>
+
   <p id="serialBanner" class="banner warn" hidden><span><b>This browser can't talk to USB devices.</b> Open this page in Chrome or Edge on a Windows, Mac, Linux or ChromeOS computer. Phones, Safari and Firefox can't flash.</span></p>
 
   <!-- ===== Wadamesh TAK ===== -->
@@ -1049,6 +1066,11 @@ $("monitor").onclick = async () => {
 };
 
 /* ================= boot ================= */
+{ // remember whether this visitor collapsed the video
+  const v = $("video"), hint = () => { $("videoHint").textContent = v.open ? "Hide" : "Show"; };
+  if (store.get("mm.video") === "closed") v.open = false;
+  hint(); v.addEventListener("toggle", () => { store.set("mm.video", v.open ? "open" : "closed"); hint(); });
+}
 // Embedded on another site (e.g. WordPress): ?theme=light|dark pins the look, and the
 // page reports its height so the host page can size the frame (see wordpress/).
 try { const th = new URLSearchParams(location.search).get("theme"); if (th === "light" || th === "dark") document.documentElement.dataset.theme = th; } catch {}
