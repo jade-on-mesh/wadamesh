@@ -74,25 +74,48 @@ static void setup(HTTPClient& h, bool follow) {
 // A renamed repo answers with a redirect to its new name first (and that one
 // with the tag), so redirects are followed until one names a tag: a build that
 // knows the old name keeps finding updates after a rename.
+static void hostOf(const String& url, char* out, size_t cap);
+
 static int latest() {
   String url = "https://github.com/" WADA_FORK_REPO "/releases/latest";
+  s_verchk_why[0] = 0;
   for (int hop = 0; hop < 4; hop++) {
+    char host[64];
+    hostOf(url, host, sizeof host);
     WiFiClientSecure c;
     c.setInsecure();
     HTTPClient h;
     setup(h, false);
     const char* keys[] = {"Location"};
     h.collectHeaders(keys, 1);
-    if (!h.begin(c, url)) return -1;
+    if (!h.begin(c, url)) {
+      snprintf(s_verchk_why, sizeof s_verchk_why, "bad address %s", host);
+      return -1;
+    }
     const int code = h.GET();
     String loc = h.header("Location");
     h.end();
-    if (code != 301 && code != 302 && code != 307 && code != 308) return -1;
+    if (code != 301 && code != 302 && code != 307 && code != 308) {
+      if (code < 0) {
+        char ram[32];
+        ramNote(ram, sizeof ram);
+        snprintf(s_verchk_why, sizeof s_verchk_why, "%s: %s (%d), %s", host,
+                 HTTPClient::errorToString(code).c_str(), code, ram);
+      } else {
+        snprintf(s_verchk_why, sizeof s_verchk_why, "%s: HTTP %d", host, code);
+      }
+      return -1;
+    }
     const int rel = forkupd::releaseCode(loc.c_str());
-    if (rel >= 0 || loc.length() == 0) return rel;   // -1 too when there are no releases yet
+    if (rel >= 0) return rel;
+    if (loc.length() == 0) {   // -1 too when there are no releases yet
+      snprintf(s_verchk_why, sizeof s_verchk_why, "%s: HTTP %d, no Location header", host, code);
+      return -1;
+    }
     if (loc.startsWith("/")) loc = String("https://github.com") + loc;
     url = loc;
   }
+  snprintf(s_verchk_why, sizeof s_verchk_why, "too many redirects");
   return -1;
 }
 
@@ -362,7 +385,9 @@ static int run(Job& j) {
 
 // ---- what the About page's worker calls in this fork ------------------------------
 static int forkLatestRelease() {
-  forkupd_dev::Job j{forkupd_dev::Kind::Latest, 0, nullptr, nullptr, nullptr, 0, -1, nullptr};
+  // Its failures before the request (no memory for the task) land in the reason too.
+  s_verchk_why[0] = 0;
+  forkupd_dev::Job j{forkupd_dev::Kind::Latest, 0, nullptr, nullptr, s_verchk_why, sizeof s_verchk_why, -1, nullptr};
   return forkupd_dev::run(j);
 }
 

@@ -9094,6 +9094,9 @@ static volatile bool s_sdinfo_ok       = false;  // card present + sizes valid
 static uint64_t      s_sdinfo_tot      = 0;
 static uint64_t      s_sdinfo_free     = 0;
 static volatile int  s_verchk_latest_n = -1;     // highest published pre-alpha_N (-1 = failed)
+// Why the last check found nothing (ForkUpdate.inc fills it), shown under
+// "Couldn't reach the update server": no network, TLS, HTTP status...
+static char s_verchk_why[72] = "";
 #if defined(ESP32) && defined(MULTI_TRANSPORT_COMPANION) && CAP_OTA
 // Wi-Fi OTA self-update — native dual-OTA boards only (V4 + standalone T-Deck). The button is
 // gated on touchHasOtaUpdateSlot() (a spare A/B slot exists), so Launcher single-slot installs and
@@ -9193,7 +9196,7 @@ static void versionCheckUpdateUi() {
   otaButtonRefreshState();   // enable/grey the OTA button to match the result
   if (!s_update_about_lbl) return;
   const int my_n = firmwareReleaseN();
-  char b[140];
+  char b[220];
   if (my_n < 0) {
     snprintf(b, sizeof b, TR("Firmware %s\nDevelopment build: the update check is off."), FIRMWARE_VERSION);
     lv_obj_set_style_text_color(s_update_about_lbl, lv_color_hex(COLOR_SUB), LV_PART_MAIN);
@@ -9208,6 +9211,10 @@ static void versionCheckUpdateUi() {
     lv_obj_set_style_text_color(s_update_about_lbl, lightSurfaceTextColor(0x6FCF6F), LV_PART_MAIN);
   } else if (s_verchk_ran) {
     snprintf(b, sizeof b, TR("Firmware %s\nCouldn't reach the update server"), relName(my_n));
+    if (s_verchk_why[0]) {   // what went wrong, for a report
+      const size_t u = strlen(b);
+      if (u + 4 < sizeof b) snprintf(b + u, sizeof b - u, "\n%s", s_verchk_why);
+    }
     lv_obj_set_style_text_color(s_update_about_lbl, lv_color_hex(COLOR_SUB), LV_PART_MAIN);
   } else {
     snprintf(b, sizeof b, TR("Firmware %s\nChecking for updates over Wi-Fi…"), relName(my_n));
