@@ -127,5 +127,35 @@ class VoxMicPrep {
   float dc_x_ = 0, dc_y_ = 0;
   float env_ = 0;
   float gain_ = 1;
+  float gate_ = 1;   // the noise gate's gain (kGateFloor..1)
   int   peak_ = 0;
 };
+
+// 8 kHz decoded speech to the speaker's rate (16 kHz on the T-Deck and Pager).
+// Each output sample is interpolated between the two 8 kHz samples around it
+// and low-passed at 3.6 kHz (Butterworth biquad at the output rate), where the
+// old path repeated each sample: that put mirror images of the voice around
+// 4-8 kHz, heard as buzz and harshness on top of Codec2's own. A soft limiter
+// rounds off the rare overshoot. (As GridDown Secure Messenger plays Codec2.)
+class VoxPlayOut {
+ public:
+  void begin(uint32_t out_rate, float gain);
+  void setGain(float g) { gain_ = g; }
+  // One 8 kHz sample in; the output samples it completes are appended to
+  // out[*n] (capacity `cap`).
+  void push(int16_t s, int16_t* out, size_t cap, size_t* n);
+
+ private:
+  float step_ = 1, rel_ = 1, prev_ = 0, gain_ = 1;
+  bool lpf_ = false;
+  float b0_ = 1, b1_ = 0, b2_ = 0, a1_ = 0, a2_ = 0;
+  float x1_ = 0, x2_ = 0, y1_ = 0, y2_ = 0;
+};
+
+// The loudest sample in the first `max_samples` of a Codec2 clip once decoded
+// (a few seconds is enough to set a playback level), or -1.
+int voxCodec2Peak(int wire_mode, const uint8_t* bits, size_t len, size_t max_samples);
+
+// The level to play a clip at so its speech peaks near -3 dBFS: 1 for a clip
+// already loud, up to 6x for a quiet one, from its peak (voxCodec2Peak).
+float voxPlayNormGain(int peak);

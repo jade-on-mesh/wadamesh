@@ -74248,25 +74248,24 @@ static void voxVoiceJob(void* arg) {
     const size_t bpf = (size_t)codec.bytesPerFrame();
     const int spf = codec.samplesPerFrame();
     int16_t pcm[320];
-    int16_t out[256];
+    int16_t out[256 + 16];
     size_t n_out = 0;
-    uint32_t phase = 0;
     bool failed = false;
+    // Level: from the clip's first 3 s, so a quiet recording plays as loud as a
+    // close one (GridDown normalises each clip the same way), then the
+    // speaker's rate through VoxPlayOut (interpolated, low-passed).
+    const float norm = voxPlayNormGain(voxCodec2Peak(pb->mode, pb->frames, pb->len, 3 * kVoxVoiceSampleRate));
+    VoxPlayOut po;
+    po.begin(sink.output_rate, sink.gain * norm);
     s_vox_voice_len = (uint32_t)pb->len;
     for (size_t i = 0; i + bpf <= pb->len && !s_vox_voice_stop && !failed; i += bpf) {
       s_vox_voice_done = (uint32_t)i;
       codec.decode(pb->frames + i, pcm);
       for (int k = 0; k < spf && !failed; k++) {
-        int32_t v = (int32_t)((float)pcm[k] * sink.gain);
-        v = v > 32767 ? 32767 : (v < -32768 ? -32768 : v);
-        phase += sink.output_rate;   // 8 kHz to whatever the sink runs at (the same on T-Deck/pager)
-        while (phase >= (uint32_t)kVoxVoiceSampleRate) {
-          phase -= kVoxVoiceSampleRate;
-          out[n_out++] = (int16_t)v;
-          if (n_out == sizeof out / sizeof out[0]) {
-            failed = !luaAudioSinkWrite(&sink, out, n_out);
-            n_out = 0;
-          }
+        po.push(pcm[k], out, sizeof out / sizeof out[0], &n_out);
+        if (n_out >= 256) {
+          failed = !luaAudioSinkWrite(&sink, out, n_out);
+          n_out = 0;
         }
       }
     }

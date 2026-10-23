@@ -213,6 +213,15 @@ constexpr float kGainDown    = 1.0f / (0.015f * 8000.0f);
 constexpr float kGainUp      = 1.0f / (0.4f * 8000.0f);
 constexpr float kKnee        = 24000.0f;
 constexpr float kCeiling     = 32000.0f;
+// Noise gate (as GridDown's): while the input sits at the noise floor (the
+// mic's hiss between words), it is taken down 16 dB instead of encoded, so
+// pauses come out quiet rather than as Codec2's rendering of hiss. Opens in
+// ~2 ms, closes over ~60 ms once the envelope (which itself lingers ~0.3 s)
+// has dropped, so words and their tails are never clipped.
+constexpr float kGateOpen    = 180.0f;    // input peak envelope that opens the gate
+constexpr float kGateFloor   = 0.16f;     // closed: -16 dB
+constexpr float kGateAttack  = 1.0f / (0.002f * 8000.0f);
+constexpr float kGateRelease = 1.0f / (0.060f * 8000.0f);
 
 float g_fir[VoxMicPrep::kTaps];
 bool  g_fir_ready = false;
@@ -245,6 +254,7 @@ void VoxMicPrep::reset() {
   dc_x_ = dc_y_ = 0;
   env_ = 0;
   gain_ = 4.0f;   // a sensible start: speech at arm's length on the T-Deck's mics
+  gate_ = 1.0f;   // open: the first syllable isn't faded in
   peak_ = 0;
 }
 
@@ -256,7 +266,9 @@ int16_t VoxMicPrep::level(float s) {
   if (want > kMaxGain) want = kMaxGain;
   if (want < gain_) gain_ += (want - gain_) * kGainDown;
   else if (env_ > kNoiseFloor) gain_ += (want - gain_) * kGainUp;
-  float v = s * gain_;
+  const float gate_to = env_ > kGateOpen ? 1.0f : kGateFloor;
+  gate_ += (gate_to - gate_) * (gate_to > gate_ ? kGateAttack : kGateRelease);
+  float v = s * gain_ * gate_;
   const float m = fabsf(v);
   if (m > kKnee) {
     const float e = m - kKnee;
@@ -306,4 +318,80 @@ int VoxMicPrep::takePeak() {
   const int p = peak_;
   peak_ = 0;
   return p;
+}
+
+
+// ---- VoxPlayOut -----------------------------------------------------------------
+
+void VoxPlayOut::begin(uint32_t out_rate, float gain) {
+  gain_ = gain;
+  step_ = out_rate ? (float)kVoxVoiceSampleRate / (float)out_rate : 1.0f;
+  rel_ = 1.0f;
+  prev_ = 0;
+  x1_ = x2_ = y1_ = y2_ = 0;
+  lpf_ = out_rate > (uint32_t)kVoxVoiceSampleRate;
+  if (lpf_) {   // RBJ low-pass, fc 3.6 kHz, Q 0.7071, at the output rate
+    const double pi = 3.14159265358979323846;
+    const double w0 = 2 * pi * 3600.0 / (double)out_rate;
+    const double alpha = sin(w0) / (2 * 0.70710678);
+    const double c = cos(w0);
+    const double a0 = 1 + alpha;
+    b0_ = (float)(((1 - c) / 2) / a0);
+    b1_ = (float)((1 - c) / a0);
+    b2_ = b0_;
+    a1_ = (float)((-2 * c) / a0);
+    a2_ = (float)((1 - alpha) / a0);
+  }
+}
+
+void VoxPlayOut::push(int16_t s, int16_t* out, size_t cap, size_t* n) {
+  const float cur = (float)s * gain_;
+  while (rel_ <= 1.0f) {
+    float y = prev_ + (cur - prev_) * rel_;
+    if (lpf_) {
+      const float f = b0_ * y + b1_ * x1_ + b2_ * x2_ - a1_ * y1_ - a2_ * y2_;
+      x2_ = x1_; x1_ = y;
+      y2_ = y1_; y1_ = f;
+      y = f;
+    }
+    const float m = fabsf(y);   // soft limiter, as the mic path's
+    if (m > kKnee) {
+      const float e = m - kKnee;
+      const float r = kKnee + (kCeiling - kKnee) * e / (e + (kCeiling - kKnee));
+      y = y < 0 ? -r : r;
+    }
+    if (*n < cap) out[(*n)++] = (int16_t)lrintf(y);
+    rel_ += step_;
+  }
+  rel_ -= 1.0f;
+  prev_ = cur;
+}
+
+float voxPlayNormGain(int peak) {
+  if (peak <= 0) return 1.0f;
+  float g = 23000.0f / (float)peak;   // ~-3 dBFS
+  if (g < 1.0f) g = 1.0f;
+  if (g > 6.0f) g = 6.0f;              // a near-silent clip isn't turned into hiss
+  return g;
+}
+
+int voxCodec2Peak(int wire_mode, const uint8_t* bits, size_t len, size_t max_samples) {
+  if (!bits) return -1;
+  VoxCodec2Stream c;
+  if (!c.begin(wire_mode)) return -1;
+  const size_t bpf = (size_t)c.bytesPerFrame();
+  const int spf = c.samplesPerFrame();
+  if (!bpf || spf > 320) { c.end(); return -1; }
+  int16_t pcm[320];
+  int peak = 0;
+  size_t done = 0;
+  for (size_t i = 0; i + bpf <= len && done < max_samples; i += bpf, done += (size_t)spf) {
+    c.decode(bits + i, pcm);
+    for (int k = 0; k < spf; k++) {
+      const int a = pcm[k] < 0 ? -pcm[k] : pcm[k];
+      if (a > peak) peak = a;
+    }
+  }
+  c.end();
+  return peak;
 }
