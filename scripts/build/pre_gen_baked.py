@@ -40,7 +40,7 @@ def _stale(out, sources):
 # the V4 until the next .lang edit. The generator only rewrites the header when its
 # content changes, so i18n.cpp does not recompile for every source edit.
 i18n_src = glob.glob(os.path.join(ROOT, "deploy", "apps", "lang", "*.lang"))
-for pat in ("src/**/*.cpp", "src/**/*.h", "src/**/*.c"):
+for pat in ("src/**/*.cpp", "src/**/*.h", "src/**/*.c", "src/**/*.inc"):
     i18n_src += [f for f in glob.glob(os.path.join(ROOT, pat), recursive=True)
                  if not f.endswith("i18n_builtin.h")]
 i18n_src += glob.glob(os.path.join(ROOT, "deploy", "apps", "*", "*", "*.lua"))

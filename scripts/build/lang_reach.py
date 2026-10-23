@@ -285,7 +285,8 @@ def _libdeps(root, rel):
 
 
 def src_files(root):
-    pats = ['src/**/*.c', 'src/**/*.cpp', 'src/**/*.h', 'src/**/*.hpp', 'src/**/*.ino',
+    # .inc: the fork's screens are included into UITask.cpp (TeamUI.inc, LoraUpdate.inc...).
+    pats = ['src/**/*.c', 'src/**/*.cpp', 'src/**/*.h', 'src/**/*.hpp', 'src/**/*.ino', 'src/**/*.inc',
             'include/**/*.h', 'lib/**/*.c', 'lib/**/*.cpp', 'lib/**/*.h',
             'variants/heltec_v4/**/*.h', 'variants/heltec_v4/**/*.cpp']
     files = set()
