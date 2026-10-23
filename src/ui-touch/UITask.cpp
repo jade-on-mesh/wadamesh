@@ -18138,6 +18138,56 @@ static void sdRestoreFromInternalCb(lv_event_t* e) {
               TR("Copy"), sdRestoreApply);
 #endif
 }
+
+#if defined(ESP32)
+// "Repair internal storage". A radio whose SPIFFS partition was never formatted
+// (or got damaged) boots with its data on the SD card and Files shows Internal
+// storage 0 B / 0 B. Boot deliberately does not format it then: on an M9 the
+// multi-second format during setup() raced the Wi-Fi event task and crashed
+// (main.cpp). Here, from Settings, nothing races it. It only ever formats a
+// partition that does not mount, whose contents were unreadable anyway; the
+// card's data (identity, contacts, channels) is not touched. A restart follows
+// so everything that keeps files internally (photos and voice, OTP pads) uses it.
+static bool internalStorageBroken() { return SPIFFS.totalBytes() == 0 && !SPIFFS.begin(false); }
+static void repairInternalStorageApply() {
+  if (!internalStorageBroken()) {
+    if (g_lv.task) g_lv.task->showAlert(TR("Internal storage is fine"), 1800);
+    return;
+  }
+  lv_obj_t* ov = lv_obj_create(lv_layer_top());
+  lv_obj_remove_style_all(ov);
+  lv_obj_set_size(ov, lv_disp_get_hor_res(nullptr), lv_disp_get_ver_res(nullptr));
+  lv_obj_set_style_bg_color(ov, lv_color_black(), LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(ov, LV_OPA_COVER, LV_PART_MAIN);
+  lv_obj_clear_flag(ov, LV_OBJ_FLAG_SCROLLABLE);
+  { lv_obj_t* ol = lv_label_create(ov);
+    lv_label_set_text(ol, TR("Formatting internal storage\xe2\x80\xa6"));
+    lv_obj_set_style_text_color(ol, lv_color_hex(COLOR_TEXT), LV_PART_MAIN);
+    lv_obj_set_style_text_font(ol, &g_font_16, LV_PART_MAIN);
+    lv_obj_center(ol); }
+  lv_refr_now(nullptr);
+  delay(150);                      // let the notice reach the panel
+  wdtHeavyBegin();                 // the format is a long flash burst
+  const bool formatted = SPIFFS.format();
+  const bool ok = formatted && SPIFFS.begin(false) && SPIFFS.totalBytes() > 0;
+  wdtHeavyEnd();
+  Serial.printf("[STORAGE] internal repair: format %s, mount %s (%u KB)\n", formatted ? "ok" : "FAILED",
+                ok ? "ok" : "FAILED", (unsigned)(SPIFFS.totalBytes() / 1024));
+  if (!ok) {
+    lv_obj_del(ov);
+    if (g_lv.task) g_lv.task->showAlert(TR("Couldn't format internal storage"), 3000);
+    return;
+  }
+  touchPrefsFlush();
+  delay(300);
+  board.reboot();
+}
+static void repairInternalStorageCb(lv_event_t* e) {
+  if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+  showConfirm(TR("Format internal storage?\n\nIt can't be read now, so nothing\non it is lost. Your data on the\nSD card is kept. Restarts after."),
+              TR("Format"), repairInternalStorageApply);
+}
+#endif   // ESP32
 #endif
 #endif
 
@@ -19845,6 +19895,13 @@ static void buildGeneralPage() {
     // The beta_36 recovery: copies everything from internal flash over the card's copies
     // and restarts into the restored profile.
     setActionRow(c, LV_SYMBOL_DOWNLOAD, "Copy internal data to SD", nullptr, sdRestoreFromInternalCb);
+#if defined(ESP32)
+    // Internal flash that never mounted (Files: Internal storage 0 B / 0 B).
+    if (internalStorageBroken()) {
+      setNote(c, "Internal storage can't be read (never formatted or damaged). Photos, voice clips and OTP pads can't be kept on it.", SET_TONE_WARN);
+      setActionRow(c, LV_SYMBOL_REFRESH, "Repair internal storage", nullptr, repairInternalStorageCb);
+    }
+#endif
   }
 #endif
 #if CAP_CONSOLE
