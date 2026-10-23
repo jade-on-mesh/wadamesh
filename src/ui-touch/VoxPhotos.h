@@ -28,7 +28,10 @@ void onChannelText(const char* text, int channel_idx);   // "Name: VI1:..." as p
 // raw (-1) or GRP_DATA 0x5643; `via` is the radio profile it arrived on
 // (VoxFetch::kViaMain / kViaRadio2, or kViaUnknown).
 // `hops`: how far a channel packet came (0 = heard directly; -1 unknown).
-void onPayload(const uint8_t* data, size_t len, int channel_idx, uint8_t via = VoxFetch::kViaUnknown, int hops = -1);
+// `last_hop`: the path hash (1-3 bytes) of the repeater that relayed a flooded
+// packet to us last, when it had one.
+void onPayload(const uint8_t* data, size_t len, int channel_idx, uint8_t via = VoxFetch::kViaUnknown, int hops = -1,
+               const uint8_t* last_hop = nullptr, uint8_t last_hop_len = 0);
 void tick();
 
 // UI side. `text` is a message body as shown (sender already split off).
@@ -41,6 +44,9 @@ VoxFetch::Status status(uint32_t sid, int* received = nullptr, int* total = null
 const char* statusText(uint32_t sid, char* buf, size_t cap);
 // "Received via MediaMesh" etc. for a finished download, or nullptr when not known.
 const char* viaText(uint32_t sid);
+// The MediaMesh repeater the last radio2 packet of a finished download came
+// through, as hex ("1ffb" for a 2-byte path hash). False when none did.
+bool viaRepeater(uint32_t sid, char* hex, size_t cap);
 // Whether this radio fetches the clip (photos; Codec2 voice where there's a
 // speaker and the mode is built in) and whether it can play it.
 bool canFetch(const VoxWire::Envelope& env);

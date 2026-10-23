@@ -92,7 +92,8 @@ void VoxFetch::onEnvelope(const VoxWire::Envelope& env, const uint8_t* sender_pu
   if (start) request(env.sid);
 }
 
-void VoxFetch::keepOrphan(const VoxWire::Packet& p, uint8_t via, bool relayed) {
+void VoxFetch::keepOrphan(const VoxWire::Packet& p, uint8_t via, bool relayed, const uint8_t* hop,
+                          uint8_t hop_len) {
   if (p.len <= 0 || p.len > kOrphanBytes) return;
   if (!orphans_) {
     orphans_ = (Orphan*)calloc(kMaxOrphans, sizeof(Orphan));   // ~8 KB: PSRAM
@@ -109,6 +110,8 @@ void VoxFetch::keepOrphan(const VoxWire::Packet& p, uint8_t via, bool relayed) {
   o.len = (uint8_t)p.len;
   o.via = via;
   o.relayed = relayed;
+  o.hop_len = hop && hop_len <= 3 ? hop_len : 0;
+  if (o.hop_len) memcpy(o.hop, hop, o.hop_len);
   memcpy(o.data, p.data, (size_t)p.len);
 }
 
@@ -120,7 +123,7 @@ void VoxFetch::adoptOrphans(Session& s) {
     if (o.relayed) s.relayed = true;
     VoxWire::Packet p{o.sid, o.index, o.data, o.len};
     o.len = 0;
-    if (s.st != kComplete) accept(s, p, o.via);
+    if (s.st != kComplete) accept(s, p, o.via, o.hop, o.hop_len);
   }
 }
 
@@ -302,7 +305,8 @@ void VoxFetch::fail(Session& s, const char* why) {
 
 // --------------------------------------------------------------- packets
 
-void VoxFetch::onPayload(const uint8_t* data, size_t len, int channel, uint8_t via, int hops) {
+void VoxFetch::onPayload(const uint8_t* data, size_t len, int channel, uint8_t via, int hops,
+                         const uint8_t* last_hop, uint8_t last_hop_len) {
   if (!data || len == 0 || VoxWire::isFetchRequest(data, len)) return;   // this radio doesn't serve
   VoxWire::Packet p;
   if (!VoxWire::parsePacket(data, len, &p)) return;
@@ -310,19 +314,23 @@ void VoxFetch::onPayload(const uint8_t* data, size_t len, int channel, uint8_t v
   const bool relayed = channel < 0 || hops != 0;
   Session* s = find(p.sid);
   if (!s) {
-    keepOrphan(p, via, relayed);
+    keepOrphan(p, via, relayed, last_hop, last_hop_len);
     return;
   }
   if (s->st == kComplete) return;
   if (relayed) s->relayed = true;
-  accept(*s, p, via);
+  accept(*s, p, via, last_hop, last_hop_len);
 }
 
-void VoxFetch::accept(Session& s, const VoxWire::Packet& p, uint8_t via) {
+void VoxFetch::accept(Session& s, const VoxWire::Packet& p, uint8_t via, const uint8_t* hop, uint8_t hop_len) {
   if (!ensureStorage(s)) return;
   if (!s.asm_.add(p)) return;
   if (via == kViaMain || via == kViaRadio2) {
     if (s.via_count[via] < 0xFFFF) s.via_count[via]++;
+  }
+  if (via == kViaRadio2) {   // the MediaMesh repeater it came through, if any
+    s.r2_hop_len = hop && hop_len <= 3 ? hop_len : 0;
+    if (s.r2_hop_len) memcpy(s.r2_hop, hop, s.r2_hop_len);
   }
   s.last_touch = io_.nowMs();
   if (s.asm_.complete()) {
@@ -389,6 +397,14 @@ uint8_t VoxFetch::via(uint32_t sid) const {
   const Session* s = find(sid);
   if (!s) return 0;
   return (uint8_t)((s->via_count[kViaMain] ? 1 : 0) | (s->via_count[kViaRadio2] ? 2 : 0));
+}
+
+bool VoxFetch::radio2Hop(uint32_t sid, uint8_t out[3], uint8_t* out_len) const {
+  const Session* s = find(sid);
+  if (!s || !s->r2_hop_len || !s->via_count[kViaRadio2]) return false;
+  memcpy(out, s->r2_hop, s->r2_hop_len);
+  if (out_len) *out_len = s->r2_hop_len;
+  return true;
 }
 
 const char* VoxFetch::viaText(uint8_t via) {

@@ -81,7 +81,10 @@ class VoxFetch {
 
   // A raw-data payload (channel < 0) or a GRP_DATA 0x5643 payload. `hops`: how
   // far a channel packet came (0 = straight from the sender), -1 if unknown.
-  void onPayload(const uint8_t* data, size_t len, int channel, uint8_t via = kViaUnknown, int hops = -1);
+  // `last_hop`: the path hash (1-3 bytes) of the repeater that relayed a
+  // flooded packet to us last, when it had one.
+  void onPayload(const uint8_t* data, size_t len, int channel, uint8_t via = kViaUnknown, int hops = -1,
+                 const uint8_t* last_hop = nullptr, uint8_t last_hop_len = 0);
 
   // Timing shared with lib/vox/vox_timing.dart.
   // After the last packet the sender meant to send, with some missing: wait
@@ -118,6 +121,10 @@ class VoxFetch {
   // "Received via MediaMesh", "Received via main mesh", "Received via
   // MediaMesh and main mesh", or nullptr for a via() of 0.
   static const char* viaText(uint8_t via);
+  // The repeater that relayed the last radio2 (MediaMesh) packet taken for a
+  // clip: its path hash (1-3 bytes). False when none did (heard straight from
+  // the sender, or only direct packets, whose path is used up on arrival).
+  bool radio2Hop(uint32_t sid, uint8_t out[3], uint8_t* out_len) const;
 
  private:
   struct Session {
@@ -149,6 +156,8 @@ class VoxFetch {
     const char* note = nullptr;   // why it's unavailable
     uint16_t via_count[2] = {0, 0};   // packets taken from the main mesh / radio2
     bool relayed = false;   // a packet came through a repeater, or didn't say
+    uint8_t r2_hop[3] = {0, 0, 0};   // radio2Hop(): the last radio2 packet's last repeater
+    uint8_t r2_hop_len = 0;
   };
 
   struct Orphan {
@@ -157,6 +166,8 @@ class VoxFetch {
     uint8_t len;
     uint8_t via;
     bool relayed;
+    uint8_t hop[3];
+    uint8_t hop_len;
     uint8_t data[kOrphanBytes];
   };
 
@@ -168,8 +179,9 @@ class VoxFetch {
   Method choose(Session& s);
   void attempt(Session& s);
   void onTimeout(Session& s);
-  void accept(Session& s, const VoxWire::Packet& p, uint8_t via = kViaUnknown);
-  void keepOrphan(const VoxWire::Packet& p, uint8_t via, bool relayed);
+  void accept(Session& s, const VoxWire::Packet& p, uint8_t via = kViaUnknown, const uint8_t* hop = nullptr,
+              uint8_t hop_len = 0);
+  void keepOrphan(const VoxWire::Packet& p, uint8_t via, bool relayed, const uint8_t* hop, uint8_t hop_len);
   void adoptOrphans(Session& s);
   uint32_t zeroHopGap();
   void complete(Session& s);

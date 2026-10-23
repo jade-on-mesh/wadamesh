@@ -408,8 +408,9 @@ void onChannelText(const char* text, int channel_idx) {
   g_fetch.onEnvelope(env, nullptr, name, channel_idx, false);
 }
 
-void onPayload(const uint8_t* data, size_t len, int channel_idx, uint8_t via, int hops) {
-  g_fetch.onPayload(data, len, channel_idx, via, hops);
+void onPayload(const uint8_t* data, size_t len, int channel_idx, uint8_t via, int hops, const uint8_t* last_hop,
+               uint8_t last_hop_len) {
+  g_fetch.onPayload(data, len, channel_idx, via, hops, last_hop, last_hop_len);
   g_serve.onPayload(data, len, channel_idx, hops);
 }
 
@@ -433,6 +434,14 @@ VoxFetch::Status status(uint32_t sid, int* received, int* total) {
 }
 
 const char* statusText(uint32_t sid, char* buf, size_t cap) { return g_fetch.statusText(sid, buf, cap); }
+
+bool viaRepeater(uint32_t sid, char* hex, size_t cap) {
+  uint8_t h[3];
+  uint8_t n = 0;
+  if (!hex || cap < 7 || g_fetch.status(sid) != VoxFetch::kComplete || !g_fetch.radio2Hop(sid, h, &n)) return false;
+  for (uint8_t i = 0; i < n; i++) snprintf(hex + 2 * i, cap - 2 * i, "%02x", h[i]);
+  return true;
+}
 
 const char* viaText(uint32_t sid) {
   if (g_fetch.status(sid) != VoxFetch::kComplete) return nullptr;

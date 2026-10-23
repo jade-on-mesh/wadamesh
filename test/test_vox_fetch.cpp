@@ -171,6 +171,8 @@ struct Sim : VoxFetchIo {
 
   // The radio profile every delivered payload is tagged with (MediaMesh).
   uint8_t via = VoxFetch::kViaUnknown;
+  uint8_t hop[2] = {0, 0};   // the last repeater's path hash on every packet (hop_len 0: none)
+  uint8_t hop_len = 0;
 
   // Advance time, delivering what's due and ticking the engine.
   void run(uint32_t ms) {
@@ -181,7 +183,8 @@ struct Sim : VoxFetchIo {
         if ((int32_t)(now - inbox[i].at) >= 0) {
           Event e = inbox[i];
           inbox.erase(inbox.begin() + (long)i);
-          fetch->onPayload(e.data.data(), e.data.size(), e.channel, via, e.channel >= 0 ? channel_hops : -1);
+          fetch->onPayload(e.data.data(), e.data.size(), e.channel, via, e.channel >= 0 ? channel_hops : -1,
+                           hop_len ? hop : nullptr, hop_len);
         } else {
           i++;
         }
@@ -247,6 +250,26 @@ int main() {
     assert(!strcmp(VoxFetch::viaText(1), "Received via main mesh"));
     assert(!strcmp(VoxFetch::viaText(3), "Received via MediaMesh and main mesh"));
     printf("via: %s\n", VoxFetch::viaText(f.via(kSid)));
+  }
+  // 1c. The MediaMesh repeater a radio2 packet came through is kept (and none
+  //     without radio2, or when the packets carried no repeater).
+  {
+    Sim sim; setup(sim, 2750); sim.via = VoxFetch::kViaRadio2;
+    sim.hop[0] = 0x1f; sim.hop[1] = 0xfb; sim.hop_len = 2;
+    VoxFetch f(sim); sim.fetch = &f;
+    f.onEnvelope(envFor(sim), sim.sender_pub, nullptr, -1, true);
+    sim.run(60000);
+    uint8_t h[3] = {0, 0, 0}, n = 0;
+    assert(gotIt(sim, f) && f.radio2Hop(kSid, h, &n) && n == 2 && h[0] == 0x1f && h[1] == 0xfb);
+  }
+  {
+    Sim sim; setup(sim, 2750); sim.via = VoxFetch::kViaMain;
+    sim.hop[0] = 0x1f; sim.hop[1] = 0xfb; sim.hop_len = 2;
+    VoxFetch f(sim); sim.fetch = &f;
+    f.onEnvelope(envFor(sim), sim.sender_pub, nullptr, -1, true);
+    sim.run(60000);
+    uint8_t h[3], n = 0;
+    assert(gotIt(sim, f) && !f.radio2Hop(kSid, h, &n));   // main-mesh packets name no MediaMesh repeater
   }
 
   // 2. 25% loss: re-asks only for what's missing until it has everything.
