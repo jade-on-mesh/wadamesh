@@ -44,6 +44,11 @@ void pagerKeyboardSetBacklight(uint8_t level);
  *  without a second, separate modifier concept. */
 bool pagerKeyboardAltHeld();
 
+/** True while Alt is held and nothing has used it yet: no key typed with it,
+ *  no chord, no encoder turn. A long hold of Alt alone is a gesture of its own
+ *  (on the Pager: open the photo or voice message in an open chat). */
+bool pagerKeyboardAltHeldAlone();
+
 /** Mark the currently-held Alt as "used as a modifier" — call this when some
  *  other gesture (e.g. the rotary encoder's Alt+turn) consumes the hold, so
  *  releasing Alt afterward does not arm the one-shot symbol layer. */

@@ -158,6 +158,7 @@ class PagerKeyboardState {
   // tap from a hold (the Home and Settings shortcuts).
   bool letterHeld() const { return letter_held_; }
   bool altHeld() const { return alt_.held(); }
+  bool altHeldUnused() const { return alt_.heldUnused(); }
   void markAltUsed() { alt_.markHeldUsed(); }
   void discardAlt() {
     alt_.discard();
