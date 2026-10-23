@@ -8,12 +8,14 @@
 #if WADA_WEB_FILE_TRANSFER
 #include "WebFileTransfer.h"
 #include "WebFileTransferPage.h"
+#endif
+// The info and terminal pages are served on every board, the file transfer page
+// only where WADA_WEB_FILE_TRANSFER is on (the Heltec V4 has none of it).
 #if __has_include("web_pages_gz.h")
 #include "web_pages_gz.h"   // Wadamesh-tak: the pages gzipped (scripts/build/gen-web-pages-gz.py)
 #define WS_PAGE(p) do { page = p##_GZ; page_len = sizeof(p##_GZ); } while (0)
 #else
 #define WS_PAGE(p) do { page = (const uint8_t*)p; page_len = strlen(p); } while (0)
-#endif
 #endif
 
 #ifndef WS_FRAME_DEBUG

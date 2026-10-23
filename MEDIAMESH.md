@@ -419,7 +419,7 @@ mikecarper/MeshCore's, recomputed for the actual settings:
 ## Supported radios
 
 SX1262/SX1268 boards whose DIO1 reaches a GPIO: T-Deck, T-Deck Pro/Max, Heltec V4,
-T-LoRa Pager (SX1262), Wio Tracker L2, CrowPanel 3.5, Attaky, RAK WisMesh Tap V2.
+T-LoRa Pager (SX1262), Wio Tracker L2, CrowPanel 3.5 and 5.0, Attaky, RAK WisMesh Tap V2.
 LR1110/LR1121 boards (ThinkNode M9, T-LoRa Pager LR1121), the T-Display P4
 (polled DIO1) and Tanmatsu show "This radio can't run MediaMesh", and answer
 radio2 commands with an error. `tempradio` works on every board.

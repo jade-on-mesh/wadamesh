@@ -139,7 +139,10 @@ jobs:
       fail-fast: false
       matrix:
         env: [LilyGo_TDeck_companion_radio_touch, ThinkNode_M9_companion_radio_touch,
-              tlora_pager_sx1262_companion_radio_touch, tlora_pager_lr1121_companion_radio_touch]
+              tlora_pager_sx1262_companion_radio_touch, tlora_pager_lr1121_companion_radio_touch,
+              heltec_v4_tft_companion_radio_usb_tcp_touch, heltec_v4_r8_tft_companion_radio_usb_tcp_touch,
+              wio_tracker_l2_companion_radio_touch, crowpanel_35_companion_radio_touch,
+              crowpanel_50_companion_radio_touch]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -168,7 +171,8 @@ jobs:
         if: failure()
         shell: bash
         run: |
-          grep -E "error:|undefined reference|overflowed|greater than|too big" build.log | head -30 \
+          # (|| true: with no match, grep's status would end the step before the tail below)
+          { grep -E "error:|Error|undefined reference|overflowed|greater than|too big" build.log || true; } | head -30 \
             | while IFS= read -r l; do echo "::error::${l}"; done
           tail -12 build.log | while IFS= read -r l; do echo "::error title=build log tail::${l}"; done
       - name: Where the flash goes (largest objects and symbols, when a build fails)

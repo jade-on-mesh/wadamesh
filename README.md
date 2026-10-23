@@ -20,7 +20,7 @@ MeshCore fork via PlatformIO `lib_deps`.
 See **[DEVICES.md](DEVICES.md)** for the full support matrix, install paths and
 per-board status.
 
-**One USB install on the T-Deck (Plus), ThinkNode M9 and T-LoRa Pager.** In this
+**One USB install on the T-Deck (Plus), ThinkNode M9, T-LoRa Pager, Heltec V4, Wio Tracker L2 and CrowPanel Advance 3.5 / 5.0.** In this
 fork their app slots are 4.375 MB, the extra taken from the map tile cache. A
 standalone moves to the new layout only with the full merged image over USB
 (the web flasher). Its user data (settings, contacts, channels, chats) is kept;
