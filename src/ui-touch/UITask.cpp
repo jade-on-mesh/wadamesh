@@ -17570,7 +17570,9 @@ static void sysInfoTextLive(char* buf, size_t cap) {
 #if defined(ESP32)
   // MediaMesh: what radio2 sent and heard, what never went out, and how much of
   // the radio's (and on the T-Deck, the display's shared SPI bus's) time the
-  // scan takes, since the last look at this page.
+  // scan takes, since the last look at this page. Only where the radio can run
+  // MediaMesh (the P4 builds can't, and their app slot has no room to spare).
+#if defined(MEDIAMESH_RADIO)
   if (mediamesh::supported()) {
     const mediamesh::Status ms = mediamesh::status();
     static uint32_t s_seen_ms = 0, s_seen_busy = 0, s_seen_sw = 0;
@@ -17589,6 +17591,7 @@ static void sysInfoTextLive(char* buf, size_t cap) {
                   (unsigned long)ms.tx[0], (unsigned long)ms.tx[1], (unsigned long)ms.rx[0], (unsigned long)ms.rx[1],
                   (unsigned long)ms.dropped, (unsigned long)sw_s, (unsigned long)busy_pct);
   }
+#endif   // MEDIAMESH_RADIO
 #endif
 #if defined(ESP32)
   const uint32_t up_s = (uint32_t)(esp_timer_get_time() / 1000000ULL);
