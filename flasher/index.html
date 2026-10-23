@@ -1227,14 +1227,37 @@ $("install").onclick = async () => {
   await stopMonitor(); setBusy(true); result(); let transport;
   try {
     const port = await pickPort();               // first, while the click still counts as a user gesture
-    const [{ ESPLoader, Transport }, data] = await Promise.all([loadEsptool(), getFirmware(t)]);
+    const [{ ESPLoader, Transport, ClassicReset, UsbJtagSerialReset }, data] = await Promise.all([loadEsptool(), getFirmware(t)]);
     const img = inspectImage(data); if (img.err) throw new Error(img.err);
     if (t.chip && img.chip !== t.chip) throw new Error(`The image is for an ${img.chip}, but this device uses an ${t.chip}.`);
 
     setPhase("Connecting", 0, "");
-    transport = new Transport(port, false);
-    const loader = new ESPLoader({ transport, baudrate: CONFIG.baud, terminal: { clean() {}, writeLine: s => log(s), write: s => logRaw(s) } });
-    const desc = await loader.main();
+    // esptool-js picks its reset from the USB IDs the browser reports: the
+    // native-USB (USB-Serial-JTAG) reset for Espressif 303a:1001, else the
+    // classic DTR/RTS reset for USB-UART chips. Some browsers (Firefox) report
+    // no IDs, so a native-USB board like the ThinkNode M9 got the classic reset
+    // and never entered download mode. Without IDs, alternate both resets
+    // across the connect attempts; if a whole round fails, reconnect once and
+    // try the other way.
+    const info = (() => { try { return port.getInfo() || {}; } catch { return {}; } })();
+    const idsKnown = !!(info.usbVendorId && info.usbProductId);
+    if (!idsKnown) log("This browser doesn't say which USB chip the board uses, so the flasher tries both reset methods.", "d");
+    const mixed = { classicReset: (tr, delay) => delay < 100 ? new UsbJtagSerialReset(tr) : new ClassicReset(tr, delay) };
+    const plans = idsKnown ? [{ mode: "default_reset" }, { mode: "default_reset", resets: mixed }]
+                           : [{ mode: "default_reset", resets: mixed }, { mode: "usb_reset" }];
+    const terminal = { clean() {}, writeLine: s => log(s), write: s => logRaw(s) };
+    let loader, desc;
+    for (let i = 0; i < plans.length; i++) {
+      transport = new Transport(port, false);
+      loader = new ESPLoader({ transport, baudrate: CONFIG.baud, terminal, ...(plans[i].resets ? { resetConstructors: plans[i].resets } : {}) });
+      try { desc = await loader.main(plans[i].mode); break; }
+      catch (e) {
+        if (i === plans.length - 1 || !/connect|sync|timed? ?out/i.test(String(e?.message || e))) throw e;
+        log("No answer yet; trying the other reset method…", "w");
+        try { await transport.disconnect(); } catch {}
+        transport = null; await sleep(300);
+      }
+    }
     log(`Connected: ${desc}`, "o");
     const id = loader.chip?.IMAGE_CHIP_ID;
     if (id != null && id !== img.chipId) throw new Error(`This device is an ${loader.chip.CHIP_NAME}, but the firmware is for an ${img.chip}. Check the board picked above.`);
