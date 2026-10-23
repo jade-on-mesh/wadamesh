@@ -1048,6 +1048,7 @@ struct Stats {
   uint32_t typ_us = 0;            // typical (median) retune since the last profile change
   uint32_t heard_s = 0xFFFFFFFF;  // seconds since a valid radio2 packet; none since boot: 0xFFFFFFFF
   uint8_t samples = 0;            // retunes measured since the last profile change
+  uint32_t dropped = 0;           // radio2 packets never sent: refused (scan off) or dropped from the queue
 };
 
 struct Env {
@@ -1200,6 +1201,10 @@ inline CliResult handleCli(const char* cmd, Runtime& r, const Env& env, char* re
       if (env.stats.stalls) {
         const size_t used = strlen(reply);
         if (used < cap) snprintf(reply + used, cap - used, " stalls=%lu", (unsigned long)env.stats.stalls);
+      }
+      if (env.stats.dropped) {   // packets meant for radio2 that never went out
+        const size_t used = strlen(reply);
+        if (used < cap) snprintf(reply + used, cap - used, " drop=%lu", (unsigned long)env.stats.dropped);
       }
       if (t.valid) {
         const size_t used = strlen(reply);

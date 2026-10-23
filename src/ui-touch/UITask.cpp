@@ -17568,6 +17568,28 @@ static void sysInfoTextLive(char* buf, size_t cap) {
   int p = 0;
   p += perfText(buf, cap);   // where the time goes, first: the slowdown hunt reads it
 #if defined(ESP32)
+  // MediaMesh: what radio2 sent and heard, what never went out, and how much of
+  // the radio's (and on the T-Deck, the display's shared SPI bus's) time the
+  // scan takes, since the last look at this page.
+  if (mediamesh::supported()) {
+    const mediamesh::Status ms = mediamesh::status();
+    static uint32_t s_seen_ms = 0, s_seen_busy = 0, s_seen_sw = 0;
+    const uint32_t now = millis();
+    const uint32_t dt = now - s_seen_ms;
+    const uint32_t busy_pct = s_seen_ms && dt ? (uint32_t)((uint64_t)(ms.scan_busy_us - s_seen_busy) / 10 / dt) : 0;
+    const uint32_t sw_s = s_seen_ms && dt ? (uint32_t)((uint64_t)(ms.switches - s_seen_sw) * 1000 / dt) : 0;
+    s_seen_ms = now; s_seen_busy = ms.scan_busy_us; s_seen_sw = ms.switches;
+    p += snprintf(buf + p, cap - p,
+                  "MediaMesh\n  radio2 %s%s\n  TX main %lu, radio2 %lu\n  RX main %lu, radio2 %lu\n"
+                  "  not sent %lu\n  scan %lu switches/s, radio %lu%%\n\n",
+                  ms.mode == mediamesh::MODE_RXTX ? "on" : ms.mode == mediamesh::MODE_RX ? "listen only" : "off",
+                  ms.mode == mediamesh::MODE_OFF ? "" : ms.scanning ? (ms.timing_valid ? ", scanning" : ", NO TIMING")
+                                                                    : ", NOT SCANNING",
+                  (unsigned long)ms.tx[0], (unsigned long)ms.tx[1], (unsigned long)ms.rx[0], (unsigned long)ms.rx[1],
+                  (unsigned long)ms.dropped, (unsigned long)sw_s, (unsigned long)busy_pct);
+  }
+#endif
+#if defined(ESP32)
   const uint32_t up_s = (uint32_t)(esp_timer_get_time() / 1000000ULL);
   const uint32_t up_d = up_s / 86400u;
   const uint32_t up_h = (up_s % 86400u) / 3600u;
@@ -17849,7 +17871,7 @@ static void refreshSysInfo(unsigned long now) {
     if (lv_indev_get_scroll_dir(in) != LV_DIR_NONE) { next = now + 120; return; }
   }
   next = now + 1000;
-  static char buf[1600];   // static: the busy table made it too big for the stack
+  static char buf[2048];   // static: the busy table made it too big for the stack
   sysInfoTextLive(buf, sizeof buf);
   lv_label_set_text(s_sysinfo_lbl, buf);
   // Slow tier: pushing identical text would still invalidate + repaint the whole
@@ -17922,7 +17944,7 @@ static void refreshSleepDiag(unsigned long now) {
 
 static void buildSystemInfoSettings() {
   lv_obj_t* body = createSettingsModal(TR("System Information"), SettingsModalKind::SystemInfo);
-  static char buf[1600];
+  static char buf[2048];
 
   // FLEX COLUMN, deliberately not the manual y cursor the rest of this file uses.
   // Both labels below are re-texted AFTER build with text whose LINE COUNT
