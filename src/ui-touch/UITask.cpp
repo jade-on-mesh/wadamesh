@@ -41249,6 +41249,32 @@ static void mapFollowToggleCb(lv_event_t* e) {
   }
 }
 
+// The map to a point (a watched report, a teammate, a pin), zoomed in to at least
+// `min_zoom`. Auto-follow ("Auto-refresh") recentres on our own position the
+// moment the centre is ~5 m off it (mapAutoFollowTick), so a jump with it on
+// was undone within a second: it is turned off, as a hand pan would. On the map
+// already, it redraws in place; otherwise the map tab opens there.
+static void mapJumpTo(double lat, double lon, uint8_t min_zoom) {
+  if (lat == 0.0 && lon == 0.0) return;
+  if (s_map_follow) {
+    s_map_follow = false;
+    if (s_map_follow_btn) lv_obj_clear_state(s_map_follow_btn, LV_STATE_CHECKED);
+  }
+  s_map_center_lat = lat;
+  s_map_center_lon = lon;
+  s_map_view_inited = true;
+  if (min_zoom > k_map_zoom_max) min_zoom = k_map_zoom_max;
+  if (s_map_zoom < min_zoom) s_map_zoom = min_zoom;
+  if (s_map_zoom_slider) lv_slider_set_value(s_map_zoom_slider, s_map_zoom, LV_ANIM_OFF);
+  if (mapOnScreen()) {
+    renderMapTiles();
+    renderMapMarkers();
+    refreshMapInfoLabel();
+  } else {
+    goToTab(MAP_TAB_INDEX);   // onMapTabActivated keeps a set view
+  }
+}
+
 // Recenters on self GPS and rebuilds the tile grid. Called from tabChangedCb
 // every time the user switches TO the Map tab.
 static void onMapTabActivated() {
