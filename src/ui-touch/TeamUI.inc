@@ -215,6 +215,30 @@ static maphl::Table* highlights() {
   return s_hl;
 }
 
+// Auto-zoom (as the app's map button, lib/team/watch_auto_zoom.dart): a watched
+// report with a position that arrives live moves the map to it, zoomed in to at
+// least street level, while the map is on screen. A channel's backlog or a
+// report older than 30 minutes never moves it. On unless turned off; kept in
+// "watchzoom".
+static int8_t s_watch_zoom = -1;      // -1: not read yet
+static bool s_zoom_pending = false;
+static double s_zoom_lat = 0, s_zoom_lon = 0;
+static constexpr uint8_t kWatchZoomLevel = 15;
+
+static bool watchZoomOn() {
+  if (s_watch_zoom < 0) {
+    uint8_t v = 1;
+    size_t n = 0;
+    s_watch_zoom = (s_io.readFile("watchzoom", &v, 1, &n) && n == 1) ? (v ? 1 : 0) : 1;
+  }
+  return s_watch_zoom == 1;
+}
+static void watchZoomSet(bool on) {
+  s_watch_zoom = on ? 1 : 0;
+  const uint8_t v = on ? 1 : 0;
+  s_io.writeFile("watchzoom", &v, 1);
+}
+
 static void highlightsSave() {
   if (!s_hl) return;
   const uint8_t v = s_hl->choice;
@@ -321,13 +345,7 @@ static void rangeTo(double lat, double lon, char* out, size_t cap) {
 // A sheet's "Map" (teammates, pins, watched reports...): the map centred on the
 // point, zoomed in to street level if it was further out (as the On map list
 // does), so the point itself is what's in view.
-static void showOnMap(double lat, double lon) {
-  s_map_center_lat = lat;
-  s_map_center_lon = lon;
-  s_map_view_inited = true;
-  if (s_map_zoom < 14) s_map_zoom = 14;
-  goToTab(MAP_TAB_INDEX);   // on the map already, this repaints it at the new centre
-}
+static void showOnMap(double lat, double lon) { mapJumpTo(lat, lon, 14); }
 
 #if CAP_TAK_EXTRAS
 // ---- quick replies: what the answer buttons answer -----------------------------------------
@@ -1457,13 +1475,7 @@ int teamOnMapFill(lv_obj_t* list, lv_coord_t rw, double self_lat, double self_lo
       lv_indev_t* a = lv_indev_get_act();
       if (a) lv_indev_wait_release(a);
       closeMapContacts();
-      s_map_center_lat = la;
-      s_map_center_lon = lo;
-      s_map_view_inited = true;
-      if (s_map_zoom < 14) s_map_zoom = 14;
-      renderMapTiles();
-      renderMapMarkers();
-      refreshMapInfoLabel();
+      mapJumpTo(la, lo, 14);   // also turns auto-follow off, which would snap straight back
     }, LV_EVENT_CLICKED, (void*)(intptr_t)i);
     lv_obj_t* nl = lv_label_create(b);
     lv_label_set_text(nl, r.name);
@@ -1587,6 +1599,12 @@ void teamOnChannelText(int idx, const char* text, uint32_t sent) {
   if (watchfeed::Item* it = w->add(r, (uint8_t)idx, at)) {
     it->reply_hash = quickreply::reportHash(sent, sender, body);
     s_io.changed();
+    // Auto-zoom: only a report that is happening now (not a backlog).
+    if (watchZoomOn() && (uint32_t)(millis() - at) < 30UL * 60UL * 1000UL) {
+      s_zoom_lat = r.lat;
+      s_zoom_lon = r.lon;
+      s_zoom_pending = true;   // moved from the UI loop (loopTick), not from here
+    }
   }
 }
 
@@ -2134,6 +2152,22 @@ static void buildWatch(lv_obj_t* b) {
     lbl(b, TR("A teammate, pin or watched report that appears on the map flashes with a ring for this long."),
         &g_font_12, COLOR_SUB);
   }
+  {
+    lv_obj_t* x = lv_btn_create(b);
+    styleButton(x);
+    lv_obj_set_size(x, LV_PCT(100), 32);
+    lv_obj_add_event_cb(x, [](lv_event_t*) {
+      watchZoomSet(!watchZoomOn());
+      pageBuild();
+    }, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t* l = lv_label_create(x);
+    snprintf(line, sizeof line, "%s: %s", TR("Zoom to new reports"), watchZoomOn() ? TR("on") : TR("off"));
+    lv_label_set_text(l, line);
+    useChainedFont(l);
+    lv_obj_align(l, LV_ALIGN_LEFT_MID, 0, 0);
+    lbl(b, TR("A new report with a position moves the map to it, zoomed in, while the map is open."),
+        &g_font_12, COLOR_SUB);
+  }
   lbl(b, TR("Watched channels:"), &g_font_12, COLOR_SUB);
   lv_obj_t* row = lv_obj_create(b);
   lv_obj_remove_style_all(row);
@@ -2265,6 +2299,10 @@ static void pageOpen() {
 
 // ---- loop ---------------------------------------------------------------------------------------
 static void loopTick() {
+  if (s_zoom_pending) {   // auto-zoom: a new watched report, with the map in view
+    s_zoom_pending = false;
+    if (mapOnScreen()) mapJumpTo(s_zoom_lat, s_zoom_lon, kWatchZoomLevel);
+  }
   team::Core* c = core();
   if (!c) return;
   const uint32_t now = millis();
