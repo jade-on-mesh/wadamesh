@@ -382,6 +382,16 @@ leaves reserved: `0xA0` main mesh, `0xA1` radio2, anything else unknown
 | `PUSH_CODE_RAW_DATA` (`0x84`): `[code][snr][rssi][via][payload]` | 3 (stock: `0xFF`) |
 | `RESP_CODE_CHANNEL_DATA_RECV` (27): `[code][snr][via][0][idx][path][type 2][len][data]` | 2 (stock: `0`) |
 
+A download that came over MediaMesh through a repeater also names the one
+that relayed its last radio2 packet: **Received via MediaMesh (1ffb)**, that
+repeater's path hash in hex (4 digits with 2-byte hashes). Only a channel
+flood says who relayed it; direct packets arrive with their path used up.
+For the app, a channel data frame from radio2 that came through a repeater
+carries `0xB0 | n` in its second reserved byte (stock: `0`) and ends with
+those n bytes (1-3), after the data, where a parser reading exactly `len`
+never looks:
+`[27][snr][0xA1][0xB0|n][idx][path][type 2][len][data][hop n]`.
+
 ## How the scan works
 
 One SX1262 alternates between the two profiles. The timing is

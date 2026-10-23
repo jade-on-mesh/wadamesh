@@ -3646,8 +3646,16 @@ void MyMesh::onChannelDataRecv(const mesh::GroupChannel &channel, mesh::Packet *
   int i = 0;
   out_frame[i++] = RESP_CODE_CHANNEL_DATA_RECV;
   out_frame[i++] = (int8_t)(pkt->getSNR() * 4);
+  // reserved2: 0xB0 | n when the frame ends with the n-byte path hash (1-3) of
+  // the repeater that relayed this radio2 (MediaMesh) packet to us last, for
+  // the app's "Received via MediaMesh (1ffb)". The bytes go after the data,
+  // where parsers that read exactly data_len never look; 0 as before otherwise.
+  const uint8_t hop_n = pkt->isRouteFlood() ? pkt->getPathHashCount() : 0;
+  const uint8_t hop_s = pkt->getPathHashSize();
+  const bool tag_hop = rxVia() == 1 && hop_n > 0 && hop_s <= 3 &&
+                       9 + (int)data_len + (int)hop_s <= (int)MAX_FRAME_SIZE;
   out_frame[i++] = rxViaFrameTag(0); // reserved1: the profile it arrived on, when known (MEDIAMESH.md)
-  out_frame[i++] = 0; // reserved2
+  out_frame[i++] = tag_hop ? (uint8_t)(0xB0 | hop_s) : 0; // reserved2
   out_frame[i++] = (uint8_t)resolved_idx;
   out_frame[i++] = pkt->isRouteFlood() ? pkt->path_len : 0xFF;
   out_frame[i++] = (uint8_t)(data_type & 0xFF);
@@ -3656,6 +3664,10 @@ void MyMesh::onChannelDataRecv(const mesh::GroupChannel &channel, mesh::Packet *
   if (data_len > 0) {
     memcpy(&out_frame[i], data, data_len);
     i += (int)data_len;
+  }
+  if (tag_hop) {
+    memcpy(&out_frame[i], &pkt->path[(hop_n - 1) * hop_s], hop_s);
+    i += hop_s;
   }
   _serial->writeFrameToAll(out_frame, i);
 }
