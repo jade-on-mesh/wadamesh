@@ -28993,6 +28993,25 @@ static void fmImageShowDecoded(const char* name, uint8_t* rgb, int dw, int dh);
 static lv_timer_t* s_vox_poll_timer = nullptr;
 static char        s_vox_name[64]   = {0};
 
+// Thumbnails for photo bubbles (VoxPhotos::saveThumb). A photo the viewer
+// decodes leaves one behind; a finished download (or a bubble showing a stored
+// photo without one) is decoded in the background, one at a time, by the same
+// job while the viewer isn't using it. s_chat_thumb_gen moves when one lands,
+// so the open chat is laid out again with room for it.
+static uint32_t s_chat_thumb_gen    = 0;
+static uint32_t s_vox_open_sid      = 0;   // set around voxShowStoredPhoto's start
+static uint32_t s_vox_view_sid      = 0;   // the photo the viewer job is decoding
+static uint32_t s_thumb_job_sid     = 0;   // a background thumbnail decode running
+static bool     s_thumb_then_view   = false;   // ...and the viewer wants that same photo
+static uint32_t s_thumb_next_view   = 0;   // the viewer asked for another one meanwhile
+static char     s_thumb_next_title[48] = {0};
+static void voxShowStoredPhoto(uint32_t sid, const char* title);
+
+static void voxThumbLanded() {
+  ++s_chat_thumb_gen;
+  g_lv.dirty_timeline = true;
+}
+
 static void fmVoxPhotoPollCb(lv_timer_t*) {
   if (VoxAv1Job::state() != VoxAv1Job::kDone) return;
   lv_timer_del(s_vox_poll_timer);
@@ -29008,6 +29027,7 @@ static void fmVoxPhotoPollCb(lv_timer_t*) {
                 (unsigned long)st.psram_free);
   if (r != kVoxAv1Ok) {
     voxAv1Free(img.pixels);
+    s_vox_view_sid = 0;
     // The memory picture at the time, so a failure report says which pool ran out.
     char emsg[160];
     snprintf(emsg, sizeof emsg, "%s (%d)\ninternal block %lu KB, PSRAM free %lu KB",
@@ -29016,6 +29036,11 @@ static void fmVoxPhotoPollCb(lv_timer_t*) {
     if (g_lv.task) g_lv.task->showAlert(emsg, 5000);
     return;
   }
+  // A photo opened from its bubble: keep a thumbnail of it for the bubble.
+  if (s_vox_view_sid && !VoxPhotos::thumbSize(s_vox_view_sid, nullptr, nullptr) &&
+      VoxPhotos::saveThumb(s_vox_view_sid, (const uint16_t*)img.pixels, img.width, img.height))
+    voxThumbLanded();
+  s_vox_view_sid = 0;
   // The viewer frees with lvglPsramFree, so hand it a buffer from that allocator.
   const size_t bytes = (size_t)img.width * img.height * 2;
   uint8_t* buf = (uint8_t*)lvglPsramAlloc(bytes);
@@ -29039,16 +29064,85 @@ static void fmVoxPhotoPollCb(lv_timer_t*) {
 
 static void fmVoxPhotoStart(const char* name, const uint8_t* payload, size_t len) {
 #if VOX_AV1_AVAILABLE
+  const uint32_t sid = s_vox_open_sid;
+  if (s_thumb_job_sid) {
+    // The background thumbnail decode has the job. The same photo: show it when
+    // that decode is done. Another one: start it straight after.
+    if (sid && sid == s_thumb_job_sid) {
+      s_thumb_then_view = true;
+      snprintf(s_vox_name, sizeof s_vox_name, "%s", name);
+    } else if (sid) {
+      s_thumb_next_view = sid;
+      snprintf(s_thumb_next_title, sizeof s_thumb_next_title, "%s", name);
+    } else {
+      if (g_lv.task) g_lv.task->showAlert(TR("Already decoding a photo"), 1500);
+      return;
+    }
+    if (g_lv.task) g_lv.task->showAlert(TR("Decoding photo..."), 1200);
+    return;
+  }
   if (!VoxAv1Job::start(payload, len)) {
     if (g_lv.task) g_lv.task->showAlert(TR("Already decoding a photo"), 1500);
     return;
   }
   snprintf(s_vox_name, sizeof s_vox_name, "%s", name);
+  s_vox_view_sid = sid;
   if (!s_vox_poll_timer) s_vox_poll_timer = lv_timer_create(fmVoxPhotoPollCb, 50, nullptr);
   if (g_lv.task) g_lv.task->showAlert(TR("Decoding photo..."), 1200);
 #else
   (void)name; (void)payload; (void)len;
   if (g_lv.task) g_lv.task->showAlert(TR(voxAv1ResultText(kVoxAv1Unsupported)), 2000);
+#endif
+}
+
+// From the UI loop: one background thumbnail decode at a time (see above).
+static void voxThumbTick() {
+#if VOX_AV1_AVAILABLE
+  if (s_thumb_job_sid) {
+    if (VoxAv1Job::state() != VoxAv1Job::kDone) return;
+    VoxAv1Image img;
+    VoxAv1Job::Stats st;
+    const VoxAv1Result r = VoxAv1Job::finish(&img, &st);
+    const uint32_t sid = s_thumb_job_sid;
+    s_thumb_job_sid = 0;
+    Serial.printf("[VOX] thumbnail %08lx: %s %dx%d, %lu ms\n", (unsigned long)sid, voxAv1ResultText(r),
+                  img.width, img.height, (unsigned long)st.decode_ms);
+    if (r == kVoxAv1Ok && VoxPhotos::saveThumb(sid, (const uint16_t*)img.pixels, img.width, img.height))
+      voxThumbLanded();
+    if (s_thumb_then_view && r == kVoxAv1Ok) {   // the viewer asked for this one meanwhile
+      const size_t bytes = (size_t)img.width * img.height * 2;
+      if (uint8_t* buf = (uint8_t*)lvglPsramAlloc(bytes)) {
+        memcpy(buf, img.pixels, bytes);
+        snprintf(s_fm_img_path, sizeof s_fm_img_path, "%s", s_vox_name);
+        fmImageShowDecoded(s_vox_name, buf, img.width, img.height);
+      } else if (g_lv.task) {
+        g_lv.task->showAlert(TR("Out of memory"), 1500);
+      }
+    } else if (s_thumb_then_view && g_lv.task) {
+      g_lv.task->showAlert(TR(voxAv1ResultText(r)), 2500);
+    }
+    s_thumb_then_view = false;
+    voxAv1Free(img.pixels);
+    if (s_thumb_next_view) {   // another photo asked for while this ran
+      const uint32_t next = s_thumb_next_view;
+      s_thumb_next_view = 0;
+      voxShowStoredPhoto(next, s_thumb_next_title);
+    }
+    return;
+  }
+  // The viewer has the job, or is about to.
+  if (s_vox_poll_timer || VoxAv1Job::state() != VoxAv1Job::kIdle) return;
+  static uint32_t s_last_ms = 0;
+  const uint32_t now = millis();
+  if (s_last_ms && now - s_last_ms < 1500) return;   // a breather between decodes
+  s_last_ms = now;
+  const uint32_t sid = VoxPhotos::nextThumbWanted();
+  if (!sid || VoxPhotos::thumbSize(sid, nullptr, nullptr)) return;
+  uint8_t* payload = nullptr;
+  size_t len = 0;
+  if (!VoxPhotos::load(sid, &payload, &len)) return;
+  if (VoxAv1Job::start(payload, len)) s_thumb_job_sid = sid;
+  free(payload);
 #endif
 }
 
@@ -44878,7 +44972,11 @@ struct ChatBubbleDisplay {
   char san_sender[UITask::MAX_SENDER_NAME + 8];
   char san_text[UITask::MAX_MSG_TEXT + 8];
   uint32_t talk_sid = 0;   // a push-to-talk: its waveform goes on the second line
+  uint32_t thumb_sid = 0;  // a received photo with a thumbnail: drawn above its text
+  lv_coord_t thumb_w = 0, thumb_h = 0;
 };
+// Between a photo's thumbnail and the line under it.
+static constexpr lv_coord_t kChatThumbGap = 4;
 
 struct ChatVirtLayout {
   LvChatPanel* panel         = nullptr;
@@ -44889,6 +44987,7 @@ struct ChatVirtLayout {
   int          last_i1       = -1;
   bool         thread_is_room = false;
   bool         compact_chat   = false;
+  uint32_t     thumb_gen      = 0;   // s_chat_thumb_gen it was measured with
   char         compact_thread_name[UITask::MAX_THREAD_NAME + 1] = "";
   lv_coord_t   content_w     = 0;
   lv_coord_t   bubble_max_w  = 0;
@@ -45453,6 +45552,12 @@ static void chatParseMessageDisplay(const UITask::UIMessage& m, bool channel_mod
                cap_len ? "\n" : "", (int)cap_len, cap ? cap : "");
     }
     d.show_text = vox_line;
+    int tw = 0, th = 0;
+    if (vox_env.kind == VoxWire::kImage && !m.outgoing && VoxPhotos::thumbSize(vox_env.sid, &tw, &th)) {
+      d.thumb_sid = vox_env.sid;
+      d.thumb_w = (lv_coord_t)tw;
+      d.thumb_h = (lv_coord_t)th;
+    }
   }
   // The label is the sender's nickname when it has one; show_sender (its colour, its
   // identity) stays the name it advertises.
@@ -45758,6 +45863,7 @@ static lv_coord_t chatMeasureBubbleHeight(const UITask::UIMessage& m, bool chann
   const lv_coord_t inner_max_w = bubble_max_w - 2 * kChatBubblePadH;
   const bool show_sender = (channel_mode || thread_is_room) && !m.outgoing && d.san_sender[0];
   lv_coord_t inner_y = show_sender ? lv_font_get_line_height(&g_font_semi_12) : 0;
+  if (d.thumb_sid) inner_y += d.thumb_h + kChatThumbGap;   // as chatVirtCreateBubble places it
 
   const lv_font_t* msg_font = chatMessageFont();
   lv_point_t txt_size;
@@ -46102,6 +46208,7 @@ static bool chatVirtTryAppendLayout(LvChatPanel* p, int n, int divider_i) {
   if (n_old <= 0 || n <= n_old) return false;
   if (divider_i >= 0 || s_chat_virt.divider_i >= 0) return false;   // divider math: full rebuild
   if (s_chat_virt.compact_chat != touchPrefsGetCompactChat()) return false;
+  if (s_chat_virt.thumb_gen != s_chat_thumb_gen) return false;   // heights changed: measure again
   if (s_chat_msg_idx[0] != s_chat_virt.first_ring ||
       s_chat_msg_idx[n_old - 1] != s_chat_virt.last_ring) return false;
 
@@ -46191,6 +46298,7 @@ static bool chatVirtRebuildLayout(LvChatPanel* p, int n, int divider_i) {
     if (g_lv.task->lookupActiveContact(rc)) s_chat_virt.thread_is_room = (rc.type == ADV_TYPE_ROOM);
   }
   s_chat_virt.compact_chat = touchPrefsGetCompactChat();
+  s_chat_virt.thumb_gen = s_chat_thumb_gen;
   s_chat_virt.compact_thread_name[0] = '\0';
   if (s_chat_virt.compact_chat) {
     bool ch_ = false; uint16_t un_ = 0; uint32_t ts_ = 0;
@@ -46595,7 +46703,9 @@ static void voxShowStoredPhoto(uint32_t sid, const char* title) {
     if (g_lv.task) g_lv.task->showAlert(TR("Couldn't read the photo"), 1800);
     return;
   }
+  s_vox_open_sid = sid;
   fmVoxPhotoStart(title, payload, len);
+  s_vox_open_sid = 0;
   free(payload);
 }
 
@@ -46989,6 +47099,52 @@ static void messageMenuLinkCb(lv_event_t* e) {
   openChatLinkPicker(s_msg_menu_text, kind);
 }
 
+// A photo's thumbnail in its bubble: an lv_img over pixels it owns, freed with it.
+static void chatThumbDeleteCb(lv_event_t* e) {
+  lv_img_dsc_t* dsc = (lv_img_dsc_t*)lv_event_get_user_data(e);
+  if (!dsc) return;
+  free((void*)dsc->data);
+  free(dsc);
+}
+static void chatAddThumb(lv_obj_t* parent, uint32_t sid, lv_coord_t x, lv_coord_t y) {
+  int w = 0, h = 0;
+  uint16_t* px = nullptr;
+  if (!VoxPhotos::loadThumb(sid, &w, &h, &px)) return;   // the row keeps its room; just no picture
+  lv_img_dsc_t* dsc = (lv_img_dsc_t*)calloc(1, sizeof(lv_img_dsc_t));
+  if (!dsc) { free(px); return; }
+  dsc->header.always_zero = 0;
+  dsc->header.cf = LV_IMG_CF_TRUE_COLOR;
+  dsc->header.w = (uint32_t)w;
+  dsc->header.h = (uint32_t)h;
+  dsc->data_size = (uint32_t)w * (uint32_t)h * 2u;
+  dsc->data = (const uint8_t*)px;
+  lv_obj_t* img = lv_img_create(parent);
+  lv_img_set_src(img, dsc);
+  lv_obj_clear_flag(img, LV_OBJ_FLAG_CLICKABLE);   // a tap opens the photo (the row's)
+  lv_obj_set_pos(img, x, y);
+  lv_obj_set_style_radius(img, 4, LV_PART_MAIN);
+  lv_obj_set_style_clip_corner(img, true, LV_PART_MAIN);
+  lv_obj_add_event_cb(img, chatThumbDeleteCb, LV_EVENT_DELETE, dsc);
+}
+// A received photo that is stored but has no thumbnail yet (downloaded before
+// thumbnails, or its decode was cut short): ask for one, once per boot.
+static void chatMaybeWantThumb(const UITask::UIMessage& m, const ChatBubbleDisplay& d) {
+#if VOX_AV1_AVAILABLE
+  (void)d;
+  if (m.outgoing) return;
+  VoxWire::Envelope env;
+  if (!chatMessagePhoto(m, &env, nullptr, 0) || env.kind != VoxWire::kImage) return;
+  static uint32_t s_asked[32];
+  static uint8_t s_asked_n = 0;
+  for (uint32_t a : s_asked) if (a == env.sid) return;
+  if (VoxPhotos::status(env.sid) != VoxFetch::kComplete) return;
+  s_asked[s_asked_n++ % 32] = env.sid;
+  VoxPhotos::requestThumb(env.sid);
+#else
+  (void)m; (void)d;
+#endif
+}
+
 static lv_coord_t chatVirtCreateBubble(LvChatPanel* p, int logical_i, int ring_idx,
                                        lv_coord_t vp_y, lv_coord_t* out_jump_y) {
   if (!p || !g_lv.task) return 0;
@@ -47040,8 +47196,10 @@ static lv_coord_t chatVirtCreateBubble(LvChatPanel* p, int logical_i, int ring_i
   lv_coord_t sender_w = 0;
   if (show_sender_line) sender_w = lv_txt_get_width(d.san_sender, strlen(d.san_sender), &g_font_semi_12, 0, LV_TEXT_FLAG_NONE);
   lv_coord_t inner_w = LV_MAX(txt_w_used > 0 ? txt_w_used : 1, LV_MIN(sender_w, kInnerMaxW));
+  if (d.thumb_sid) inner_w = LV_MAX(inner_w, LV_MIN(d.thumb_w, kInnerMaxW));
+  const lv_coord_t thumb_band = d.thumb_sid ? (lv_coord_t)(d.thumb_h + kChatThumbGap) : 0;
   const lv_coord_t bw = LV_MIN((lv_coord_t)(inner_w + 2 * kChatBubblePadH), kBubbleMaxW);
-  const lv_coord_t bh = kChatBubblePadV * 2 + (show_sender_line ? sender_lh : 0) + wrapped.y;
+  const lv_coord_t bh = kChatBubblePadV * 2 + (show_sender_line ? sender_lh : 0) + thumb_band + wrapped.y;
 
   ChatFoot foot;
   chatBuildFoot(m, p->channel_mode, foot);
@@ -47102,6 +47260,12 @@ static lv_coord_t chatVirtCreateBubble(LvChatPanel* p, int logical_i, int ring_i
     lv_obj_set_size(slbl, LV_MIN(sender_w, inner_w), sender_lh);
     lv_obj_set_pos(slbl, 0, 0);
     inner_y = sender_lh;
+  }
+  if (d.thumb_sid) {
+    chatAddThumb(bubble, d.thumb_sid, 0, inner_y);
+    inner_y += thumb_band;
+  } else {
+    chatMaybeWantThumb(m, d);   // a downloaded photo without one: make it in the background
   }
 
   lv_obj_t* tlbl = lv_label_create(bubble);
@@ -47703,7 +47867,8 @@ static void refreshChatDetail(LvChatPanel& p) {
                              s_chat_msg_idx[n - 1] != s_chat_virt.last_ring);
   const bool need_layout = (s_chat_virt.panel != &p) || (s_chat_virt.n != n) ||
                            !s_chat_virt.offsets || ring_changed ||
-                           s_chat_virt.compact_chat != compact_chat;
+                           s_chat_virt.compact_chat != compact_chat ||
+                           s_chat_virt.thumb_gen != s_chat_thumb_gen;   // a photo got its thumbnail
   const bool divider_rebuild = !need_layout && divider_i >= 0 && s_chat_virt.divider_y < 0;
   const bool changing_panel = s_chat_virt.panel != &p;
   if (opening || need_layout || divider_rebuild) chatVirtCancelRenderTimer();
@@ -82787,6 +82952,7 @@ void UITask::loop() {
     }
     uiCp("ui:vox");
     VoxPhotos::tick();
+    voxThumbTick();         // photo bubbles' thumbnails, decoded one at a time in the background
     if (VoxMic::available()) VoxMic::state();   // releases the mic once a recording ends
     uiCp("ui:otp");
     OtpMessenger::tick();   // sends, retries, sync checks: whether or not the app is open

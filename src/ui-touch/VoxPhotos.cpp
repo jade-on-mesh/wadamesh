@@ -42,6 +42,20 @@ void touched(uint32_t sid) {
 }
 void bumpState() { g_version++; g_state_version++; }
 
+// Photos that want a thumbnail made (a download just finished, or a bubble
+// showed one without). The UI takes them one at a time (nextThumbWanted).
+uint32_t g_thumb_want[8];
+int g_thumb_want_n = 0;
+void wantThumb(uint32_t sid) {
+  if (!sid) return;
+  for (int i = 0; i < g_thumb_want_n; i++) if (g_thumb_want[i] == sid) return;
+  if (g_thumb_want_n == 8) {   // full: the oldest goes
+    memmove(g_thumb_want, g_thumb_want + 1, sizeof g_thumb_want[0] * 7);
+    g_thumb_want_n = 7;
+  }
+  g_thumb_want[g_thumb_want_n++] = sid;
+}
+
 // What each recent envelope was, so a finished clip is stored the right way:
 // a photo as its payload (/vox_<sid>.vi1, opens in Files), a voice clip as
 // [wire mode][codec frames] (/vox_<sid>.ve3).
@@ -78,7 +92,10 @@ void storePath(uint32_t sid, bool voice, char* out, size_t cap) {
 // and slower as it fills) and the SD card over the bus the T-Deck's screen and
 // radio share: opening a channel with many photos and clips took many seconds.
 // The answers live here; every write and remove below keeps them true.
-struct HaveEntry { uint32_t sid; uint8_t bits; };   // bits: 1/4 photo/voice known, 2/8 present
+// Kinds: 0 the photo (.vi1), 1 a voice clip (.ve3), 2 a photo's thumbnail (.vt1).
+// bits: (1 << 2k) known, (2 << 2k) present. A thumbnail's size rides along, so a
+// chat layout can make room for it without reading the file.
+struct HaveEntry { uint32_t sid; uint8_t bits; uint8_t tw, th; };
 static HaveEntry g_have[128];
 static uint32_t g_fs_checks = 0;   // exists() calls made (About: chat open timing)
 static uint8_t g_have_next = 0;
@@ -92,17 +109,19 @@ static HaveEntry* haveFind(uint32_t sid, bool add) {
   g_have_next = (uint8_t)((g_have_next + 1) % (sizeof g_have / sizeof g_have[0]));
   h.sid = sid;
   h.bits = 0;
+  h.tw = h.th = 0;
   return &h;
 }
 
-static void haveSet(uint32_t sid, bool voice, bool present) {
+static void haveSetKind(uint32_t sid, int kind, bool present) {
   HaveEntry* h = haveFind(sid, true);
-  const uint8_t known = voice ? 4 : 1, has = voice ? 8 : 2;
+  const uint8_t known = (uint8_t)(1u << (2 * kind)), has = (uint8_t)(2u << (2 * kind));
   h->bits = (uint8_t)((h->bits & ~has) | known | (present ? has : 0));
 }
+static void haveSet(uint32_t sid, bool voice, bool present) { haveSetKind(sid, voice ? 1 : 0, present); }
 
-// From a store path ("<root>/vox_<sid>.ve3|.vi1"): its sid and kind.
-static bool havePathKey(const char* path, uint32_t* sid, bool* voice) {
+// From a store path ("<root>/vox_<sid>.vi1|.ve3|.vt1"): its sid and kind.
+static bool havePathKey(const char* path, uint32_t* sid, int* kind) {
   const char* b = strrchr(path, '/');
   b = b ? b + 1 : path;
   if (strlen(b) != 16 || strncmp(b, "vox_", 4)) return false;
@@ -110,13 +129,13 @@ static bool havePathKey(const char* path, uint32_t* sid, bool* voice) {
   memcpy(hex, b + 4, 8);
   hex[8] = '\0';
   *sid = (uint32_t)strtoul(hex, nullptr, 16);
-  *voice = !strcmp(b + 12, ".ve3");
+  *kind = !strcmp(b + 12, ".ve3") ? 1 : !strcmp(b + 12, ".vt1") ? 2 : 0;
   return true;
 }
 
 static void haveSetPath(const char* path, bool present) {
-  uint32_t sid; bool voice;
-  if (havePathKey(path, &sid, &voice)) haveSet(sid, voice, present);
+  uint32_t sid; int kind;
+  if (havePathKey(path, &sid, &kind)) haveSetKind(sid, kind, present);
 }
 
 static bool storeHas(uint32_t sid, bool voice) {
@@ -133,9 +152,14 @@ static bool storeHas(uint32_t sid, bool voice) {
   return present;
 }
 
+static void thumbPath(uint32_t sid, char* out, size_t cap) {
+  snprintf(out, cap, "%s/vox_%08lx.vt1", g_root, (unsigned long)sid);
+}
+
 static bool isVoxFile(const char* n) {
   const size_t l = strlen(n);
-  return l == 16 && !strncmp(n, "vox_", 4) && (!strcmp(n + 12, ".ve3") || !strcmp(n + 12, ".vi1"));
+  return l == 16 && !strncmp(n, "vox_", 4) &&
+         (!strcmp(n + 12, ".ve3") || !strcmp(n + 12, ".vi1") || !strcmp(n + 12, ".vt1"));
 }
 
 static const char* baseName(const char* p) {
@@ -272,6 +296,7 @@ class MeshIo : public VoxFetchIo {
     char path[40];
     storePath(sid, voice, path, sizeof path);
     if (!writeStore(path, voice ? &e->mode : nullptr, data, len)) return false;
+    if (!voice) wantThumb(sid);   // the UI decodes it in the background for the bubble
     Serial.printf("[VOX] %s %08lx complete, %u bytes\n", voice ? "voice" : "photo", (unsigned long)sid,
                   (unsigned)len);
     return true;
@@ -524,5 +549,109 @@ void discardRecording(uint32_t sid) {
 }
 
 bool haveVoice(uint32_t sid) { return storeHas(sid, true); }
+
+// ---- thumbnails: /vox_<sid>.vt1 = [w][h][w*h RGB565], at most kThumbMax a side ----
+
+void requestThumb(uint32_t sid) { wantThumb(sid); }
+
+uint32_t nextThumbWanted() {
+  if (!g_thumb_want_n) return 0;
+  const uint32_t sid = g_thumb_want[0];
+  memmove(g_thumb_want, g_thumb_want + 1, sizeof g_thumb_want[0] * (size_t)(g_thumb_want_n - 1));
+  --g_thumb_want_n;
+  return sid;
+}
+
+bool thumbSize(uint32_t sid, int* w, int* h) {
+  if (!g_fs || !sid) return false;
+  HaveEntry* e = haveFind(sid, false);
+  if (!e || !(e->bits & 16)) {
+    char path[40];
+    thumbPath(sid, path, sizeof path);
+    ++g_fs_checks;
+    uint8_t hdr[2] = {0, 0};
+    bool ok = false;
+    if (g_fs->exists(path)) {
+      File f = g_fs->open(path, "r");
+      ok = f && f.read(hdr, 2) == 2 && hdr[0] && hdr[1] && hdr[0] <= kThumbMax && hdr[1] <= kThumbMax &&
+           f.size() == 2u + (size_t)hdr[0] * hdr[1] * 2u;
+      if (f) f.close();
+    }
+    haveSetKind(sid, 2, ok);
+    e = haveFind(sid, false);
+    if (e) { e->tw = ok ? hdr[0] : 0; e->th = ok ? hdr[1] : 0; }
+  }
+  if (!e || !(e->bits & 32) || !e->tw || !e->th) return false;
+  if (w) *w = e->tw;
+  if (h) *h = e->th;
+  return true;
+}
+
+bool loadThumb(uint32_t sid, int* w, int* h, uint16_t** px) {
+  int tw = 0, th = 0;
+  if (!px || !thumbSize(sid, &tw, &th)) return false;
+  char path[40];
+  thumbPath(sid, path, sizeof path);
+  File f = g_fs->open(path, "r");
+  if (!f) { haveSetKind(sid, 2, false); return false; }
+  const size_t n = (size_t)tw * th * 2u;
+  uint16_t* b = (uint16_t*)heap_caps_malloc(n, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!b) b = (uint16_t*)malloc(n);
+  bool ok = b && f.seek(2) && f.read((uint8_t*)b, n) == n;
+  f.close();
+  if (!ok) { free(b); return false; }
+  *px = b;
+  if (w) *w = tw;
+  if (h) *h = th;
+  return true;
+}
+
+bool saveThumb(uint32_t sid, const uint16_t* src, int sw, int sh) {
+  if (!g_fs || !sid || !src || sw <= 0 || sh <= 0) return false;
+  // Fit inside kThumbMax x kThumbMax, keeping the shape; each pixel the average
+  // of the box of source pixels it covers.
+  int tw = sw, th = sh;
+  if (tw > kThumbMax || th > kThumbMax) {
+    if (sw >= sh) { tw = kThumbMax; th = (int)((long)sh * kThumbMax / sw); }
+    else { th = kThumbMax; tw = (int)((long)sw * kThumbMax / sh); }
+  }
+  if (tw < 1) tw = 1;
+  if (th < 1) th = 1;
+  const size_t n = 2u + (size_t)tw * th * 2u;
+  uint8_t* buf = (uint8_t*)heap_caps_malloc(n, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!buf) buf = (uint8_t*)malloc(n);
+  if (!buf) return false;
+  buf[0] = (uint8_t)tw;
+  buf[1] = (uint8_t)th;
+  uint16_t* out = (uint16_t*)(buf + 2);
+  for (int y = 0; y < th; y++) {
+    const int y0 = (int)((long)y * sh / th);
+    int y1 = (int)((long)(y + 1) * sh / th);
+    if (y1 <= y0) y1 = y0 + 1;
+    for (int x = 0; x < tw; x++) {
+      const int x0 = (int)((long)x * sw / tw);
+      int x1 = (int)((long)(x + 1) * sw / tw);
+      if (x1 <= x0) x1 = x0 + 1;
+      uint32_t r = 0, g = 0, bl = 0, c = 0;
+      for (int yy = y0; yy < y1; yy++) {
+        const uint16_t* row = src + (size_t)yy * sw;
+        for (int xx = x0; xx < x1; xx++) {
+          const uint16_t p = row[xx];
+          r += p >> 11; g += (p >> 5) & 0x3F; bl += p & 0x1F; ++c;
+        }
+      }
+      out[y * tw + x] = (uint16_t)(((r / c) << 11) | ((g / c) << 5) | (bl / c));
+    }
+  }
+  char path[40];
+  thumbPath(sid, path, sizeof path);
+  const bool ok = writeStore(path, nullptr, buf, n);
+  free(buf);
+  if (ok) {
+    if (HaveEntry* e = haveFind(sid, true)) { e->tw = (uint8_t)tw; e->th = (uint8_t)th; }
+    bumpState();
+  }
+  return ok;
+}
 
 }  // namespace VoxPhotos

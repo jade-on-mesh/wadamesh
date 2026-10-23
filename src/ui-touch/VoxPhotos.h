@@ -74,4 +74,19 @@ void discardRecording(uint32_t sid);
 // downloaded), so the bubble can play it.
 bool haveVoice(uint32_t sid);
 
+// A received photo's thumbnail, kept beside it (/vox_<sid>.vt1) once the photo
+// has been decoded, for the chat bubble. At most kThumbMax pixels a side.
+constexpr int kThumbMax = 96;
+// Its size, without reading the pixels (remembered). False if there is none.
+bool thumbSize(uint32_t sid, int* w, int* h);
+// Its pixels (RGB565, w*h), which the caller frees with free().
+bool loadThumb(uint32_t sid, int* w, int* h, uint16_t** px);
+// Scales `src` (RGB565, sw x sh) down to fit kThumbMax and stores it.
+bool saveThumb(uint32_t sid, const uint16_t* src, int sw, int sh);
+// Asks for a photo's thumbnail to be made (a bubble showed one without). Each
+// finished photo download asks on its own. The UI takes them one at a time
+// (0 when none), decoding in the background.
+void requestThumb(uint32_t sid);
+uint32_t nextThumbWanted();
+
 }  // namespace VoxPhotos
