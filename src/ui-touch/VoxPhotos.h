@@ -60,6 +60,13 @@ bool loadFile(uint32_t sid, bool voice, uint8_t** data, size_t* len);
 uint32_t version();
 // Filesystem lookups made for photo/voice state since boot (About's chat-open timing).
 uint32_t fsChecks();
+// While on, "is it stored" questions never wait on the filesystem: before the
+// store's index is ready, what isn't known yet counts as not stored. The chat
+// turns it on while it lays out and builds bubbles.
+void setQuick(bool on);
+// Moves when answers that change a bubble's height may have changed (the index
+// landed): the open chat is laid out again.
+uint32_t layoutVersion();
 // Bumped only when a photo or talk changes state (requesting, complete,
 // failed, recorded), not for each packet of one arriving.
 uint32_t stateVersion();

@@ -162,7 +162,7 @@ static void holdCb(lv_event_t* e) {
 static void pageBuild() {
   if (!s_root) return;
   if (s_body) { lv_obj_add_flag(s_body, LV_OBJ_FLAG_HIDDEN); lv_obj_del_async(s_body); }
-  s_seen_thumb_gen = s_chat_thumb_gen;
+  s_seen_thumb_gen = chatThumbGen();
   s_seen_state = VoxPhotos::stateVersion();
   s_body = lv_obj_create(s_root);
   lv_obj_remove_style_all(s_body);
@@ -244,7 +244,7 @@ static void pageOpen() {
   // Thumbnails land one at a time from the background decoder, and a download
   // can finish while the page is open: rebuild when either has happened.
   s_timer = lv_timer_create([](lv_timer_t*) {
-    if (s_chat_thumb_gen != s_seen_thumb_gen || VoxPhotos::stateVersion() != s_seen_state) pageBuild();
+    if (chatThumbGen() != s_seen_thumb_gen || VoxPhotos::stateVersion() != s_seen_state) pageBuild();
   }, 1500, nullptr);
   if (g_statusbar.root) lv_obj_move_foreground(g_statusbar.root);
 }
