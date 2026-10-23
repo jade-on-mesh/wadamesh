@@ -11288,6 +11288,19 @@ static uint32_t s_words_dirty_ms = 0;
 static lv_obj_t* s_wordbox = nullptr;
 static lv_obj_t* s_wordbox_ta = nullptr;
 static char s_word_sugg[predict::kSuggest][predict::kWordMax];
+// Space completes the best word, as on a phone: what the strip offered when it
+// was last shown (the text then, the caret, the word being typed), and the
+// last completion, so a Backspace straight after it puts back what was typed.
+static bool s_words_space = true;
+static lv_obj_t* s_ac_ta = nullptr;
+static char s_ac_text[UITask::MAX_MSG_TEXT + 1];
+static size_t s_ac_caret = 0, s_ac_at = 0, s_ac_wl = 0;
+static char s_ac_best[predict::kWordMax];
+static lv_obj_t* s_ac_undo_ta = nullptr;
+static char s_ac_done[UITask::MAX_MSG_TEXT + 1];    // the text right after a completion
+static char s_ac_typed[UITask::MAX_MSG_TEXT + 1];   // ...and what was typed instead
+static size_t s_ac_done_caret = 0, s_ac_typed_caret = 0;
+static bool s_ac_suppress = false;   // the strip after an undo doesn't arm Space again
 
 static predict::Dict* wordsDict() {
   if (!s_words) {
@@ -11299,7 +11312,7 @@ static predict::Dict* wordsDict() {
     s_words_loaded = true;
 #if defined(ESP32)
     SdNvsPrefs pr;
-    if (pr.begin("predict", true)) { s_words_on = pr.getBool("on", true); pr.end(); }
+    if (pr.begin("predict", true)) { s_words_on = pr.getBool("on", true); s_words_space = pr.getBool("space", true); pr.end(); }
     if (fs::FS* fs = backupInternalFs()) {
       if (fs->exists("/words")) {
         File f = fs->open("/words", "r");
@@ -11342,6 +11355,80 @@ static void wordBoxHide() {
   if (s_wordbox) { if (lv_obj_is_valid(s_wordbox)) lv_obj_del(s_wordbox); s_wordbox = nullptr; }
   s_wordbox_ta = nullptr;
 }
+static bool wordSpaceComplete(lv_obj_t* ta);
+// Puts `out` in the composer with the caret at byte `caret_byte` (and in the
+// on-screen keyboard's mirror of it). Fires VALUE_CHANGED.
+static bool s_ac_setting = false;
+static void wordSetText(lv_obj_t* ta, const char* out, size_t caret_byte) {
+  s_ac_setting = true;
+  if (ta == s_kb_mirror_ta) {
+    lv_textarea_set_text(ta, out);
+    lv_textarea_set_cursor_pos(ta, (int32_t)taByteToCp(out, caret_byte));
+    kbMirrorSyncToReal();
+    if (s_kb_bind_ta) lv_textarea_set_cursor_pos(s_kb_bind_ta, (int32_t)taByteToCp(out, caret_byte));
+  } else {
+    setTextareaSynced(ta, out);
+    lv_textarea_set_cursor_pos(ta, (int32_t)taByteToCp(out, caret_byte));
+    if (s_kb_bind_ta == ta && s_kb_mirror_ta)
+      lv_textarea_set_cursor_pos(s_kb_mirror_ta, (int32_t)taByteToCp(out, caret_byte));
+  }
+  s_ac_setting = false;
+}
+
+// Called on every edit of the composer, before the strip is rebuilt. True when
+// it changed the text itself (the caller then rebuilds from the new text).
+//  * A space typed straight after the word the strip was offering words for,
+//    with a longer best word: the word becomes that one ("tho" + Space ->
+//    "though ").
+//  * A Backspace straight after that: what was typed comes back, without the
+//    space ("though " -> "tho"), so a word can always be kept as typed.
+static bool wordSpaceComplete(lv_obj_t* ta) {
+  if (s_ac_setting || !ta) return false;
+  const char* text = lv_textarea_get_text(ta);
+  if (!text) return false;
+  const size_t len = strlen(text);
+  size_t caret = taCpToByte(text, lv_textarea_get_cursor_pos(ta));
+  if (caret > len) caret = len;
+  // Backspace right after a completion: put back what was typed.
+  if (s_ac_undo_ta == ta) {
+    s_ac_undo_ta = nullptr;
+    const size_t dl = strlen(s_ac_done);
+    if (len + 1 == dl && caret + 1 == s_ac_done_caret && !strncmp(text, s_ac_done, caret) &&
+        !strcmp(text + caret, s_ac_done + s_ac_done_caret)) {
+      s_ac_ta = nullptr;
+      s_ac_suppress = true;   // so a Space now keeps the word as typed
+      wordSetText(ta, s_ac_typed, s_ac_typed_caret);
+      return true;
+    }
+  }
+  if (s_ac_ta != ta || !s_words_on || !s_words_space) { s_ac_ta = nullptr; return false; }
+  s_ac_ta = nullptr;
+  // Exactly one space typed at the caret the strip was shown for?
+  const size_t ol = strlen(s_ac_text);
+  if (len != ol + 1 || caret != s_ac_caret + 1 || text[s_ac_caret] != ' ' ||
+      strncmp(text, s_ac_text, s_ac_caret) || strcmp(text + caret, s_ac_text + s_ac_caret))
+    return false;
+  const size_t bl = strlen(s_ac_best);
+  if (bl <= s_ac_wl) return false;   // the word typed is already the best one
+  char out[UITask::MAX_MSG_TEXT + 1];
+  if (s_ac_at + bl + 1 + (ol - s_ac_caret) > UITask::MAX_MSG_TEXT) return false;
+  size_t o = 0;
+  memcpy(out, s_ac_text, s_ac_at); o = s_ac_at;
+  memcpy(out + o, s_ac_best, bl); o += bl;
+  out[o++] = ' ';
+  const size_t new_caret = o;
+  memcpy(out + o, s_ac_text + s_ac_caret, ol - s_ac_caret + 1);
+  // For a Backspace straight after: the completed text, and the typed one.
+  snprintf(s_ac_done, sizeof s_ac_done, "%s", out);
+  s_ac_done_caret = new_caret;
+  snprintf(s_ac_typed, sizeof s_ac_typed, "%s", s_ac_text);
+  s_ac_typed_caret = s_ac_caret;
+  wordBoxHide();
+  wordSetText(ta, out, new_caret);
+  s_ac_undo_ta = ta;
+  return true;
+}
+
 static void wordBoxCellCb(lv_event_t* e) {
   if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
   const int k = (int)(intptr_t)lv_event_get_user_data(e);
@@ -11366,17 +11453,7 @@ static void wordBoxCellCb(lv_event_t* e) {
   const size_t caret_byte = add_space ? o : o + 1;
   memcpy(out + o, text + caret, len - caret + 1);
   wordBoxHide();   // setting the text fires VALUE_CHANGED: tear down first
-  if (ta == s_kb_mirror_ta) {
-    lv_textarea_set_text(ta, out);
-    lv_textarea_set_cursor_pos(ta, (int32_t)taByteToCp(out, caret_byte));
-    kbMirrorSyncToReal();
-    if (s_kb_bind_ta) lv_textarea_set_cursor_pos(s_kb_bind_ta, (int32_t)taByteToCp(out, caret_byte));
-  } else {
-    setTextareaSynced(ta, out);
-    lv_textarea_set_cursor_pos(ta, (int32_t)taByteToCp(out, caret_byte));
-    if (s_kb_bind_ta == ta && s_kb_mirror_ta)
-      lv_textarea_set_cursor_pos(s_kb_mirror_ta, (int32_t)taByteToCp(out, caret_byte));
-  }
+  wordSetText(ta, out, caret_byte);
 }
 static bool wordBoxMaybeShow(lv_obj_t* ta) {
   wordBoxHide();
@@ -11393,6 +11470,17 @@ static bool wordBoxMaybeShow(lv_obj_t* ta) {
   const int n = d->suggest(text + at, wl, s_word_sugg);
   if (n == 0) return false;
   s_wordbox_ta = ta;
+  // What Space completes (wordSpaceComplete): the best word, for this text and caret.
+  if (s_ac_suppress) {
+    s_ac_suppress = false;   // just put back by an undo: Space keeps it as typed
+  } else {
+    s_ac_ta = ta;
+    snprintf(s_ac_text, sizeof s_ac_text, "%s", text);
+    s_ac_caret = caret;
+    s_ac_at = at;
+    s_ac_wl = wl;
+    snprintf(s_ac_best, sizeof s_ac_best, "%s", s_word_sugg[0]);
+  }
   // A slim strip along the top of the composer field, as wide as the field:
   // the words in the small font, split by hairlines, the best one first.
   lv_area_t a;
@@ -11469,15 +11557,27 @@ static void predictToggleCb(lv_event_t* e) {
 #endif
   if (!s_words_on) wordBoxHide();
 }
+static void predictSpaceToggleCb(lv_event_t* e) {
+  if (lv_event_get_code(e) != LV_EVENT_VALUE_CHANGED) return;
+  wordsDict();
+  s_words_space = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED);
+#if defined(ESP32)
+  SdNvsPrefs pr;
+  if (pr.begin("predict", false)) { pr.putBool("space", s_words_space); pr.end(); }
+#endif
+}
+static bool predictSpaceOn() { wordsDict(); return s_words_space; }
 static bool predictOn() { wordsDict(); return s_words_on; }
 #else
 static void wordBoxHide() {}
 static bool wordBoxMaybeShow(lv_obj_t*) { return false; }
+static bool wordSpaceComplete(lv_obj_t*) { return false; }
 static void predictLearn(const char*) {}
 static void wordsSaveTick(uint32_t) {}
 #endif
 
 static void composerMentionRefresh(lv_obj_t* ta) {
+  if (wordSpaceComplete(ta)) return;   // its own text change already refreshed the composer
   wordBoxHide();
   if (mentionBoxMaybeShow(ta)) { accentBoxHide(); return; }
   mentionBoxHide();
@@ -19979,6 +20079,8 @@ static void buildKeyboardPage() {
 #if CAP_TAK_EXTRAS
     setSwitchRow(c, "Predictive text", "Up to three words that finish the one you're typing, in a slim strip "
                  "over the message; tap one to use it. The words you send come first.", predictOn(), predictToggleCb);
+    setSwitchRow(c, "Space completes the word", "With Predictive text on, Space types the rest of the best word, as "
+                 "on a phone. Backspace straight after puts back what you typed.", predictSpaceOn(), predictSpaceToggleCb);
 #endif
 #if defined(HAS_TDECK_KEYBOARD) || defined(HAS_M9_KEYBOARD)
     setSwitchRow(c, "Enter key sends message", "Off: Enter adds a new line, and Send sends.",
