@@ -1309,7 +1309,10 @@ for (const b of document.querySelectorAll("[data-goto]")) b.addEventListener("cl
 }
 // Embedded on another site (e.g. WordPress): ?theme=light|dark pins the look, and the
 // page reports its height so the host page can size the frame (see wordpress/).
-try { const th = new URLSearchParams(location.search).get("theme"); if (th === "light" || th === "dark") document.documentElement.dataset.theme = th; } catch {}
+const setTheme = th => { if (th === "light" || th === "dark") document.documentElement.dataset.theme = th; };
+try { setTheme(new URLSearchParams(location.search).get("theme")); } catch {}
+// The host page (e.g. the WordPress block following DarkMySite's day/night switch) can change it live.
+window.addEventListener("message", e => { if (e.source === window.parent && e.data?.mediamesh === "theme") setTheme(e.data.theme); });
 if (window.parent !== window) {
   const post = () => { try { window.parent.postMessage({ mediamesh: "height", h: Math.ceil(document.documentElement.getBoundingClientRect().height) }, "*"); } catch {} };
   if (window.ResizeObserver) new ResizeObserver(post).observe(document.documentElement);

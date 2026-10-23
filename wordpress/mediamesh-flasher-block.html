@@ -2,18 +2,33 @@
      Paste this whole block into a "Custom HTML" block (needs an administrator account).
      It shows the live flasher from GitHub Pages and grows to fit, so you never need to re-paste it.
      Visitors flash from Chrome or Edge on a computer.
-     THEME: "auto" follows each visitor's light or dark setting; "light" or "dark" always uses that look.
+     THEME: "site" follows the site's day/night switch (DarkMySite): white in regular mode, dark in
+     night mode, and it changes the moment the switch is flipped. "auto" follows the visitor's
+     computer setting instead; "light" or "dark" always uses that look.
      Open a tab directly by adding #cascade, #spectra, #tdeck, #m9, #pager or #p4 to this page's URL. -->
 <iframe id="mediamesh-flasher" title="MediaMesh Flasher" allow="serial" style="display:block;width:100%;height:2400px;border:0;background:transparent"></iframe>
 <script>
 (function () {
-  var THEME = "auto";
+  var THEME = "site";
+  var DARK_CLASS = "darkmysite_dark_mode_enabled";   // what DarkMySite puts on <html> in night mode
   var SITE = "https://jade-on-mesh.github.io";
   var frame = document.getElementById("mediamesh-flasher");
-  // A framed page only sees dark mode when its frame allows both schemes;
-  // without this, a WordPress theme that doesn't declare dark mode keeps it light.
-  frame.style.colorScheme = THEME === "auto" ? "light dark" : THEME;
-  frame.src = SITE + "/wadamesh-tak/" + (THEME === "auto" ? "" : "?theme=" + THEME) + location.hash;
+  var root = document.documentElement;
+  function current() {
+    if (THEME === "site") return root.classList.contains(DARK_CLASS) ? "dark" : "light";
+    return THEME === "light" || THEME === "dark" ? THEME : "";
+  }
+  var shown = current();
+  frame.style.colorScheme = shown || "light dark";
+  frame.src = SITE + "/wadamesh-tak/" + (shown ? "?theme=" + shown : "") + location.hash;
+  if (THEME === "site") {
+    new MutationObserver(function () {
+      var now = current();
+      if (now === shown) return;
+      shown = now; frame.style.colorScheme = now;
+      if (frame.contentWindow) frame.contentWindow.postMessage({ mediamesh: "theme", theme: now }, SITE);
+    }).observe(root, { attributes: true, attributeFilter: ["class"] });
+  }
   window.addEventListener("message", function (e) {
     if (e.origin === SITE && e.data && e.data.mediamesh === "height") frame.style.height = e.data.h + "px";
   });
