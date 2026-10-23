@@ -209,6 +209,7 @@ footer .wrap{display:flex;flex-wrap:wrap;gap:6px 18px}
     </div>
   </section>
 
+  <p id="firefoxBanner" class="banner info" hidden><span><b>Using Firefox?</b> Its USB serial support is new and doesn't work with every board yet. If your device won't connect, use Chrome or Edge instead.</span></p>
   <p id="serialBanner" class="banner warn" hidden><span><b>This browser can't talk to USB devices.</b> Open this page in Chrome or Edge on a Windows, Mac, Linux or ChromeOS computer. Phones, Safari and Firefox can't flash.</span></p>
 
   <!-- ===== Wadamesh TAK ===== -->
@@ -1311,7 +1312,7 @@ $("install").onclick = async () => {
   } catch (e) {
     const m = String(e?.message || e); log(m, "e");
     const hint = /connect|sync|timed? ?out/i.test(m)
-      ? `<br><b>Put the board in download mode by hand, then press Install again:</b> ${esc(t.boot.replace(/^(Usually|Most boards) connects? on (its|their) own\. If not: /, ""))} The next try connects without resetting the board, so it stays in download mode.`
+      ? (/Firefox\//.test(navigator.userAgent) ? "<br><b>In Firefox:</b> if this keeps failing, use Chrome or Edge; Firefox's USB serial support doesn't work with every board yet." : "") + `<br><b>Put the board in download mode by hand, then press Install again:</b> ${esc(t.boot.replace(/^(Usually|Most boards) connects? on (its|their) own\. If not: /, ""))} The next try connects without resetting the board, so it stays in download mode.`
       : "";
     result("bad", esc(m) + hint); $("phase").textContent = "Stopped";
     if (/Failed to open|lost|disconnected|NetworkError/i.test(m)) S.port = null;
@@ -1358,6 +1359,7 @@ if (window.parent !== window) {
   if (window.ResizeObserver) new ResizeObserver(post).observe(document.documentElement);
   post();
 }
+if ("serial" in navigator && /Firefox\//.test(navigator.userAgent)) $("firefoxBanner").hidden = false;
 if (!("serial" in navigator)) { $("serialBanner").hidden = false; $("install").disabled = true; $("monitor").disabled = true; }
 navigator.serial?.addEventListener?.("disconnect", e => { if (e.target === S.port) { S.port = null; log("Device unplugged.", "w"); } });
 const hash = (location.hash || (() => { try { return parent.location.hash; } catch { return ""; } })()).slice(1);
