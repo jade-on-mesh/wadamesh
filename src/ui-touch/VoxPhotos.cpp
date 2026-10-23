@@ -21,6 +21,9 @@ namespace VoxPhotos {
 namespace {
 
 fs::FS* g_fs = nullptr;
+// Folder the files go in: "" (the root) on internal flash, "/meshcomod" when
+// they follow the data store onto the SD card.
+char g_root[24] = "";
 uint32_t g_version = 0;
 // Photos and talks whose fetch changed since stateVersion() last looked, and the
 // status each was last seen in: a packet arriving changes only the progress, a
@@ -57,7 +60,63 @@ const Seen* seen(uint32_t sid) {
 }
 
 void storePath(uint32_t sid, bool voice, char* out, size_t cap) {
-  snprintf(out, cap, voice ? "/vox_%08lx.ve3" : "/vox_%08lx.vi1", (unsigned long)sid);
+  snprintf(out, cap, voice ? "%s/vox_%08lx.ve3" : "%s/vox_%08lx.vi1", g_root, (unsigned long)sid);
+}
+
+// Photos and clips live on internal flash and nothing else ever removes them,
+// so a radio that has been on the air long enough fills it: the download
+// completes and then "couldn't store it", and a new recording can't be kept.
+// When a write doesn't fit, the oldest stored photo or clip (other than the
+// one being written) makes room, and the write is tried again. Only our own
+// /vox_<sid>.vi1|.ve3 files are touched: OTP pads, settings and the rest of
+// internal storage are never removed for this.
+static bool isVoxFile(const char* n) {
+  const size_t l = strlen(n);
+  return l == 16 && !strncmp(n, "vox_", 4) && (!strcmp(n + 12, ".ve3") || !strcmp(n + 12, ".vi1"));
+}
+
+static const char* baseName(const char* p) {
+  const char* b = strrchr(p, '/');
+  return b ? b + 1 : p;
+}
+
+static bool pruneOldestVox(const char* keep) {
+  File dir = g_fs->open(g_root[0] ? g_root : "/");
+  if (!dir || !dir.isDirectory()) return false;
+  char oldest[48] = "";
+  time_t oldest_t = 0;
+  int n = 0;
+  for (File f = dir.openNextFile(); f; f = dir.openNextFile()) {
+    const char* nm = baseName(f.name());
+    if (!f.isDirectory() && isVoxFile(nm) && strcmp(nm, baseName(keep))) {
+      ++n;
+      const time_t t = f.getLastWrite();   // 0 without timestamps: the first listed goes
+      if (!oldest[0] || t < oldest_t) { snprintf(oldest, sizeof oldest, "%s/%s", g_root, nm); oldest_t = t; }
+    }
+    f.close();
+  }
+  dir.close();
+  if (!oldest[0]) return false;
+  const bool ok = g_fs->remove(oldest);
+  Serial.printf("[VOX] storage full: removed %s to make room (%d stored)\n", oldest, n);
+  return ok;
+}
+
+// Writes [lead byte][data] to `path`, making room from the oldest photos and
+// clips when it doesn't fit. False only if it still can't be written.
+static bool writeStore(const char* path, const uint8_t* lead, const uint8_t* data, size_t len) {
+  for (int tries = 0; tries < 16; ++tries) {
+    File f = g_fs->open(path, "w");
+    bool ok = (bool)f;
+    if (ok) {
+      ok = (!lead || f.write(lead, 1) == 1) && f.write(data, len) == len;
+      f.close();
+    }
+    if (ok) return true;
+    g_fs->remove(path);
+    if (!pruneOldestVox(path)) return false;
+  }
+  return false;
 }
 
 // Case-insensitive name match that ignores emoji variation selectors (U+FE0E,
@@ -139,7 +198,7 @@ class MeshIo : public VoxFetchIo {
 
   bool hasPayload(uint32_t sid) override {
     if (!g_fs) return false;
-    char path[32];
+    char path[40];
     storePath(sid, false, path, sizeof path);
     if (g_fs->exists(path)) return true;
     storePath(sid, true, path, sizeof path);
@@ -150,15 +209,9 @@ class MeshIo : public VoxFetchIo {
     if (!g_fs) return false;
     const Seen* e = seen(sid);
     const bool voice = e && e->kind != VoxWire::kImage;
-    char path[32];
+    char path[40];
     storePath(sid, voice, path, sizeof path);
-    File f = g_fs->open(path, "w");
-    if (!f) return false;
-    size_t w = 0;
-    if (voice) w = f.write(&e->mode, 1) == 1 ? f.write(data, len) : 0;
-    else w = f.write(data, len);
-    f.close();
-    if (w != len) { g_fs->remove(path); return false; }
+    if (!writeStore(path, voice ? &e->mode : nullptr, data, len)) return false;
     Serial.printf("[VOX] %s %08lx complete, %u bytes\n", voice ? "voice" : "photo", (unsigned long)sid,
                   (unsigned)len);
     return true;
@@ -247,7 +300,10 @@ bool canPlay(const VoxWire::Envelope& env) {
 #endif
 }
 
-void setStore(fs::FS* fs) { g_fs = fs; }
+void setStore(fs::FS* fs, const char* root) {
+  g_fs = fs;
+  snprintf(g_root, sizeof g_root, "%s", root ? root : "");
+}
 
 bool onDirectText(const char* text, const uint8_t sender_pub[32]) {
   if (g_serve.onDirectText(text)) return true;   // VR3: someone wants a clip of ours
@@ -313,7 +369,7 @@ bool loadVoice(uint32_t sid, int* mode, uint8_t** frames, size_t* len) {
 
 bool loadFile(uint32_t sid, bool voice, uint8_t** data, size_t* len) {
   if (!g_fs || !data || !len) return false;
-  char path[32];
+  char path[40];
   storePath(sid, voice, path, sizeof path);
   File f = g_fs->open(path, "r");
   if (!f) return false;
@@ -363,15 +419,9 @@ bool addRecording(uint8_t wire_mode, uint8_t* bits, size_t len, uint32_t ms, cha
   }
   // Stored like a downloaded clip ([wire mode][frames]), so the bubble plays it
   // and VoxServe can answer for it after a reboot too.
-  char path[32];
+  char path[40];
   storePath(sid, true, path, sizeof path);
-  File f = g_fs->open(path, "w");
-  bool ok = (bool)f;
-  if (ok) {
-    ok = f.write(&wire_mode, 1) == 1 && f.write(bits, len) == len;
-    f.close();
-    if (!ok) g_fs->remove(path);
-  }
+  const bool ok = writeStore(path, &wire_mode, bits, len);
   free(bits);
   if (!ok) return false;
   VoxWire::Envelope env;
@@ -387,14 +437,10 @@ bool addRecording(uint8_t wire_mode, uint8_t* bits, size_t len, uint32_t ms, cha
 
 bool storeHeard(uint32_t sid, uint8_t wire_mode, const uint8_t* bits, size_t len) {
   if (!g_fs || !sid || !bits || len == 0) return false;
-  char path[32];
+  char path[40];
   storePath(sid, true, path, sizeof path);
   if (g_fs->exists(path)) return true;
-  File f = g_fs->open(path, "w");
-  if (!f) return false;
-  const bool ok = f.write(&wire_mode, 1) == 1 && f.write(bits, len) == len;
-  f.close();
-  if (!ok) { g_fs->remove(path); return false; }
+  if (!writeStore(path, &wire_mode, bits, len)) return false;
   VoxWire::Envelope env;
   env.sid = sid;
   env.kind = VoxWire::kCodec2;
@@ -407,7 +453,7 @@ bool storeHeard(uint32_t sid, uint8_t wire_mode, const uint8_t* bits, size_t len
 
 void discardRecording(uint32_t sid) {
   if (!g_fs || !sid) return;
-  char path[32];
+  char path[40];
   storePath(sid, true, path, sizeof path);
   g_fs->remove(path);
   bumpState();
@@ -416,7 +462,7 @@ void discardRecording(uint32_t sid) {
 
 bool haveVoice(uint32_t sid) {
   if (!g_fs) return false;
-  char path[32];
+  char path[40];
   storePath(sid, true, path, sizeof path);
   return g_fs->exists(path);
 }

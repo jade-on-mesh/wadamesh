@@ -18,7 +18,8 @@ namespace fs { class FS; }
 namespace VoxPhotos {
 
 // Where finished photos are kept (the internal filesystem; set once by the UI).
-void setStore(fs::FS* fs);
+// `root`: the folder the files go in ("" for the filesystem's root).
+void setStore(fs::FS* fs, const char* root = "");
 
 // Mesh hooks. onDirectText returns true for a VR3 fetch request (a control
 // message between apps; it never belongs in the chat).

@@ -82733,12 +82733,36 @@ void UITask::loop() {
   {
     static bool s_vox_store_set = false;
     static uint32_t s_vox_seen = 0, s_vox_paint_ms = 0;
-    if (!s_vox_store_set) {
-      VoxPhotos::setStore(backupInternalFs());
-      // OTP Messenger keeps its pads and messages on the same internal store.
+    static bool s_otp_set = false;
+    if (!s_otp_set) {
+      // OTP Messenger keeps its pads and messages on the internal store.
       OtpMessenger::begin(backupInternalFs());
       OtpMessenger::setCallbacks(otpui::toastCb, otpui::incomingCb);
-      s_vox_store_set = true;
+      s_otp_set = true;
+    }
+    static uint32_t s_vox_store_try_ms = 0;
+    if (!s_vox_store_set && (!s_vox_store_try_ms || millis() - s_vox_store_try_ms >= 5000)) {
+      s_vox_store_try_ms = millis() | 1;   // a failed mount logs: try every 5 s, not every pass
+      // Photos and voice clips: internal flash. On a radio whose internal flash
+      // never mounted (it boots with its data on the SD card instead, and Files
+      // shows Internal storage 0 B / 0 B) every save failed: "couldn't store it"
+      // after a full download, and no recording could be kept. They follow the
+      // data store onto the card then, in its /meshcomod folder. Retried each
+      // pass until one is available (the card can mount after boot).
+      fs::FS* in = backupInternalFs();
+#if defined(ESP32) && !defined(HAS_TDISPLAY_P4) && !defined(HAS_CROWPANEL_P4_101) && !defined(HAS_TANMATSU)
+      const bool in_ok = SPIFFS.totalBytes() > 0;
+#else
+      const bool in_ok = in != nullptr;
+#endif
+      if (in_ok) {
+        VoxPhotos::setStore(in);
+        s_vox_store_set = true;
+      } else if (uiDataFsReady() && s_ui_data_fs && s_ui_data_root[0]) {
+        VoxPhotos::setStore(s_ui_data_fs, s_ui_data_root);
+        Serial.printf("[VOX] internal storage not mounted: photos and voice on %s\n", s_ui_data_root);
+        s_vox_store_set = true;
+      }
     }
     uiCp("ui:vox");
     VoxPhotos::tick();
