@@ -318,11 +318,15 @@ static void rangeTo(double lat, double lon, char* out, size_t cap) {
   TeamWire::rangeBearing(TeamWire::distanceM(ml, mo, lat, lon), TeamWire::bearingDeg(ml, mo, lat, lon), out, cap);
 }
 
+// A sheet's "Map" (teammates, pins, watched reports...): the map centred on the
+// point, zoomed in to street level if it was further out (as the On map list
+// does), so the point itself is what's in view.
 static void showOnMap(double lat, double lon) {
   s_map_center_lat = lat;
   s_map_center_lon = lon;
   s_map_view_inited = true;
-  goToTab(MAP_TAB_INDEX);
+  if (s_map_zoom < 14) s_map_zoom = 14;
+  goToTab(MAP_TAB_INDEX);   // on the map already, this repaints it at the new centre
 }
 
 #if CAP_TAK_EXTRAS
