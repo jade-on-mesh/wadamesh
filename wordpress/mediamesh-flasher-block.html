@@ -2,14 +2,17 @@
      Paste this whole block into a "Custom HTML" block (needs an administrator account).
      It shows the live flasher from GitHub Pages and grows to fit, so you never need to re-paste it.
      Visitors flash from Chrome or Edge on a computer.
-     THEME: "light", "dark", or "auto" (follows the visitor's system setting).
+     THEME: "auto" follows each visitor's light or dark setting; "light" or "dark" always uses that look.
      Open a tab directly by adding #cascade, #spectra, #tdeck, #m9, #pager or #p4 to this page's URL. -->
 <iframe id="mediamesh-flasher" title="MediaMesh Flasher" allow="serial" style="display:block;width:100%;height:2400px;border:0;background:transparent"></iframe>
 <script>
 (function () {
-  var THEME = "light";
+  var THEME = "auto";
   var SITE = "https://jade-on-mesh.github.io";
   var frame = document.getElementById("mediamesh-flasher");
+  // A framed page only sees dark mode when its frame allows both schemes;
+  // without this, a WordPress theme that doesn't declare dark mode keeps it light.
+  frame.style.colorScheme = THEME === "auto" ? "light dark" : THEME;
   frame.src = SITE + "/wadamesh-tak/" + (THEME === "auto" ? "" : "?theme=" + THEME) + location.hash;
   window.addEventListener("message", function (e) {
     if (e.origin === SITE && e.data && e.data.mediamesh === "height") frame.style.height = e.data.h + "px";
