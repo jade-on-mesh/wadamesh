@@ -16926,8 +16926,13 @@ static void buildMediaMeshCard() {
     s_mm_scan_val = s_mm_pre_val = s_mm_toa_val = s_mm_temp_val = nullptr;
     s_mm_mode_row = s_mm_use_row = s_mm_share_row = s_mm_sw_val = s_mm_pkt_val = s_mm_warn_val = nullptr;
     s_mm_t_freq_ta = s_mm_t_bw_ta = s_mm_t_sf_ta = s_mm_t_cr_ta = nullptr;
-    setNote(c, "This radio can't run a second frequency. It needs an SX1262 board such as the T-Deck or Heltec V4. "
-               "The Terminal still takes tempradio.");
+    if (mediamesh::sx1262Polled())   // T-Display P4: an SX1262, but its packet signal (DIO1) is behind an I/O expander
+      setNote(c, "This radio can't run a second frequency. Its SX1262 signals a packet through an I/O expander, "
+                 "not straight to the processor, so it can't hop between two frequencies quickly enough. "
+                 "The Terminal still takes tempradio.");
+    else
+      setNote(c, "This radio can't run a second frequency. It needs an SX1262 board such as the T-Deck or Heltec V4. "
+                 "The Terminal still takes tempradio.");
     mmcovBuildRows(c);   // the repeaters' MediaMesh can still be mapped
     return;
   }

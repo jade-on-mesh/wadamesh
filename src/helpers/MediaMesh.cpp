@@ -201,6 +201,14 @@ bool supported() {
 #endif
 }
 
+bool sx1262Polled() {
+#if !defined(MEDIAMESH_RADIO) && (defined(USE_SX1262) || defined(USE_SX1268)) && defined(MESH_RADIO_DIO1_POLLED)
+  return true;
+#else
+  return false;
+#endif
+}
+
 const Config& config() {
   ensureLoaded();
   return s_rt.saved;
