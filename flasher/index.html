@@ -272,7 +272,7 @@ footer .wrap{display:flex;flex-wrap:wrap;gap:6px 18px}
       <div class="opt">
         <span class="ol" id="sRegionL">Region</span>
         <div class="seg" id="sRegion" role="group" aria-labelledby="sRegionL">
-          <button type="button" data-region="us" aria-pressed="true">US (915 MHz band)</button>
+          <button type="button" data-region="us" aria-pressed="true">US/Can (915 MHz band)</button>
           <button type="button" data-region="eu" aria-pressed="false">EU (868 MHz band)</button>
         </div>
         <p class="oh">Sets the first-boot radio defaults. A node you upgrade keeps its saved radio settings.</p>
@@ -472,6 +472,7 @@ $("tab-wadamesh").onclick = () => setTab("wadamesh");
 $("tab-cascade").onclick = () => setTab("cascade");
 $("tab-spectra").onclick = () => setTab("spectra");
 function refreshTarget() {
+  S.manualBoot = false;
   S.target = S.tab === "wadamesh" ? Wada.target() : S.tab === "cascade" ? Cascade.target() : Spectra.target();
   S.local = null; $("fileIn").value = ""; $("fileInfo").textContent = ""; $("forceRow").hidden = true; $("force").checked = false;
   renderInstall();
@@ -1227,32 +1228,69 @@ $("install").onclick = async () => {
   await stopMonitor(); setBusy(true); result(); let transport;
   try {
     const port = await pickPort();               // first, while the click still counts as a user gesture
-    const [{ ESPLoader, Transport, ClassicReset, UsbJtagSerialReset }, data] = await Promise.all([loadEsptool(), getFirmware(t)]);
+    const [{ ESPLoader, Transport }, data] = await Promise.all([loadEsptool(), getFirmware(t)]);
     const img = inspectImage(data); if (img.err) throw new Error(img.err);
     if (t.chip && img.chip !== t.chip) throw new Error(`The image is for an ${img.chip}, but this device uses an ${t.chip}.`);
 
     setPhase("Connecting", 0, "");
-    // esptool-js picks its reset from the USB IDs the browser reports: the
-    // native-USB (USB-Serial-JTAG) reset for Espressif 303a:1001, else the
-    // classic DTR/RTS reset for USB-UART chips. Some browsers (Firefox) report
-    // no IDs, so a native-USB board like the ThinkNode M9 got the classic reset
-    // and never entered download mode. Without IDs, alternate both resets
-    // across the connect attempts; if a whole round fails, reconnect once and
-    // try the other way.
+    // Getting the chip into download mode. esptool-js picks a reset from the USB IDs:
+    // the native-USB (USB-Serial-JTAG) sequence for Espressif 303a:1001, else the
+    // classic DTR/RTS auto-reset used by USB-UART chips (the ThinkNode M9's CH340).
+    // Browsers differ in how they apply DTR/RTS changes (Firefox's Web Serial is
+    // newer), so these resets are our own: they set only defined signals (no empty
+    // `break`), alternate setting both lines in one call with one-at-a-time calls
+    // as Espressif's esptool.py does, at short and long timings, and log any
+    // refusal. After a failed install the next press skips the reset entirely,
+    // for a board put into download mode by hand.
     const info = (() => { try { return port.getInfo() || {}; } catch { return {}; } })();
     const idsKnown = !!(info.usbVendorId && info.usbProductId);
+    const nativeUsb = info.usbVendorId === 0x303a && info.usbProductId === 0x1001;
     if (!idsKnown) log("This browser doesn't say which USB chip the board uses, so the flasher tries both reset methods.", "d");
-    const mixed = { classicReset: (tr, delay) => delay < 100 ? new UsbJtagSerialReset(tr) : new ClassicReset(tr, delay) };
-    const plans = idsKnown ? [{ mode: "default_reset" }, { mode: "default_reset", resets: mixed }]
-                           : [{ mode: "default_reset", resets: mixed }, { mode: "usb_reset" }];
+    let refusedLogged = false;
+    const signals = async (tr, sig) => {
+      try { await tr.device.setSignals(sig); }
+      catch (e) { if (!refusedLogged) { refusedLogged = true; log(`The browser refused to set the USB reset lines (${e.message || e}). Put the board in download mode by hand: ${t.boot.replace(/^(Usually|Most boards) connects? on (its|their) own\. If not: /, "")}`, "w"); } }
+    };
+    const pause = ms => new Promise(r => setTimeout(r, ms));
+    const classicTogether = (tr, d) => ({ async reset() {
+      await signals(tr, { dataTerminalReady: false, requestToSend: true }); await pause(100);    // IO0 high, EN low: hold in reset
+      await signals(tr, { dataTerminalReady: true, requestToSend: false }); await pause(d);      // IO0 low, EN high: boot into download mode
+      await signals(tr, { dataTerminalReady: false, requestToSend: false }); } });
+    const classicSeparate = (tr, d) => ({ async reset() {
+      await signals(tr, { dataTerminalReady: false }); await signals(tr, { requestToSend: true }); await pause(100);
+      await signals(tr, { dataTerminalReady: true }); await signals(tr, { requestToSend: false }); await pause(d);
+      await signals(tr, { dataTerminalReady: false }); } });
+    const usbJtag = tr => ({ async reset() {
+      await signals(tr, { dataTerminalReady: false, requestToSend: false }); await pause(100);
+      await signals(tr, { dataTerminalReady: true, requestToSend: false }); await pause(100);
+      await signals(tr, { dataTerminalReady: false, requestToSend: true }); await pause(100);
+      await signals(tr, { dataTerminalReady: false, requestToSend: false }); } });
+    // esptool builds classicReset(50 ms) and classicReset(550 ms) once and reuses them for
+    // every attempt, so switch between the two signalling styles on each reset call.
+    const classic = (tr, d) => { let n = 0; return { reset: () => (n++ % 2 ? classicSeparate : classicTogether)(tr, d).reset() }; };
+    const resetsFor = mode => ({ classicReset: mode === "mixed" ? ((tr, d) => d < 100 ? usbJtag(tr) : classic(tr, d)) : classic,
+                                 usbJTAGSerialReset: usbJtag,
+                                 hardReset: (tr, otg) => ({ async reset() {
+                                   if (otg) { await pause(200); await signals(tr, { requestToSend: false }); await pause(200); return; }
+                                   await signals(tr, { dataTerminalReady: false, requestToSend: true }); await pause(100);
+                                   await signals(tr, { dataTerminalReady: false, requestToSend: false }); } }) });
+    const manual = S.manualBoot;
+    const plans = manual ? [{ mode: "no_reset", resets: resetsFor() }, { mode: "default_reset", resets: resetsFor(idsKnown ? "" : "mixed") }]
+                : nativeUsb ? [{ mode: "usb_reset", resets: resetsFor() }, { mode: "default_reset", resets: resetsFor("mixed") }]
+                : idsKnown ? [{ mode: "default_reset", resets: resetsFor() }, { mode: "default_reset", resets: resetsFor("mixed") }]
+                : [{ mode: "default_reset", resets: resetsFor("mixed") }, { mode: "usb_reset", resets: resetsFor() }];
+    if (manual) log("Connecting without a reset, for a board already in download mode…", "d");
     const terminal = { clean() {}, writeLine: s => log(s), write: s => logRaw(s) };
     let loader, desc;
     for (let i = 0; i < plans.length; i++) {
       transport = new Transport(port, false);
-      loader = new ESPLoader({ transport, baudrate: CONFIG.baud, terminal, ...(plans[i].resets ? { resetConstructors: plans[i].resets } : {}) });
-      try { desc = await loader.main(plans[i].mode); break; }
+      loader = new ESPLoader({ transport, baudrate: CONFIG.baud, terminal, resetConstructors: plans[i].resets });
+      try { desc = await loader.main(plans[i].mode); S.manualBoot = false; break; }
       catch (e) {
-        if (i === plans.length - 1 || !/connect|sync|timed? ?out/i.test(String(e?.message || e))) throw e;
+        if (i === plans.length - 1 || !/connect|sync|timed? ?out/i.test(String(e?.message || e))) {
+          if (/connect|sync|timed? ?out/i.test(String(e?.message || e))) S.manualBoot = true;   // next press: no reset
+          throw e;
+        }
         log("No answer yet; trying the other reset method…", "w");
         try { await transport.disconnect(); } catch {}
         transport = null; await sleep(300);
@@ -1272,7 +1310,9 @@ $("install").onclick = async () => {
     result("ok", `<b>${esc(t.label)} is installed.</b> If the screen stays black or nothing happens, unplug the device and plug it back in.`);
   } catch (e) {
     const m = String(e?.message || e); log(m, "e");
-    const hint = /connect|sync|timed? ?out/i.test(m) ? ` ${esc(t.boot.replace(/^(Usually|Most boards) connects? on (its|their) own\. If not: /, "Put it in download mode: "))}` : "";
+    const hint = /connect|sync|timed? ?out/i.test(m)
+      ? `<br><b>Put the board in download mode by hand, then press Install again:</b> ${esc(t.boot.replace(/^(Usually|Most boards) connects? on (its|their) own\. If not: /, ""))} The next try connects without resetting the board, so it stays in download mode.`
+      : "";
     result("bad", esc(m) + hint); $("phase").textContent = "Stopped";
     if (/Failed to open|lost|disconnected|NetworkError/i.test(m)) S.port = null;
   } finally { try { await transport?.disconnect(); } catch {} setBusy(false); }
