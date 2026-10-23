@@ -70,6 +70,67 @@ void storePath(uint32_t sid, bool voice, char* out, size_t cap) {
 // one being written) makes room, and the write is tried again. Only our own
 // /vox_<sid>.vi1|.ve3 files are touched: OTP pads, settings and the rest of
 // internal storage are never removed for this.
+// Whether a photo or clip is stored, remembered. Every photo and voice bubble
+// asks (download state, "tap to play", how it got here), several times each,
+// on every layout of the open chat: all of the channel's bubbles, not just the
+// visible ones, and once a second while a transfer runs. Each ask was a
+// filesystem exists(), which SPIFFS answers by scanning its page tables (slow,
+// and slower as it fills) and the SD card over the bus the T-Deck's screen and
+// radio share: opening a channel with many photos and clips took many seconds.
+// The answers live here; every write and remove below keeps them true.
+struct HaveEntry { uint32_t sid; uint8_t bits; };   // bits: 1/4 photo/voice known, 2/8 present
+static HaveEntry g_have[128];
+static uint8_t g_have_next = 0;
+
+static void haveClear() { memset(g_have, 0, sizeof g_have); g_have_next = 0; }
+
+static HaveEntry* haveFind(uint32_t sid, bool add) {
+  for (auto& h : g_have) if (h.bits && h.sid == sid) return &h;
+  if (!add) return nullptr;
+  HaveEntry& h = g_have[g_have_next];
+  g_have_next = (uint8_t)((g_have_next + 1) % (sizeof g_have / sizeof g_have[0]));
+  h.sid = sid;
+  h.bits = 0;
+  return &h;
+}
+
+static void haveSet(uint32_t sid, bool voice, bool present) {
+  HaveEntry* h = haveFind(sid, true);
+  const uint8_t known = voice ? 4 : 1, has = voice ? 8 : 2;
+  h->bits = (uint8_t)((h->bits & ~has) | known | (present ? has : 0));
+}
+
+// From a store path ("<root>/vox_<sid>.ve3|.vi1"): its sid and kind.
+static bool havePathKey(const char* path, uint32_t* sid, bool* voice) {
+  const char* b = strrchr(path, '/');
+  b = b ? b + 1 : path;
+  if (strlen(b) != 16 || strncmp(b, "vox_", 4)) return false;
+  char hex[9];
+  memcpy(hex, b + 4, 8);
+  hex[8] = '\0';
+  *sid = (uint32_t)strtoul(hex, nullptr, 16);
+  *voice = !strcmp(b + 12, ".ve3");
+  return true;
+}
+
+static void haveSetPath(const char* path, bool present) {
+  uint32_t sid; bool voice;
+  if (havePathKey(path, &sid, &voice)) haveSet(sid, voice, present);
+}
+
+static bool storeHas(uint32_t sid, bool voice) {
+  if (!g_fs) return false;
+  const uint8_t known = voice ? 4 : 1, has = voice ? 8 : 2;
+  if (const HaveEntry* h = haveFind(sid, false)) {
+    if (h->bits & known) return (h->bits & has) != 0;
+  }
+  char path[40];
+  storePath(sid, voice, path, sizeof path);
+  const bool present = g_fs->exists(path);
+  haveSet(sid, voice, present);
+  return present;
+}
+
 static bool isVoxFile(const char* n) {
   const size_t l = strlen(n);
   return l == 16 && !strncmp(n, "vox_", 4) && (!strcmp(n + 12, ".ve3") || !strcmp(n + 12, ".vi1"));
@@ -98,6 +159,7 @@ static bool pruneOldestVox(const char* keep) {
   dir.close();
   if (!oldest[0]) return false;
   const bool ok = g_fs->remove(oldest);
+  haveSetPath(oldest, false);
   Serial.printf("[VOX] storage full: removed %s to make room (%d stored)\n", oldest, n);
   return ok;
 }
@@ -112,8 +174,9 @@ static bool writeStore(const char* path, const uint8_t* lead, const uint8_t* dat
       ok = (!lead || f.write(lead, 1) == 1) && f.write(data, len) == len;
       f.close();
     }
-    if (ok) return true;
+    if (ok) { haveSetPath(path, true); return true; }
     g_fs->remove(path);
+    haveSetPath(path, false);
     if (!pruneOldestVox(path)) return false;
   }
   return false;
@@ -197,12 +260,7 @@ class MeshIo : public VoxFetchIo {
   }
 
   bool hasPayload(uint32_t sid) override {
-    if (!g_fs) return false;
-    char path[40];
-    storePath(sid, false, path, sizeof path);
-    if (g_fs->exists(path)) return true;
-    storePath(sid, true, path, sizeof path);
-    return g_fs->exists(path);
+    return storeHas(sid, false) || storeHas(sid, true);
   }
 
   bool savePayload(uint32_t sid, const uint8_t* data, size_t len) override {
@@ -302,6 +360,7 @@ bool canPlay(const VoxWire::Envelope& env) {
 
 void setStore(fs::FS* fs, const char* root) {
   g_fs = fs;
+  haveClear();   // another store: nothing known about it yet
   snprintf(g_root, sizeof g_root, "%s", root ? root : "");
 }
 
@@ -439,7 +498,7 @@ bool storeHeard(uint32_t sid, uint8_t wire_mode, const uint8_t* bits, size_t len
   if (!g_fs || !sid || !bits || len == 0) return false;
   char path[40];
   storePath(sid, true, path, sizeof path);
-  if (g_fs->exists(path)) return true;
+  if (storeHas(sid, true)) return true;
   if (!writeStore(path, &wire_mode, bits, len)) return false;
   VoxWire::Envelope env;
   env.sid = sid;
@@ -456,15 +515,11 @@ void discardRecording(uint32_t sid) {
   char path[40];
   storePath(sid, true, path, sizeof path);
   g_fs->remove(path);
+  haveSet(sid, true, false);
   bumpState();
   Serial.printf("[VOX] discarded clip %08lx\n", (unsigned long)sid);
 }
 
-bool haveVoice(uint32_t sid) {
-  if (!g_fs) return false;
-  char path[40];
-  storePath(sid, true, path, sizeof path);
-  return g_fs->exists(path);
-}
+bool haveVoice(uint32_t sid) { return storeHas(sid, true); }
 
 }  // namespace VoxPhotos
