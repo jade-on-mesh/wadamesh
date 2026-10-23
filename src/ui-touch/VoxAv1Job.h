@@ -35,7 +35,9 @@ struct Stats {
 
 // Starts decoding `payload` (a whole photo payload: [0x01][AV1 OBUs]). The bytes
 // are copied. False if a decode is already running or the copy can't be made.
-bool start(const uint8_t* payload, size_t len, int max_side = 768);
+// `max_side`: 1024, the largest MeshCore Open TAK sends ("Super Sharp"); the
+// other detail levels stop at 768.
+bool start(const uint8_t* payload, size_t len, int max_side = 1024);
 
 State state();
 
