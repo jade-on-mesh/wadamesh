@@ -311,6 +311,7 @@ footer .wrap{display:flex;flex-wrap:wrap;gap:6px 18px}
       <div class="actions">
         <button class="btn primary" id="install" type="button">Install firmware</button>
         <button class="btn" id="monitor" type="button">Watch serial log</button>
+        <span class="oh" id="installHint"></span>
       </div>
       <div class="prog" id="prog" hidden>
         <div class="pl"><b id="phase">Ready</b><span id="pct" class="mono"></span></div>
@@ -907,8 +908,13 @@ async function installStm32(t) {
 /* ================= install step ================= */
 function renderInstall() {
   const t = S.target || { kind: "none", msg: "" };
-  $("espBox").hidden = t.kind !== "esp" && t.kind !== "stm32"; $("uf2Box").hidden = t.kind !== "uf2"; $("dlBox").hidden = t.kind !== "download";
+  const flashable = t.kind === "esp" || t.kind === "stm32";
+  // The Install button stays on screen (greyed out with a reason) until a flashable build is picked.
+  $("espBox").hidden = !(flashable || t.kind === "none"); $("uf2Box").hidden = t.kind !== "uf2"; $("dlBox").hidden = t.kind !== "download";
+  $("bootTip").hidden = !flashable;
+  if (!flashable) { $("drop").hidden = true; $("useLocal").hidden = true; $("eraseRow").hidden = true; $("xlRow").hidden = true; }
   $("iFile").innerHTML = ""; $("iStatus").innerHTML = ""; $("result").innerHTML = ""; $("prog").hidden = true;
+  updateInstallBtn();
   if (t.kind === "none") { $("iSub").textContent = ""; if (t.msg) $("iStatus").innerHTML = `<p class="banner info"><span>${esc(t.msg)}</span></p>`; return; }
   $("iSub").textContent = t.label;
   if (t.kind === "esp") {
@@ -933,9 +939,11 @@ function renderInstall() {
     const a = $("uf2Actions"); a.innerHTML = "";
     if (t.uf2) a.innerHTML += `<a class="btn primary" href="${esc(t.uf2.url)}" target="_blank" rel="noopener">Download .uf2</a>`;
     if (t.zip) a.innerHTML += `<a class="btn" href="${esc(t.zip.url)}" target="_blank" rel="noopener">Serial DFU .zip</a>`;
+    $("iSub").textContent = `${t.label}. nRF52 boards don't use the Install button: they install by dragging a file onto the board, like a USB stick.`;
     $("iFile").innerHTML = t.uf2 ? `File <code>${esc(t.uf2.name)}</code>` : "";
     $("uf2Note").innerHTML = `${esc(t.note)} <a href="${CONFIG.cascade.bootloaderDoc}" target="_blank" rel="noopener">Bootloader guide ↗</a>`;
   } else {
+    $("iSub").textContent = `${t.label}. This board isn't flashed from the browser, so there's no Install button.`;
     $("dlActions").innerHTML = t.files.map(f => `<a class="btn" href="${esc(f.url)}" target="_blank" rel="noopener">${esc(f.title || f.name)}</a>`).join("");
   }
 }
@@ -1021,7 +1029,12 @@ function setPhase(label, frac, right) {
   $("pct").textContent = right ?? (frac != null ? Math.round(frac * 100) + "%" : "");
 }
 const result = (kind, html) => { $("result").innerHTML = html ? `<p class="banner ${kind}"><span>${html}</span></p>` : ""; };
-function setBusy(b) { S.busy = b; $("install").disabled = b; $("monitor").disabled = b; for (const el of document.querySelectorAll(".tab")) el.disabled = b; }
+function updateInstallBtn() {
+  const k = S.target?.kind, ok = k === "esp" || k === "stm32", serial = "serial" in navigator;
+  $("install").disabled = S.busy || !ok || !serial; $("monitor").disabled = S.busy || !serial;
+  $("installHint").textContent = serial && k === "none" ? "Pick your device and firmware above to turn on Install." : "";
+}
+function setBusy(b) { S.busy = b; updateInstallBtn(); for (const el of document.querySelectorAll(".tab")) el.disabled = b; }
 
 let esptool;
 async function loadEsptool() { if (!esptool) { log("Loading flasher…", "d"); esptool = await import(CONFIG.esptool); } return esptool; }
