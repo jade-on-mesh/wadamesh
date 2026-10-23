@@ -1,8 +1,10 @@
 name: flasher-pages
 
 # Publishes the MediaMesh Flasher (flasher/index.html) to GitHub Pages together
-# with copies of the newest Wadamesh TAK USB images (releases.json) and every
-# Spectra-Cascadia DX-LR30 image (spectra-releases.json; they are tiny).
+# with copies of the newest Wadamesh TAK USB images (releases.json), every
+# Spectra-Cascadia DX-LR30 image (spectra-releases.json; they are tiny) and the
+# Keymind Cascade ESP32 companion and repeater USB images named in Keymind's
+# Mesh America catalog (keymind-mirror.json).
 #
 # Why a copy: GitHub's release downloads (github.com/.../releases/download/...)
 # send no CORS headers, so a web page can't fetch them. GitHub Pages serves
@@ -14,8 +16,8 @@ name: flasher-pages
 # https://jade-on-mesh.github.io/wadamesh-tak/ (Settings > Pages: branch gh-pages, / (root)).
 #
 # Runs after every successful fork-release, when the flasher changes, or by hand.
-# A new Spectra-Cascadia release shows up on the next run; run this workflow by
-# hand (Actions > flasher-pages > Run workflow) to publish one right away.
+# It also runs daily for new Spectra-Cascadia and Keymind Cascade releases; run it
+# by hand (Actions > flasher-pages > Run workflow) to publish one right away.
 # (A release created by fork-release with GITHUB_TOKEN does not fire `release`
 # events, which is why this listens for the workflow run instead.)
 
@@ -28,6 +30,8 @@ on:
     paths:
       - "flasher/**"
       - ".github/workflows/flasher-pages.yml"
+  schedule:
+    - cron: "17 11 * * *"   # daily: pick up new Spectra-Cascadia and Keymind Cascade releases
   workflow_dispatch:
 
 permissions:
@@ -122,6 +126,57 @@ jobs:
           print(f"{len(out)} Spectra-Cascadia releases mirrored")
           PY2
           du -sh site
+
+      - name: Mirror Keymind Cascade ESP32 companion and repeater USB images
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KEYMIND: mikecarper/MeshCore
+          CATALOG: https://raw.githubusercontent.com/mikecarper/MeshCore/keymindCascade/mesh-america/keymind-cascade-v1.16.0-provider.json
+        run: |
+          set -euo pipefail
+          curl -sSfL --retry 3 "$CATALOG" -o keymind-catalog.json
+          python3 - <<'PY3'
+          import concurrent.futures as cf, hashlib, json, os, subprocess, urllib.parse
+          repo = os.environ["KEYMIND"]
+          prefix = f"https://github.com/{repo}/releases/download/"
+          want = {}
+          for d in json.load(open("keymind-catalog.json"))["device"]:
+              if d.get("type") != "esp32":
+                  continue
+              for fw in d["firmware"]:
+                  if not (fw["role"].startswith("companion") or fw["role"] == "repeater"):
+                      continue
+                  for v in fw["version"].values():
+                      for f in v["files"]:
+                          if f["type"] == "flash-wipe" and f["url"].startswith(prefix):
+                              want[f["url"]] = "keymind/" + urllib.parse.unquote(f["url"][len(prefix):])
+          # GitHub's own checksums for every asset on the release pages involved.
+          digests = {}
+          for tag in sorted({p.split("/")[1] for p in want.values()}):
+              rid = subprocess.run(["gh", "api", f"repos/{repo}/releases/tags/{tag}", "--jq", ".id"],
+                                   check=True, capture_output=True, text=True).stdout.strip()
+              pages = subprocess.run(["gh", "api", "--paginate", f"repos/{repo}/releases/{rid}/assets?per_page=100",
+                                      "--jq", ".[] | [.name, (.digest // \"\")] | @tsv"],
+                                     check=True, capture_output=True, text=True).stdout
+              for line in pages.splitlines():
+                  name, dg = (line.split("\t") + [""])[:2]
+                  digests[f"{tag}/{name}"] = dg
+          def fetch(item):
+              url, path = item
+              dst = "site/" + path
+              os.makedirs(os.path.dirname(dst), exist_ok=True)
+              subprocess.run(["curl", "-sSfL", "--retry", "3", "-o", dst, url], check=True)
+              sha = "sha256:" + hashlib.sha256(open(dst, "rb").read()).hexdigest()
+              gh = digests.get(path[len("keymind/"):], "")
+              if gh and gh != sha:
+                  raise SystemExit(f"{path}: download does not match GitHub's digest")
+              return url, {"path": path, "size": os.path.getsize(dst), "digest": sha}
+          with cf.ThreadPoolExecutor(8) as pool:
+              out = dict(pool.map(fetch, sorted(want.items())))
+          json.dump(out, open("site/keymind-mirror.json", "w"), indent=1)
+          print(f"{len(out)} Keymind Cascade images mirrored")
+          PY3
+          du -sh site site/keymind
 
       - name: Publish to the gh-pages branch
         uses: peaceiris/actions-gh-pages@v4.1.0

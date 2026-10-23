@@ -18,23 +18,21 @@ compared before the node is started. XL asks for confirmation that the board pas
 
 ## Files
 - `flasher/index.html` - the page. Settings are in `CONFIG` at the top of the script.
-- `.github/workflows/flasher-pages.yml` - publishes the page to GitHub Pages with a copy of
-  the newest Wadamesh TAK images and all Spectra-Cascadia images, via the gh-pages branch.
-- `proxy/cors-proxy-worker.js` - Cloudflare Worker that relays release downloads with CORS
-  headers. Needed for Keymind Cascade (too many images to copy to Pages). Put its URL in
-  `CONFIG.proxy`. Without it, the page asks people to download the file and drop it in.
+- `.github/workflows/flasher-pages.yml` - publishes the page to GitHub Pages (gh-pages branch) with copies of
+  the newest Wadamesh TAK images, all Spectra-Cascadia images and Keymind Cascade's ESP32
+  companion and repeater USB images, so every tab downloads with one click. Runs after each
+  Wadamesh TAK release, daily, and by hand (Actions > flasher-pages > Run workflow).
+- `proxy/cors-proxy-worker.js` - optional Cloudflare Worker relay, only needed if a file isn't on
+  the Pages copy (for example a Keymind build published since the last run). Put its URL in
+  `CONFIG.proxy`.
 
-## Why the relay
+## Why the copies
 GitHub release download links send no CORS headers, so browsers block a page from reading
 them. The page itself, the catalog (raw.githubusercontent.com) and the GitHub API are fine.
 
 ## Putting it on WordPress (cascadiamesh.org)
-Paste `wordpress/mediamesh-flasher-block.html` into a **Custom HTML** block. The whole page is
-inside it, so nothing else needs hosting for the page itself; the downloads still come from the
-Pages copy (Wadamesh TAK, Spectra-Cascadia) or the relay (Keymind Cascade). Re-paste it when
-`flasher/index.html` changes.
-
-Or, once Pages is on, a plain iframe that always shows the latest page:
-`<iframe src="https://jade-on-mesh.github.io/wadamesh-tak/" allow="serial" style="width:100%;height:2400px;border:0"></iframe>`
+Paste `wordpress/mediamesh-flasher-block.html` into a **Custom HTML** block. It shows the live
+page from GitHub Pages in a frame that sizes itself, so later changes appear without re-pasting.
+Set `THEME` in the block to "light", "dark" or "auto".
 
 Open a tab directly with `#cascade` or `#spectra`, or a Wadamesh board with `#tdeck`, `#m9`, `#pager`, `#p4`.
