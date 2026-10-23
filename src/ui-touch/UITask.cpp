@@ -29133,6 +29133,9 @@ static uint32_t s_thumb_next_view   = 0;   // the viewer asked for another one m
 static char     s_thumb_next_title[48] = {0};
 static void voxShowStoredPhoto(uint32_t sid, const char* title);
 
+// What the open chat's layout depends on beyond its messages: thumbnails made,
+// and the photo store's index landing (answers that were "not known yet").
+static uint32_t chatThumbGen() { return s_chat_thumb_gen + VoxPhotos::layoutVersion(); }
 static void voxThumbLanded() {
   ++s_chat_thumb_gen;
   g_lv.dirty_timeline = true;
@@ -45117,6 +45120,17 @@ static lv_coord_t chatVirtMsgViewportY(int logical_i, int32_t virt_top);
 
 static void chatVirtRefreshScrollArea(LvChatPanel* p);
 
+// While a chat is laid out, built or drawn, photo/voice state comes from RAM
+// only (VoxPhotos::setQuick): a lookup on a slow store took ~300 ms, and a
+// private channel full of photos and voice took 20 s to open.
+struct VoxQuick {
+  bool prev;
+  VoxQuick() : prev(s_vox_quick) { s_vox_quick = true; VoxPhotos::setQuick(true); }
+  ~VoxQuick() { s_vox_quick = prev; VoxPhotos::setQuick(prev); }
+  static bool s_vox_quick;
+};
+bool VoxQuick::s_vox_quick = false;
+
 struct ChatBubbleDisplay {
   const char* show_sender = nullptr;
   const char* show_text   = nullptr;
@@ -45540,7 +45554,10 @@ static const uint8_t* talkWaveFor(uint32_t sid) {
     return __atomic_load_n(&w.state, __ATOMIC_ACQUIRE) == 2 ? w.bars : nullptr;
   }
 #if TALK_WAVES
-  if (!VoxPhotos::haveVoice(sid)) return nullptr;
+  {
+    VoxQuick quick;   // called while the chat draws
+    if (!VoxPhotos::haveVoice(sid)) return nullptr;
+  }
   if (s_talk_wave_busy || millis() - s_talk_wave_last_ms < 1000) { s_talk_wave_retry = true; return nullptr; }
   s_talk_wave_last_ms = millis();
   TalkWave& w = s_talk_waves[s_talk_wave_next];
@@ -45662,6 +45679,7 @@ static void voxBubbleTextState(const VoxWire::Envelope& env, bool outgoing, char
 
 static void chatParseMessageDisplay(const UITask::UIMessage& m, bool channel_mode,
                                     bool thread_is_room, ChatBubbleDisplay& d) {
+  VoxQuick quick;
   d.show_sender = m.sender;
   d.show_text   = m.text;
   d.retro_sender[0] = '\0';
@@ -46366,7 +46384,7 @@ static bool chatVirtTryAppendLayout(LvChatPanel* p, int n, int divider_i) {
   if (n_old <= 0 || n <= n_old) return false;
   if (divider_i >= 0 || s_chat_virt.divider_i >= 0) return false;   // divider math: full rebuild
   if (s_chat_virt.compact_chat != touchPrefsGetCompactChat()) return false;
-  if (s_chat_virt.thumb_gen != s_chat_thumb_gen) return false;   // heights changed: measure again
+  if (s_chat_virt.thumb_gen != chatThumbGen()) return false;   // heights changed: measure again
   if (s_chat_msg_idx[0] != s_chat_virt.first_ring ||
       s_chat_msg_idx[n_old - 1] != s_chat_virt.last_ring) return false;
 
@@ -46456,7 +46474,7 @@ static bool chatVirtRebuildLayout(LvChatPanel* p, int n, int divider_i) {
     if (g_lv.task->lookupActiveContact(rc)) s_chat_virt.thread_is_room = (rc.type == ADV_TYPE_ROOM);
   }
   s_chat_virt.compact_chat = touchPrefsGetCompactChat();
-  s_chat_virt.thumb_gen = s_chat_thumb_gen;
+  s_chat_virt.thumb_gen = chatThumbGen();
   s_chat_virt.compact_thread_name[0] = '\0';
   if (s_chat_virt.compact_chat) {
     bool ch_ = false; uint16_t un_ = 0; uint32_t ts_ = 0;
@@ -47289,6 +47307,7 @@ static void chatAddThumb(lv_obj_t* parent, uint32_t sid, lv_coord_t x, lv_coord_
 static void chatMaybeWantThumb(const UITask::UIMessage& m, const ChatBubbleDisplay& d) {
 #if VOX_AV1_AVAILABLE
   (void)d;
+  VoxQuick quick;
   if (m.outgoing) return;
   VoxWire::Envelope env;
   if (!chatMessagePhoto(m, &env, nullptr, 0) || env.kind != VoxWire::kImage) return;
@@ -48026,7 +48045,7 @@ static void refreshChatDetail(LvChatPanel& p) {
   const bool need_layout = (s_chat_virt.panel != &p) || (s_chat_virt.n != n) ||
                            !s_chat_virt.offsets || ring_changed ||
                            s_chat_virt.compact_chat != compact_chat ||
-                           s_chat_virt.thumb_gen != s_chat_thumb_gen;   // a photo got its thumbnail
+                           s_chat_virt.thumb_gen != chatThumbGen();   // a thumbnail, or the photo store's index, landed
   const bool divider_rebuild = !need_layout && divider_i >= 0 && s_chat_virt.divider_y < 0;
   const bool changing_panel = s_chat_virt.panel != &p;
   if (opening || need_layout || divider_rebuild) chatVirtCancelRenderTimer();

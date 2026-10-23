@@ -113,7 +113,9 @@ static HaveEntry* haveFind(uint32_t sid, bool add) {
   return &h;
 }
 
+static void idxNote(uint32_t sid, int kind, bool present, uint8_t tw = 0, uint8_t th = 0);
 static void haveSetKind(uint32_t sid, int kind, bool present) {
+  idxNote(sid, kind, present);   // every fact learned or made keeps the index true too
   HaveEntry* h = haveFind(sid, true);
   const uint8_t known = (uint8_t)(1u << (2 * kind)), has = (uint8_t)(2u << (2 * kind));
   h->bits = (uint8_t)((h->bits & ~has) | known | (present ? has : 0));
@@ -138,12 +140,163 @@ static void haveSetPath(const char* path, bool present) {
   if (havePathKey(path, &sid, &kind)) haveSetKind(sid, kind, present);
 }
 
+// ---- the store's index ------------------------------------------------------------------
+// One background pass lists the store folder once (and reads each thumbnail's
+// two-byte size): which sids have a photo, a clip, a thumbnail. From then on
+// every "is it stored" answer comes from RAM, kept true by every write and
+// remove below. On a T-Deck where one lookup took ~300 ms (the SD card behind
+// the bus the screen and radio share, or a full SPIFFS), a private channel full
+// of photos and voice opened in 20 s: its layout asked 63 times. Until the
+// index is ready, the chat asks in "quick" mode (setQuick): unknown counts as
+// not stored, without touching the filesystem, and the chat is laid out again
+// when the index lands (layoutVersion).
+struct IdxEntry { uint32_t sid; uint32_t mtime; uint8_t kinds; uint8_t tw, th; };   // kinds: 1 photo, 2 voice, 4 thumb
+static IdxEntry* g_idx = nullptr;
+static int g_idx_n = 0, g_idx_cap = 0;
+static bool g_indexed = false;            // g_idx is complete
+static bool g_idx_started = false;
+static uint32_t g_idx_gen = 0;            // a new store discards a pass in flight
+static volatile bool g_idx_ready = false; // the pass finished: g_idx_new
+static IdxEntry* g_idx_new = nullptr;
+static int g_idx_new_n = 0, g_idx_new_cap = 0;
+static uint32_t g_idx_new_gen = 0;
+struct IdxOp { uint32_t sid; uint8_t kind; bool present; uint8_t tw, th; };
+static IdxOp g_idx_ops[48];               // changes made while the pass ran, applied after it
+static int g_idx_ops_n = 0;
+static bool g_idx_ops_lost = false;
+static uint32_t g_layout_ver = 0;         // bubble heights may differ: lay the chat out again
+static bool g_quick = false;
+
+static IdxEntry* idxFindIn(IdxEntry* a, int n, uint32_t sid) {
+  for (int i = 0; i < n; i++) if (a[i].sid == sid) return &a[i];
+  return nullptr;
+}
+static IdxEntry* idxAdd(IdxEntry** a, int* n, int* cap, uint32_t sid) {
+  if (IdxEntry* e = idxFindIn(*a, *n, sid)) return e;
+  if (*n == *cap) {
+    const int nc = *cap ? *cap * 2 : 128;
+    IdxEntry* g = (IdxEntry*)heap_caps_realloc(*a, sizeof(IdxEntry) * (size_t)nc, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!g) return nullptr;
+    *a = g;
+    *cap = nc;
+  }
+  IdxEntry& e = (*a)[(*n)++];
+  e = IdxEntry{sid, 0, 0, 0, 0};
+  return &e;
+}
+static void idxApply(uint32_t sid, int kind, bool present, uint8_t tw, uint8_t th) {
+  IdxEntry* e = present ? idxAdd(&g_idx, &g_idx_n, &g_idx_cap, sid) : idxFindIn(g_idx, g_idx_n, sid);
+  if (!e) return;
+  const uint8_t bit = (uint8_t)(1u << kind);
+  e->kinds = present ? (uint8_t)(e->kinds | bit) : (uint8_t)(e->kinds & ~bit);
+  if (kind == 2) { e->tw = present ? tw : 0; e->th = present ? th : 0; }
+  if (kind == 0 && present && !e->mtime) e->mtime = 0xFFFFFFFFu;   // just stored: the newest
+}
+static void idxNote(uint32_t sid, int kind, bool present, uint8_t tw, uint8_t th) {
+  if (g_indexed) { idxApply(sid, kind, present, tw, th); return; }
+  if (!g_idx_started) return;   // the pass, when it starts, sees it on disk
+  if (g_idx_ops_n < (int)(sizeof g_idx_ops / sizeof g_idx_ops[0]))
+    g_idx_ops[g_idx_ops_n++] = IdxOp{sid, (uint8_t)kind, present, tw, th};
+  else
+    g_idx_ops_lost = true;
+}
+
+static void idxTask(void* arg) {
+  const uint32_t gen = (uint32_t)(uintptr_t)arg;
+  IdxEntry* a = nullptr;
+  int n = 0, cap = 0;
+  fs::FS* fs = g_fs;
+  char root[sizeof g_root];
+  snprintf(root, sizeof root, "%s", g_root);
+  File dir = fs ? fs->open(root[0] ? root : "/") : File();
+  if (dir && dir.isDirectory()) {
+    for (File f = dir.openNextFile(); f; f = dir.openNextFile()) {
+      const char* nm = f.name();
+      const char* b = strrchr(nm, '/');
+      b = b ? b + 1 : nm;
+      if (!f.isDirectory() && strlen(b) == 16 && !strncmp(b, "vox_", 4)) {
+        const int kind = !strcmp(b + 12, ".vi1") ? 0 : !strcmp(b + 12, ".ve3") ? 1 : !strcmp(b + 12, ".vt1") ? 2 : -1;
+        if (kind >= 0) {
+          char hex[9];
+          memcpy(hex, b + 4, 8);
+          hex[8] = 0;
+          if (IdxEntry* e = idxAdd(&a, &n, &cap, (uint32_t)strtoul(hex, nullptr, 16))) {
+            e->kinds |= (uint8_t)(1u << kind);
+            if (kind == 0) e->mtime = (uint32_t)f.getLastWrite();
+            if (kind == 2) {   // the thumbnail's size: its first two bytes
+              uint8_t hdr[2] = {0, 0};
+              if (f.read(hdr, 2) == 2 && hdr[0] && hdr[1] && hdr[0] <= kThumbMax && hdr[1] <= kThumbMax &&
+                  f.size() == 2u + (size_t)hdr[0] * hdr[1] * 2u) {
+                e->tw = hdr[0];
+                e->th = hdr[1];
+              } else {
+                e->kinds &= (uint8_t)~4u;   // a broken thumbnail: as none (it is made again)
+              }
+            }
+          }
+        }
+      }
+      f.close();
+      vTaskDelay(1);   // the loop and the radio come first
+    }
+    dir.close();
+  }
+  g_idx_new = a;
+  g_idx_new_n = n;
+  g_idx_new_cap = cap;
+  g_idx_new_gen = gen;
+  g_idx_ready = true;
+  vTaskDelete(nullptr);
+}
+
+// From tick(): start the pass once a store is set; take its result when done.
+static void idxTick() {
+  if (!g_fs) return;
+  if (!g_idx_started) {
+    g_idx_started = true;
+    g_idx_ops_n = 0;
+    g_idx_ops_lost = false;
+    if (xTaskCreatePinnedToCore(idxTask, "vox_idx", 6144, (void*)(uintptr_t)g_idx_gen, 1, nullptr, 0) != pdPASS)
+      g_idx_started = false;   // try again on a later tick
+    return;
+  }
+  if (!g_idx_ready) return;
+  g_idx_ready = false;
+  if (g_idx_new_gen != g_idx_gen) {   // for a store no longer in use
+    heap_caps_free(g_idx_new);
+    g_idx_new = nullptr;
+    g_idx_started = false;
+    return;
+  }
+  heap_caps_free(g_idx);
+  g_idx = g_idx_new;
+  g_idx_n = g_idx_new_n;
+  g_idx_cap = g_idx_new_cap;
+  g_idx_new = nullptr;
+  if (g_idx_ops_lost) {   // too much changed meanwhile: list again
+    g_idx_started = false;
+    return;
+  }
+  for (int i = 0; i < g_idx_ops_n; i++)
+    idxApply(g_idx_ops[i].sid, g_idx_ops[i].kind, g_idx_ops[i].present, g_idx_ops[i].tw, g_idx_ops[i].th);
+  g_idx_ops_n = 0;
+  g_indexed = true;
+  ++g_layout_ver;
+  bumpState();
+  Serial.printf("[VOX] store indexed: %d photos/clips\n", g_idx_n);
+}
+
 static bool storeHas(uint32_t sid, bool voice) {
   if (!g_fs) return false;
+  if (g_indexed) {
+    const IdxEntry* e = idxFindIn(g_idx, g_idx_n, sid);
+    return e && (e->kinds & (voice ? 2 : 1));
+  }
   const uint8_t known = voice ? 4 : 1, has = voice ? 8 : 2;
   if (const HaveEntry* h = haveFind(sid, false)) {
     if (h->bits & known) return (h->bits & has) != 0;
   }
+  if (g_quick) return false;   // a chat being laid out never waits on the filesystem
   char path[40];
   storePath(sid, voice, path, sizeof path);
   ++g_fs_checks;
@@ -394,6 +547,9 @@ bool canPlay(const VoxWire::Envelope& env) {
 void setStore(fs::FS* fs, const char* root) {
   g_fs = fs;
   haveClear();   // another store: nothing known about it yet
+  g_indexed = false;
+  g_idx_started = false;
+  ++g_idx_gen;
   snprintf(g_root, sizeof g_root, "%s", root ? root : "");
 }
 
@@ -421,9 +577,13 @@ void onPayload(const uint8_t* data, size_t len, int channel_idx, uint8_t via, in
 }
 
 void tick() {
+  idxTick();
   g_fetch.tick();
   g_serve.tick();
 }
+
+void setQuick(bool on) { g_quick = on; }
+uint32_t layoutVersion() { return g_layout_ver; }
 
 bool parse(const char* text, VoxWire::Envelope* env) { return VoxWire::parseEnvelope(text, env); }
 
@@ -571,6 +731,27 @@ void requestThumb(uint32_t sid) { wantThumb(sid); }
 
 int listPhotos(StoredPhoto* out, int cap) {
   if (!g_fs || !out || cap <= 0) return 0;
+  if (g_indexed) {   // from the index: no folder listing (seconds on a slow store)
+    int n = 0;
+    for (int i = 0; i < g_idx_n; i++) {
+      if (!(g_idx[i].kinds & 1)) continue;
+      const StoredPhoto p{g_idx[i].sid, g_idx[i].mtime, 0};
+      if (n < cap) {
+        out[n++] = p;
+      } else {
+        int o = 0;
+        for (int k = 1; k < n; k++) if (out[k].mtime < out[o].mtime) o = k;
+        if (p.mtime > out[o].mtime) out[o] = p;
+      }
+    }
+    for (int i = 1; i < n; i++) {
+      const StoredPhoto x = out[i];
+      int j = i - 1;
+      while (j >= 0 && out[j].mtime < x.mtime) { out[j + 1] = out[j]; --j; }
+      out[j + 1] = x;
+    }
+    return n;
+  }
   File dir = g_fs->open(g_root[0] ? g_root : "/");
   if (!dir || !dir.isDirectory()) return 0;
   int n = 0;
@@ -657,6 +838,7 @@ bool importPhoto(const uint8_t* data, size_t len, uint32_t* sid_out) {
   return true;
 }
 
+static void thumbCacheDrop(uint32_t sid);
 bool deletePhoto(uint32_t sid) {
   if (!g_fs || !sid) return false;
   char path[40];
@@ -665,6 +847,7 @@ bool deletePhoto(uint32_t sid) {
   haveSet(sid, false, false);
   thumbPath(sid, path, sizeof path);
   if (g_fs->remove(path)) haveSetKind(sid, 2, false);
+  thumbCacheDrop(sid);
   bumpState();
   return ok;
 }
@@ -677,9 +860,38 @@ uint32_t nextThumbWanted() {
   return sid;
 }
 
+// Thumbnail pixels kept in PSRAM (24 x up to 18 KB), so redrawing a chat or
+// the Photos grid doesn't read the files again.
+struct ThumbPx { uint32_t sid; uint8_t w, h; uint16_t* px; };
+static ThumbPx g_tpx[24];
+static uint8_t g_tpx_next = 0;
+static void thumbCacheDrop(uint32_t sid) {
+  for (auto& t : g_tpx) if (t.px && t.sid == sid) { heap_caps_free(t.px); t.px = nullptr; t.sid = 0; }
+}
+static void thumbCachePut(uint32_t sid, int w, int h, const uint16_t* px) {
+  thumbCacheDrop(sid);
+  ThumbPx& t = g_tpx[g_tpx_next];
+  g_tpx_next = (uint8_t)((g_tpx_next + 1) % (sizeof g_tpx / sizeof g_tpx[0]));
+  if (t.px) heap_caps_free(t.px);
+  t.px = (uint16_t*)heap_caps_malloc((size_t)w * h * 2u, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  t.sid = t.px ? sid : 0;
+  if (!t.px) return;
+  t.w = (uint8_t)w;
+  t.h = (uint8_t)h;
+  memcpy(t.px, px, (size_t)w * h * 2u);
+}
+
 bool thumbSize(uint32_t sid, int* w, int* h) {
   if (!g_fs || !sid) return false;
+  if (g_indexed) {
+    const IdxEntry* x = idxFindIn(g_idx, g_idx_n, sid);
+    if (!x || !(x->kinds & 4) || !x->tw || !x->th) return false;
+    if (w) *w = x->tw;
+    if (h) *h = x->th;
+    return true;
+  }
   HaveEntry* e = haveFind(sid, false);
+  if ((!e || !(e->bits & 16)) && g_quick) return false;   // unknown: no thumbnail for now
   if (!e || !(e->bits & 16)) {
     char path[40];
     thumbPath(sid, path, sizeof path);
@@ -705,6 +917,17 @@ bool thumbSize(uint32_t sid, int* w, int* h) {
 bool loadThumb(uint32_t sid, int* w, int* h, uint16_t** px) {
   int tw = 0, th = 0;
   if (!px || !thumbSize(sid, &tw, &th)) return false;
+  for (const auto& t : g_tpx) {
+    if (!t.px || t.sid != sid) continue;
+    const size_t n = (size_t)t.w * t.h * 2u;
+    uint16_t* b = (uint16_t*)heap_caps_malloc(n, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!b) return false;
+    memcpy(b, t.px, n);
+    *px = b;
+    if (w) *w = t.w;
+    if (h) *h = t.h;
+    return true;
+  }
   char path[40];
   thumbPath(sid, path, sizeof path);
   File f = g_fs->open(path, "r");
@@ -715,6 +938,7 @@ bool loadThumb(uint32_t sid, int* w, int* h, uint16_t** px) {
   bool ok = b && f.seek(2) && f.read((uint8_t*)b, n) == n;
   f.close();
   if (!ok) { free(b); return false; }
+  thumbCachePut(sid, tw, th, b);
   *px = b;
   if (w) *w = tw;
   if (h) *h = th;
@@ -761,11 +985,13 @@ bool saveThumb(uint32_t sid, const uint16_t* src, int sw, int sh) {
   char path[40];
   thumbPath(sid, path, sizeof path);
   const bool ok = writeStore(path, nullptr, buf, n);
-  free(buf);
   if (ok) {
     if (HaveEntry* e = haveFind(sid, true)) { e->tw = (uint8_t)tw; e->th = (uint8_t)th; }
+    idxNote(sid, 2, true, (uint8_t)tw, (uint8_t)th);   // writeStore noted it without its size
+    thumbCachePut(sid, tw, th, out);
     bumpState();
   }
+  free(buf);
   return ok;
 }
 
