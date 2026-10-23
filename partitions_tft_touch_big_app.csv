@@ -1,5 +1,5 @@
 # Wadamesh-tak: 16 MB touch boards with bigger app slots (Heltec V4, Heltec
-# V4-R8, Seeed Wio Tracker L2).
+# V4-R8, Seeed Wio Tracker L2, Elecrow CrowPanel Advance 3.5 and 5.0).
 #
 # The same layout as the T-Deck's (variants/lilygo_tdeck/partitions_tdeck_touch_big_app.csv):
 # the fork's image doesn't fit upstream's 3.875 MB slots, so each app slot is

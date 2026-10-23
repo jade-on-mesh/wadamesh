@@ -97,6 +97,10 @@ jobs:
             board: heltec-v4-r8
           - env: wio_tracker_l2_companion_radio_touch
             board: wio-tracker-l2
+          - env: crowpanel_35_companion_radio_touch
+            board: crowpanel-35
+          - env: crowpanel_50_companion_radio_touch
+            board: crowpanel-50
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

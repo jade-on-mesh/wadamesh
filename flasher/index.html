@@ -464,6 +464,10 @@ const Wada = (() => {
     { id: "wio-l2", name: "Seeed Wio Tracker L2", chip: "ESP32-S3", desc: "Touch screen, GPS. Pre-release: still being brought up.",
       boot: "Usually connects on its own. If not: hold the BOOT button while plugging in USB, then release. The first install resizes the app slots, so it has to be this full install once.",
       slug: () => "wio-tracker-l2" },
+    { id: "crowpanel", name: "Elecrow CrowPanel Advance", chip: "ESP32-S3", desc: "3.5\" or 5\" touch screen. Needs an SX1262 module fitted (the 5\": in the wireless slot, with the DIP switch set to it).",
+      boot: "Usually connects on its own. If not: hold the BOOT button, press RST, then release BOOT. The first install resizes the app slots, so it has to be this full install once.",
+      options: [{ key: "size", label: "Screen", help: "The size on the box: 3.5\" (480x320) or 5\" (800x480).", choices: [["35", "3.5\""], ["50", "5\""]] }],
+      slug: o => `crowpanel-${o.size}` },
     { id: "p4", name: "LilyGo T-Display P4 AMOLED", chip: "ESP32-P4", desc: "Large AMOLED touch screen, ESP32-C6 for Wi-Fi.",
       boot: "Usually connects on its own. If not: hold BOOT, tap RST, then release BOOT.",
       options: [
