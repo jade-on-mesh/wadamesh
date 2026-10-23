@@ -147,6 +147,16 @@ pre.log .e{color:#FF9C90} pre.log .w{color:#F0C96A} pre.log .o{color:#A6CC8A} pr
 .help{font-size:.9rem;color:var(--mut)}
 .help summary{cursor:pointer;color:var(--ink);font-weight:600}
 .help ul{margin:8px 0 0;padding-left:20px;display:flex;flex-direction:column;gap:6px}
+/* about MediaMesh */
+.about{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:20px;display:flex;flex-direction:column;gap:12px}
+.about h2{margin:0;font:700 1.2rem/1.2 var(--display)}
+.about p{margin:0;max-width:65ch}
+.paths{margin:0;padding:0;list-style:none;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+@media(max-width:700px){.paths{grid-template-columns:1fr}}
+.paths li{background:var(--sunk);border-radius:10px;padding:12px 14px;display:flex;flex-direction:column;gap:4px;font-size:.92rem;min-width:0}
+.paths b{font:700 .78rem/1.2 var(--body);letter-spacing:.08em;text-transform:uppercase;color:var(--mut)}
+.paths .linkbtn{font-size:.92rem;font-weight:600}
+.guides{display:flex;flex-wrap:wrap;gap:10px}
 /* video */
 .video{background:var(--surface);border:1px solid var(--line);border-radius:12px;overflow:hidden}
 .video summary{cursor:pointer;list-style:none;display:flex;align-items:center;gap:10px;padding:12px 16px;font-weight:600}
@@ -184,6 +194,20 @@ footer .wrap{display:flex;flex-wrap:wrap;gap:6px 18px}
       <iframe src="https://www.youtube-nocookie.com/embed/YB6AKfYkQNI?rel=0" title="CascadiaMesh: Introducing MediaMesh" loading="lazy" referrerpolicy="strict-origin-when-cross-origin" allow="accelerometer; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen></iframe>
     </div>
   </details>
+
+  <section class="about" aria-labelledby="aboutH">
+    <h2 id="aboutH">What is MediaMesh?</h2>
+    <p>MediaMesh gives photos and voice their own lane. Text, adverts and acknowledgements stay on the main mesh, while the photos and voice clips that MeshCore Open TAK and Wadamesh TAK send go out on a second, faster LoRa profile (radio2). A device with MediaMesh on still hears the main mesh, so it keeps working with every repeater around it.</p>
+    <ul class="paths">
+      <li><b>Standalone radio</b><span>Flash Wadamesh TAK, then turn MediaMesh on under Settings › Radio › MediaMesh Settings.</span><button class="linkbtn" type="button" data-goto="wadamesh">Wadamesh TAK tab</button></li>
+      <li><b>With a phone</b><span>Flash a Keymind Cascade companion and pair it with the MeshCore Open TAK app.</span><button class="linkbtn" type="button" data-goto="cascade" data-role="companion">Keymind Cascade companions</button></li>
+      <li><b>Repeater</b><span>Flash Keymind Cascade and set up radio2. Every MediaMesh repeater carries photos and voice farther.</span><button class="linkbtn" type="button" data-goto="cascade" data-role="repeater">Keymind Cascade repeaters</button></li>
+    </ul>
+    <div class="guides">
+      <a class="btn" href="https://cascadiamesh.org/wadamesh-tak-user-guide/" target="_blank" rel="noopener">Wadamesh-TAK user guide ↗</a>
+      <a class="btn" href="https://cascadiamesh.org/meshcore-open-tak-user-guide/" target="_blank" rel="noopener">MeshCore Open TAK user guide ↗</a>
+    </div>
+  </section>
 
   <p id="serialBanner" class="banner warn" hidden><span><b>This browser can't talk to USB devices.</b> Open this page in Chrome or Edge on a Windows, Mac, Linux or ChromeOS computer. Phones, Safari and Firefox can't flash.</span></p>
 
@@ -1066,6 +1090,12 @@ $("monitor").onclick = async () => {
 };
 
 /* ================= boot ================= */
+// "What is MediaMesh?" shortcuts: open the matching tab (and role) and scroll to step 1
+for (const b of document.querySelectorAll("[data-goto]")) b.addEventListener("click", () => {
+  setTab(b.dataset.goto);
+  if (b.dataset.role) document.querySelector(`#cRole [data-role="${b.dataset.role}"]`)?.click();
+  $("pane-" + S.tab).scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "start" });
+});
 { // remember whether this visitor collapsed the video
   const v = $("video"), hint = () => { $("videoHint").textContent = v.open ? "Hide" : "Show"; };
   if (store.get("mm.video") === "closed") v.open = false;
