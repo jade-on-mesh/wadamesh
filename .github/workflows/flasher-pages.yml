@@ -3,8 +3,9 @@ name: flasher-pages
 # Publishes the MediaMesh Flasher (flasher/index.html) to GitHub Pages together
 # with copies of the newest Wadamesh TAK USB images (releases.json), every
 # Spectra-Cascadia DX-LR30 image (spectra-releases.json; they are tiny) and the
-# Keymind Cascade ESP32 companion and repeater USB images named in Keymind's
-# Mesh America catalog (keymind-mirror.json).
+# Keymind Cascade companion and repeater USB images named in Keymind's Mesh
+# America catalog: ESP32 merged images and nRF52 serial DFU packages
+# (keymind-mirror.json).
 #
 # Why a copy: GitHub's release downloads (github.com/.../releases/download/...)
 # send no CORS headers, so a web page can't fetch them. GitHub Pages serves
@@ -159,7 +160,7 @@ jobs:
           PY2
           du -sh site
 
-      - name: Mirror Keymind Cascade ESP32 companion and repeater USB images
+      - name: Mirror Keymind Cascade companion and repeater USB images (ESP32 + nRF52)
         if: steps.check.outputs.go == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -174,14 +175,16 @@ jobs:
           prefix = f"https://github.com/{repo}/releases/download/"
           want = {}
           for d in json.load(open("keymind-catalog.json"))["device"]:
-              if d.get("type") != "esp32":
+              # ESP32: the merged USB image; nRF52: the serial DFU package (.zip)
+              kind = {"esp32": "flash-wipe", "nrf52": "flash"}.get(d.get("type"))
+              if not kind:
                   continue
               for fw in d["firmware"]:
                   if not (fw["role"].startswith("companion") or fw["role"] == "repeater"):
                       continue
                   for v in fw["version"].values():
                       for f in v["files"]:
-                          if f["type"] == "flash-wipe" and f["url"].startswith(prefix):
+                          if f["type"] == kind and f["url"].startswith(prefix) and (kind != "flash" or f["name"].endswith(".zip")):
                               want[f["url"]] = "keymind/" + urllib.parse.unquote(f["url"][len(prefix):])
           # GitHub's own checksums for every asset on the release pages involved.
           digests = {}

@@ -301,7 +301,7 @@ footer .wrap{display:flex;flex-wrap:wrap;gap:6px 18px}
       <div class="drop" id="drop" hidden>
         <div>Download <a id="dlLink" href="#" target="_blank" rel="noopener">the file</a>, then drop it here or choose it. The page checks it before flashing.</div>
         <label class="btn small" for="fileIn" style="align-self:flex-start">Choose file…</label>
-        <input type="file" id="fileIn" accept=".bin,.hex,application/octet-stream" hidden>
+        <input type="file" id="fileIn" accept=".bin,.hex,.zip,application/octet-stream,application/zip" hidden>
         <div id="fileInfo"></div>
         <label class="check" id="forceRow" hidden><input type="checkbox" id="force"><span>Flash this file anyway<small>Only if you know it is a merged image for this exact board.</small></span></label>
       </div>
@@ -309,19 +309,17 @@ footer .wrap{display:flex;flex-wrap:wrap;gap:6px 18px}
       <label class="check" id="eraseRow"><input type="checkbox" id="eraseAll"><span>Erase everything first<small id="eraseHelp"></small></span></label>
       <label class="check" id="xlRow" hidden><input type="checkbox" id="xlOk"><span>This board passed <code>tools/flash128_test</code><small>XL uses the upper 64 KB of flash, which only some STM32F103C8 chips really have. Run the test on each board first.</small></span></label>
       <div class="actions">
+        <button class="btn" id="dfuMode" type="button" hidden>1. Start update mode</button>
         <button class="btn primary" id="install" type="button">Install firmware</button>
         <button class="btn" id="monitor" type="button">Watch serial log</button>
         <span class="oh" id="installHint"></span>
       </div>
-      <div class="prog" id="prog" hidden>
-        <div class="pl"><b id="phase">Ready</b><span id="pct" class="mono"></span></div>
-        <div class="bar"><i id="barFill"></i></div>
-      </div>
-      <div id="result"></div>
     </div>
 
-    <!-- nRF52: UF2 drag and drop -->
-    <div id="uf2Box" hidden style="display:flex;flex-direction:column;gap:14px">
+    <!-- nRF52: UF2 drag and drop (the fallback when USB install isn't possible) -->
+    <details id="uf2Box" class="help" hidden>
+      <summary id="uf2Summary">Or install by drag-and-drop instead</summary>
+      <div style="display:flex;flex-direction:column;gap:14px;margin-top:10px;color:var(--ink)">
       <ol class="howto">
         <li>Download the <b>.uf2</b> file.</li>
         <li>Plug the device in over USB and <b>double-press its reset button</b> quickly. A USB drive appears (its name depends on the board, such as <code>NRF52BOOT</code>, <code>RAK4631</code> or the board's own name).</li>
@@ -329,7 +327,14 @@ footer .wrap{display:flex;flex-wrap:wrap;gap:6px 18px}
       </ol>
       <div class="actions" id="uf2Actions"></div>
       <p class="banner warn" id="uf2Note" style="margin:0"></p>
+      </div>
+    </details>
+
+    <div class="prog" id="prog" hidden>
+      <div class="pl"><b id="phase">Ready</b><span id="pct" class="mono"></span></div>
+      <div class="bar"><i id="barFill"></i></div>
     </div>
+    <div id="result"></div>
 
     <!-- other: download only -->
     <div id="dlBox" hidden style="display:flex;flex-direction:column;gap:12px">
@@ -345,6 +350,7 @@ footer .wrap{display:flex;flex-wrap:wrap;gap:6px 18px}
       <summary>If it doesn't work</summary>
       <ul>
         <li><b>No port shows up:</b> try another cable (many are charge-only) and another USB port. On Windows, a CH340 or CP210x driver may be needed for some boards.</li>
+        <li><b>nRF52 board doesn't answer in step 2:</b> double-press its reset button so it shows up as a USB drive, then press <b>2. Install firmware</b> and pick its port. Or use drag-and-drop instead.</li>
         <li><b>"Failed to connect" or it times out:</b> put the board in download mode (see the tip above), then press Install again.</li>
         <li><b>Port is busy:</b> close the MeshCore app, Arduino, PlatformIO or any other tab that has the device open.</li>
         <li><b>Screen stays black after flashing:</b> unplug the board and plug it back in.</li>
@@ -683,10 +689,19 @@ const Cascade = (() => {
     }
     if (dev.type === "nrf52") {
       const uf2 = fwSel.files.find(x => /\.uf2$/i.test(x.name)); const zip = fwSel.files.find(x => /\.zip$/i.test(x.name));
-      return { kind: "uf2", label, uf2, zip,
-        note: /SELF-UPDATE - Verified methods: [^\n]*lora/i.test(fwSel.notes)
-          ? `Wireless (LoRa) updates later need this board's matching OTAFix bootloader. The setup guide lists the exact one; see also the bootloader update guide.`
-          : `The UF2 installs the application only; your bootloader stays as it is.` };
+      const note = /SELF-UPDATE - Verified methods: [^\n]*lora/i.test(fwSel.notes)
+        ? `Wireless (LoRa) updates later need this board's matching OTAFix bootloader. The setup guide lists the exact one; see also the bootloader update guide.`
+        : `This installs the application only; your bootloader stays as it is.`;
+      if (!zip) return { kind: "uf2", label, uf2, note };
+      const mz = mirror[zip.url];
+      const urls = mz ? [here(mz.path), `${CONFIG.cascade.pagesBase}/${mz.path}`] : [];
+      if (proxied(zip.url)) urls.push(proxied(zip.url));
+      return {
+        kind: "nrf", name: zip.name, link: zip.url, urls: [...new Set(urls.filter(Boolean))], size: mz?.size,
+        digest: mz?.digest?.replace(/^sha256:/, "") || null, uf2, note, label,
+        boot: "If step 2 can't find the board, double-press its reset button (it shows up as a USB drive), then press 2 again and pick its port.",
+        wrongName: n => n !== zip.name && /\.zip$/i.test(n) ? n : null,
+      };
     }
     return { kind: "download", label, files: fwSel.files };
   }
@@ -908,44 +923,55 @@ async function installStm32(t) {
 /* ================= install step ================= */
 function renderInstall() {
   const t = S.target || { kind: "none", msg: "" };
-  const flashable = t.kind === "esp" || t.kind === "stm32";
+  const flashable = t.kind === "esp" || t.kind === "stm32" || t.kind === "nrf";
   // The Install button stays on screen (greyed out with a reason) until a flashable build is picked.
-  $("espBox").hidden = !(flashable || t.kind === "none"); $("uf2Box").hidden = t.kind !== "uf2"; $("dlBox").hidden = t.kind !== "download";
-  $("bootTip").hidden = !flashable;
+  $("espBox").hidden = !(flashable || t.kind === "none");
+  $("uf2Box").hidden = !(t.kind === "uf2" || (t.kind === "nrf" && t.uf2)); $("uf2Box").open = t.kind === "uf2";
+  $("dlBox").hidden = t.kind !== "download";
+  $("bootTip").hidden = !flashable; $("dfuMode").hidden = t.kind !== "nrf";
+  $("install").textContent = t.kind === "nrf" ? "2. Install firmware" : "Install firmware";
   if (!flashable) { $("drop").hidden = true; $("useLocal").hidden = true; $("eraseRow").hidden = true; $("xlRow").hidden = true; }
   $("iFile").innerHTML = ""; $("iStatus").innerHTML = ""; $("result").innerHTML = ""; $("prog").hidden = true;
   updateInstallBtn();
   if (t.kind === "none") { $("iSub").textContent = ""; if (t.msg) $("iStatus").innerHTML = `<p class="banner info"><span>${esc(t.msg)}</span></p>`; return; }
   $("iSub").textContent = t.label;
+  const ready = () => t.urls.length
+    ? `<p class="banner ok"><span>Ready. The page downloads ${t.digest ? "and checks " : ""}this file when you install.</span></p>`
+    : `<p class="banner warn"><span>Download the file yourself and give it to the page below. Your browser can't fetch it from GitHub directly.</span></p>`;
+  if (flashable) { $("dlLink").href = t.link; $("dlLink").textContent = t.name; }
   if (t.kind === "esp") {
     $("iSub").textContent = t.label + ". Plug the device in with a data USB cable, press Install, then pick its port in the browser's list.";
     $("iFile").innerHTML = `File <code>${esc(t.name)}</code>${t.size ? ` <span>${fmtMB(t.size)}</span>` : ""} <span>written at 0x0 (bootloader, partition table and app)</span>`;
     $("bootTip").textContent = t.boot; $("eraseHelp").textContent = t.eraseHelp;
     $("eraseRow").hidden = false; $("xlRow").hidden = true;
-    $("dlLink").href = t.link; $("dlLink").textContent = t.name;
-    if (t.urls.length) { $("iStatus").innerHTML = `<p class="banner ok"><span>Ready. The page downloads ${t.digest ? "and checks " : ""}this file when you press Install.</span></p>`; showDrop(false); }
-    else { $("iStatus").innerHTML = `<p class="banner warn"><span>Download the file yourself and give it to the page below. Your browser can't fetch it from GitHub directly.</span></p>`; showDrop(true); }
+    $("iStatus").innerHTML = ready(); showDrop(!t.urls.length);
+  } else if (t.kind === "nrf") {
+    $("iSub").textContent = `${t.label}. Plug the board in with a data USB cable. Press 1 and pick its port to restart it into update mode, then press 2 and pick its port again (the name may change).`;
+    $("iFile").innerHTML = `File <code>${esc(t.name)}</code>${t.size ? ` <span>${fmtMB(t.size)}</span>` : ""} <span>application update; the bootloader stays as it is</span>`;
+    $("bootTip").textContent = t.boot; $("eraseRow").hidden = true; $("eraseAll").checked = false; $("xlRow").hidden = true;
+    $("iStatus").innerHTML = ready(); showDrop(!t.urls.length);
+    fillUf2(t);
   } else if (t.kind === "stm32") {
     $("iSub").textContent = t.label + ".";
     $("iFile").innerHTML = `File <code>${esc(t.name)}</code>${t.size ? ` <span>${(t.size / 1024).toFixed(0)} KB</span>` : ""} <span>${t.xl ? "written to 0x08000000 and 0x08010000" : "written from 0x08000000"}; the settings pages are left alone, so name, identity and passwords are kept</span>`;
     $("bootTip").textContent = t.boot; $("eraseRow").hidden = true; $("eraseAll").checked = false;
     $("xlRow").hidden = !t.xl; $("xlOk").checked = false;
-    $("dlLink").href = t.link; $("dlLink").textContent = t.name;
-    let st = t.urls.length ? `<p class="banner ok"><span>Ready. The page downloads ${t.digest ? "and checks " : ""}this file when you press Install.</span></p>`
-                           : `<p class="banner warn"><span>Download the file yourself and give it to the page below. Your browser can't fetch it from GitHub directly.</span></p>`;
+    let st = ready();
     if (t.untested) st += `<p class="banner warn" style="margin-top:10px"><span><b>Not yet tested on hardware.</b> The release notes say this build was ported automatically. Try it on a bench node before upgrading a repeater on a roof.</span></p>`;
     $("iStatus").innerHTML = st; showDrop(!t.urls.length);
   } else if (t.kind === "uf2") {
-    const a = $("uf2Actions"); a.innerHTML = "";
-    if (t.uf2) a.innerHTML += `<a class="btn primary" href="${esc(t.uf2.url)}" target="_blank" rel="noopener">Download .uf2</a>`;
-    if (t.zip) a.innerHTML += `<a class="btn" href="${esc(t.zip.url)}" target="_blank" rel="noopener">Serial DFU .zip</a>`;
-    $("iSub").textContent = `${t.label}. nRF52 boards don't use the Install button: they install by dragging a file onto the board, like a USB stick.`;
+    $("iSub").textContent = `${t.label}. This build installs by dragging a file onto the board, like a USB stick.`;
     $("iFile").innerHTML = t.uf2 ? `File <code>${esc(t.uf2.name)}</code>` : "";
-    $("uf2Note").innerHTML = `${esc(t.note)} <a href="${CONFIG.cascade.bootloaderDoc}" target="_blank" rel="noopener">Bootloader guide ↗</a>`;
+    fillUf2(t);
   } else {
     $("iSub").textContent = `${t.label}. This board isn't flashed from the browser, so there's no Install button.`;
     $("dlActions").innerHTML = t.files.map(f => `<a class="btn" href="${esc(f.url)}" target="_blank" rel="noopener">${esc(f.title || f.name)}</a>`).join("");
   }
+}
+function fillUf2(t) {
+  const a = $("uf2Actions"); a.innerHTML = "";
+  if (t.uf2) a.innerHTML += `<a class="btn ${t.kind === "uf2" ? "primary" : ""}" href="${esc(t.uf2.url)}" target="_blank" rel="noopener">Download .uf2</a>`;
+  $("uf2Note").innerHTML = `${esc(t.note)} <a href="${CONFIG.cascade.bootloaderDoc}" target="_blank" rel="noopener">Bootloader guide ↗</a>`;
 }
 function showDrop(on) { $("drop").hidden = !on; $("useLocal").hidden = on; }
 $("useLocal").onclick = () => showDrop(true);
@@ -953,6 +979,7 @@ $("useLocal").onclick = () => showDrop(true);
 async function takeFile(file) {
   const t = S.target; if (!file) return;
   if (t?.kind === "stm32") return takeStm32File(file, t);
+  if (t?.kind === "nrf") return takeNrfFile(file, t);
   if (t?.kind !== "esp") return;
   const bytes = new Uint8Array(await file.arrayBuffer()); const sha = await sha256hex(bytes);
   S.local = { bytes, name: file.name, sha, ok: false };
@@ -969,6 +996,22 @@ async function takeFile(file) {
     $("forceRow").hidden = false;
   }
   log(`Loaded ${file.name} (${fmtMB(bytes.length)}, sha256 ${shortSha(sha)}${img.chip ? ", " + img.chip : ""}).`);
+}
+async function takeNrfFile(file, t) {
+  const bytes = new Uint8Array(await file.arrayBuffer()); const sha = await sha256hex(bytes);
+  S.local = { bytes, name: file.name, sha, ok: false };
+  const info = $("fileInfo"); $("forceRow").hidden = true; $("force").checked = false;
+  const bad = m => { S.local = null; info.innerHTML = `<p class="banner bad"><span>${m}</span></p>`; };
+  let pkg; try { pkg = await readDfuZip(bytes); } catch (e) { return bad(esc(e.message)); }
+  const other = t.wrongName(file.name);
+  if (other) bad(`That's <b>${esc(other)}</b>, not the build picked above. Choose <code>${esc(t.name)}</code>.`);
+  else if (t.digest ? sha === t.digest : file.name === t.name) {
+    S.local.ok = true; info.innerHTML = `<p class="banner ok"><span>Checked: ${t.digest ? "matches the release checksum" : "right file name"}, ${(pkg.app.length / 1024).toFixed(0)} KB application.</span></p>`;
+  } else {
+    info.innerHTML = `<p class="banner warn"><span>This DFU package doesn't match ${t.digest ? "the release checksum" : `the expected name <code>${esc(t.name)}</code>`}.</span></p>`;
+    $("forceRow").hidden = false;
+  }
+  log(`Loaded ${file.name} (${fmtMB(bytes.length)}, sha256 ${shortSha(sha)}).`);
 }
 async function takeStm32File(file, t) {
   const bytes = new Uint8Array(await file.arrayBuffer()); const sha = await sha256hex(bytes);
@@ -1030,8 +1073,9 @@ function setPhase(label, frac, right) {
 }
 const result = (kind, html) => { $("result").innerHTML = html ? `<p class="banner ${kind}"><span>${html}</span></p>` : ""; };
 function updateInstallBtn() {
-  const k = S.target?.kind, ok = k === "esp" || k === "stm32", serial = "serial" in navigator;
+  const k = S.target?.kind, ok = k === "esp" || k === "stm32" || k === "nrf", serial = "serial" in navigator;
   $("install").disabled = S.busy || !ok || !serial; $("monitor").disabled = S.busy || !serial;
+  $("dfuMode").disabled = S.busy || k !== "nrf" || !serial;
   $("installHint").textContent = serial && k === "none" ? "Pick your device and firmware above to turn on Install." : "";
 }
 function setBusy(b) { S.busy = b; updateInstallBtn(); for (const el of document.querySelectorAll(".tab")) el.disabled = b; }
@@ -1050,9 +1094,124 @@ async function pickPort() {
   return S.port;
 }
 
+/* ---------- nRF52: Adafruit bootloader serial DFU ----------
+   The same protocol as adafruit-nrfutil (nordicsemi/dfu/dfu_transport_serial.py)
+   and the MeshCore web flasher: HCI packets in SLIP frames at 115200 baud;
+   START (app mode, sizes) → INIT (.dat) → DATA (512-byte chunks) → STOP. */
+async function readDfuZip(bytes) {
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let e = bytes.length - 22; while (e >= 0 && dv.getUint32(e, true) !== 0x06054b50) e--;
+  if (e < 0) throw new Error("That isn't a .zip file.");
+  const files = {}; let p = dv.getUint32(e + 16, true);
+  for (let n = dv.getUint16(e + 10, true); n > 0; n--) {
+    if (dv.getUint32(p, true) !== 0x02014b50) throw new Error("That .zip file is damaged.");
+    const method = dv.getUint16(p + 10, true), size = dv.getUint32(p + 20, true);
+    const nl = dv.getUint16(p + 28, true), xl = dv.getUint16(p + 30, true), cl = dv.getUint16(p + 32, true), lo = dv.getUint32(p + 42, true);
+    const name = new TextDecoder().decode(bytes.subarray(p + 46, p + 46 + nl));
+    const start = lo + 30 + dv.getUint16(lo + 26, true) + dv.getUint16(lo + 28, true), raw = bytes.subarray(start, start + size);
+    if (method === 0) files[name] = raw;
+    else if (method === 8) files[name] = new Uint8Array(await new Response(new Blob([raw]).stream().pipeThrough(new DecompressionStream("deflate-raw"))).arrayBuffer());
+    p += 46 + nl + xl + cl;
+  }
+  let m; try { m = JSON.parse(new TextDecoder().decode(files["manifest.json"])).manifest; } catch { throw new Error("That .zip has no DFU manifest, so it isn't an nRF52 DFU package."); }
+  const a = m?.application;
+  if (!a || !files[a.bin_file] || !files[a.dat_file]) throw new Error("That DFU package has no application image. (Bootloader or SoftDevice packages aren't installed here.)");
+  return { app: files[a.bin_file], init: files[a.dat_file] };
+}
+class NrfDfu {
+  constructor(port) { this.port = port; this.buf = []; this.wake = null; this.seq = 0; }
+  async open() {
+    await this.port.open({ baudRate: 115200 });
+    this.writer = this.port.writable.getWriter(); this.reader = this.port.readable.getReader();
+    this.loop = (async () => { try { for (;;) { const { value, done } = await this.reader.read(); if (done) break; for (const b of value) this.buf.push(b); this.wake?.(); } } catch {} })();
+  }
+  async close() {
+    try { await this.reader?.cancel(); } catch {} await this.loop;
+    try { this.reader?.releaseLock(); } catch {} try { this.writer?.releaseLock(); } catch {}
+    try { await this.port.close(); } catch {}
+  }
+  static crc16(d) {
+    let c = 0xFFFF;
+    for (const b of d) { c = ((c >> 8) & 0xFF) | ((c << 8) & 0xFF00); c ^= b; c ^= (c & 0xFF) >> 4; c ^= (c << 12) & 0xFFFF; c ^= ((c & 0xFF) << 5) & 0xFFFF; }
+    return c & 0xFFFF;
+  }
+  static u32(v) { return [v & 255, (v >>> 8) & 255, (v >>> 16) & 255, (v >>> 24) & 255]; }
+  packet(payload) {
+    this.seq = (this.seq + 1) % 8; const s = this.seq, n = payload.length;
+    const h = [s | (((s + 1) % 8) << 3) | (1 << 6) | (1 << 7), 14 | ((n & 0xF) << 4), (n & 0xFF0) >> 4];
+    h.push((~(h[0] + h[1] + h[2]) + 1) & 0xFF);
+    const body = [...h, ...payload]; const c = NrfDfu.crc16(body); body.push(c & 255, c >> 8);
+    const out = [0xC0]; for (const b of body) { if (b === 0xC0) out.push(0xDB, 0xDC); else if (b === 0xDB) out.push(0xDB, 0xDD); else out.push(b); }
+    out.push(0xC0); return Uint8Array.from(out);
+  }
+  async ack(ms = 5000) {
+    const end = Date.now() + ms;
+    for (;;) {
+      const a = this.buf.indexOf(0xC0), b = a < 0 ? -1 : this.buf.indexOf(0xC0, a + 1);
+      if (b > a + 1) { const f = this.buf.slice(a + 1, b); this.buf.splice(0, b + 1); const first = f[0] === 0xDB ? (f[1] === 0xDC ? 0xC0 : 0xDB) : f[0]; return (first >> 3) & 7; }
+      if (b === a + 1) { this.buf.splice(0, a + 1); continue; }   // back-to-back delimiters: skip the empty frame
+      const left = end - Date.now(); if (left <= 0) throw new Error("The bootloader stopped answering.");
+      await new Promise(r => { const t = setTimeout(r, left); this.wake = () => { clearTimeout(t); r(); }; }); this.wake = null;
+    }
+  }
+  async send(payload, ms) { await this.writer.write(this.packet(payload)); return this.ack(ms); }
+}
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+$("dfuMode").onclick = async () => {
+  if (S.busy) return;
+  await stopMonitor(); setBusy(true); result();
+  try {
+    let port;
+    try { port = await navigator.serial.requestPort(); }
+    catch (e) { if (e.name === "NotFoundError") throw new Error("No port was picked."); if (e.name === "SecurityError") throw new Error("USB access is blocked where this page is embedded. Open the flasher in its own tab."); throw e; }
+    log("Restarting the board into update mode (1200 baud touch)…", "d");
+    await port.open({ baudRate: 1200 }); await sleep(100); await port.close(); await sleep(1500);
+    S.port = null;
+    log("The board should now be in update mode. Press 2. Install firmware and pick its port.", "o");
+    result("ok", "<b>Update mode.</b> Now press <b>2. Install firmware</b> and pick the board's port. It may show a different name now.");
+  } catch (e) { log(String(e.message || e), "e"); result("bad", esc(String(e.message || e))); }
+  finally { setBusy(false); }
+};
+
+async function installNrf(t) {
+  await stopMonitor(); setBusy(true); result(); let dfu;
+  try {
+    let port;
+    try { port = await navigator.serial.requestPort(); }   // the bootloader's port: a new pick every time
+    catch (e) { if (e.name === "NotFoundError") throw new Error("No port was picked."); if (e.name === "SecurityError") throw new Error("USB access is blocked where this page is embedded. Open the flasher in its own tab."); throw e; }
+    const zip = await getFirmware(t);
+    const { app, init } = await readDfuZip(zip);
+    log(`DFU package: ${(app.length / 1024).toFixed(0)} KB application, ${init.length}-byte init packet.`, "d");
+    dfu = new NrfDfu(port);
+    try { await dfu.open(); } catch (e) { throw new Error(`Couldn't open the port (${e.message}). Close other programs using it and try again.`); }
+    setPhase("Starting the update", 0, "");
+    try { await dfu.send([...NrfDfu.u32(3), ...NrfDfu.u32(4), ...NrfDfu.u32(0), ...NrfDfu.u32(0), ...NrfDfu.u32(app.length)]); }
+    catch { throw new Error("No answer from the bootloader. Press 1 first (or double-press the board's reset button), then press 2 and pick the port the board shows in update mode."); }
+    setPhase("Erasing", 0, "");
+    await sleep(Math.max(500, (Math.floor(app.length / 4096) + 1) * 89.7));
+    await dfu.send([...NrfDfu.u32(1), ...init, 0, 0]);
+    const PAGE_WRITE = 4096 / 4 * 0.1;   // ms, as nrfutil: FLASH_PAGE_WRITE_TIME
+    const chunks = Math.ceil(app.length / 512);
+    for (let i = 0; i < chunks; i++) {
+      await dfu.send([...NrfDfu.u32(4), ...app.subarray(i * 512, (i + 1) * 512)]);
+      if (i % 8 === 0) await sleep(PAGE_WRITE);
+      setPhase("Writing firmware", (i + 1) / chunks);
+    }
+    await sleep(PAGE_WRITE);
+    setPhase("Finishing", 1, "");
+    await dfu.send([...NrfDfu.u32(5)], 10000);
+    setPhase("Installed", 1, "100%"); log("Done. The board is restarting with the new firmware.", "o");
+    result("ok", `<b>${esc(t.label)} is installed.</b> The board restarts on its own. If it doesn't, press its reset button once.`);
+  } catch (e) {
+    const m = String(e?.message || e); log(m, "e"); result("bad", esc(m)); $("phase").textContent = "Stopped";
+  } finally { await dfu?.close(); S.port = null; setBusy(false); }
+}
+
 $("install").onclick = async () => {
   const t = S.target; if (S.busy) return;
   if (t?.kind === "stm32") return installStm32(t);
+  if (t?.kind === "nrf") return installNrf(t);
   if (t?.kind !== "esp") return;
   await stopMonitor(); setBusy(true); result(); let transport;
   try {

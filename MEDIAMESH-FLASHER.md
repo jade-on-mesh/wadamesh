@@ -9,7 +9,10 @@ One page, three tabs:
   from jade-on-mesh/spectra-cascadia releases.
 
 ESP32-family boards flash over Web Serial (esptool-js, merged image at 0x0, chip checked
-before writing). nRF52 boards get UF2 drag-and-drop instructions plus the .uf2 / DFU .zip.
+before writing). nRF52 boards install over USB too, with the Adafruit bootloader's serial DFU
+(the same protocol as adafruit-nrfutil and the MeshCore web flasher): a 1200-baud touch restarts
+the board into its bootloader, then the catalog's DFU .zip is sent. UF2 drag-and-drop stays as a
+fallback.
 The DX-LR30 flashes through the STM32 ROM bootloader over its CH340 (57600 baud, 8E1, after
 BOOT0 + RESET): only the pages the image covers are erased, so the settings pages at
 0x0800F800-0x0800FFFF (name, identity, passwords) survive, and every block is read back and
@@ -20,7 +23,7 @@ compared before the node is started. XL asks for confirmation that the board pas
 - `flasher/index.html` - the page. Settings are in `CONFIG` at the top of the script.
 - `.github/workflows/flasher-pages.yml` - publishes the page to GitHub Pages (gh-pages branch) with copies of
   the newest Wadamesh TAK images, all Spectra-Cascadia images and Keymind Cascade's ESP32
-  companion and repeater USB images, so every tab downloads with one click. Republishes right after
+  companion and repeater USB images and nRF52 DFU packages, so every tab downloads with one click. Republishes right after
   each Wadamesh TAK release, and within 30 minutes of a new Keymind Cascade or Spectra-Cascadia
   release (a quick check that does nothing when nothing changed). Run it by hand from
   Actions > flasher-pages > Run workflow to publish at once.
