@@ -194,6 +194,19 @@ static watchfeed::Store* watch() {
       buf[n] = 0;
       s_watch->load(buf);
     }
+    // #icewatch is watched by default, to show what watching does (as the
+    // app): added once, on new radios and existing ones alike, then it's an
+    // ordinary choice that can be turned off. It only matters with that
+    // channel added. The "once" is kept in "watchdef".
+    uint8_t applied = 0;
+    size_t an = 0;
+    if (!s_io.readFile("watchdef", &applied, 1, &an) || an != 1 || applied != 1) {
+      s_watch->setWatched("#icewatch", true);
+      const size_t m = s_watch->save(buf, sizeof buf);
+      s_io.writeFile("teamwatch", (const uint8_t*)buf, m);
+      applied = 1;
+      s_io.writeFile("watchdef", &applied, 1);
+    }
   }
   return s_watch;
 }
