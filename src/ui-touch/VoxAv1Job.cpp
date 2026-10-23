@@ -21,7 +21,7 @@ constexpr uint32_t kStackBytes = 24 * 1024;
 std::atomic<uint8_t> g_state{kIdle};
 uint8_t* g_payload = nullptr;
 size_t g_len = 0;
-int g_max_side = 768;
+int g_max_side = 1024;
 VoxAv1Result g_result = kVoxAv1DecodeFailed;
 VoxAv1Image g_img;
 Stats g_stats;
