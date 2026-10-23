@@ -170,7 +170,8 @@ jobs:
         if: failure()
         shell: bash
         run: |
-          grep -E "error:|undefined reference|overflowed|greater than|too big" build.log | head -30 \
+          # (|| true: with no match, grep's status would end the step before the tail below)
+          { grep -E "error:|Error|undefined reference|overflowed|greater than|too big" build.log || true; } | head -30 \
             | while IFS= read -r l; do echo "::error::${l}"; done
           tail -12 build.log | while IFS= read -r l; do echo "::error title=build log tail::${l}"; done
       - name: Where the flash goes (largest objects and symbols, when a build fails)
