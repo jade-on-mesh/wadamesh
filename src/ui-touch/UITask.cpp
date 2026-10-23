@@ -174,7 +174,7 @@ static_assert(ChannelSenderSplit::kMaxWireName >= (size_t)UITask::MAX_SENDER_NAM
   #include <lvgl.h>
   #include <src/draw/sw/lv_draw_sw.h>   // the software blend: the aurora draws its rows with it
   #include "../helpers/input/HeltecV4CapTouch.h"
-  #if CAP_TRACKBALL
+#if CAP_TRACKBALL
     #include "../helpers/input/TDeckTrackball.h"   // QUOTED: this tree's copy (tdeckTrackballSetEnabled), not the lib's older one
   #endif
   #if defined(HAS_TDECK_KEYBOARD)
@@ -3373,6 +3373,7 @@ static unsigned long s_live_diag_next_ms = 0;
 static unsigned long s_sig_probe_at = 4000;
 /** Keep live diag overlay available but hidden by default; flip true for field debugging. */
 constexpr bool k_show_live_diag_overlay = false;
+[[maybe_unused]] static bool s_tb_ball_talk = false;   // the trackball held still to talk (walkie::ballTalks)
 
 #if CAP_TRACKBALL
 // ---- T-Deck trackball cursor ----
@@ -82044,12 +82045,28 @@ void UITask::loop() {
       // cursor mode the click is held back until it is clearly a click (released
       // before the hold) or a drag (the ball rolls while pressed), so a hold never
       // also long-presses whatever sits under the cursor.
-      enum : uint8_t { TBH_IDLE, TBH_PENDING, TBH_DRAG, TBH_DONE };
+      enum : uint8_t { TBH_IDLE, TBH_PENDING, TBH_DRAG, TBH_DONE, TBH_TALK };
       static uint8_t       s_tbh      = TBH_IDLE;
       static unsigned long s_tbh_down = 0;
       const bool down    = tb_pressed && !s_tb_wake_consume;
       const bool hold_ok = !s_tb_nav && !SnakeGame::isOpen() && !luaAppIsOpen();
-      if (!hold_ok) {
+      // In a channel chat (or with the walkie-talkie card up) the button is
+      // push-to-talk: talking from the moment it goes in until it's let go
+      // (WALKIE.md). In D-pad mode only with the composer focused: elsewhere the
+      // button selects, and the card's Talk button is held that way.
+#if (defined(HAS_TDECK_GT911) || defined(HAS_TDISPLAY_P4)) && CAP_LUA_AUDIO
+      const bool mic_ui = s_mic_pill || s_mic_review;   // recording or reviewing a voice message
+#else
+      const bool mic_ui = false;
+#endif
+      if (down && s_user_btn_prev == HIGH)   // just went in
+        s_tb_ball_talk = !SnakeGame::isOpen() && !luaAppIsOpen() && !mic_ui && walkie::ballTalks() &&
+                         (!s_tb_nav || (s_nav_group && lv_group_get_focused(s_nav_group) == g_lv.ch.composer_ta));
+      if (!down) s_tb_ball_talk = false;
+      if (s_tb_ball_talk) {
+        s_tbh = TBH_TALK;                                 // no click, drag or mode switch this press
+        s_tb_click_press = false;
+      } else if (!hold_ok) {
         s_tbh = TBH_IDLE;
         s_tb_click_press = down;
       } else if (down) {
@@ -82479,7 +82496,7 @@ void UITask::loop() {
 #endif
     uiCp("ui:voxpaint");
 #if CAP_LUA_AUDIO && defined(HAS_TDECK_KEYBOARD) && defined(ESP32)
-    walkie::keyTick(tdeckKeyboardMicHeld(), now);   // hold Mic to talk (WALKIE.md)
+    walkie::keyTick(tdeckKeyboardMicHeld() || s_tb_ball_talk, now, s_tb_ball_talk);   // Mic key or trackball (WALKIE.md)
 #endif
     static uint32_t s_vox_voice_seen = 0;   // repaint the bubble when playback starts or ends
     if (s_vox_voice_sid != s_vox_voice_seen) { s_vox_voice_seen = s_vox_voice_sid; g_lv.dirty_timeline = true; }
