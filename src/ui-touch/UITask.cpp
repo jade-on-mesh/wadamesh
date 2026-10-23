@@ -46378,9 +46378,16 @@ static bool voxBubbleTappable(const UITask::UIMessage& m, const VoxWire::Envelop
   return env.kind == VoxWire::kCodec2 && m.deliv_state != UITask::DELIV_FAILED;
 }
 
+static void bubblePhotoOpen(int idx);
+// The row's user data is the ring index + 1, so 0 (no handler) is never a message.
 static void bubblePhotoTapCb(lv_event_t* e) {
   if (lv_event_get_code(e) != LV_EVENT_SHORT_CLICKED || !g_lv.task) return;
-  const int idx = (int)(intptr_t)lv_event_get_user_data(e);
+  bubblePhotoOpen((int)(intptr_t)lv_event_get_user_data(e) - 1);
+}
+
+// Opens, downloads or plays the photo or voice message at ring index `idx`.
+static void bubblePhotoOpen(int idx) {
+  if (!g_lv.task) return;
   UITask::UIMessage m;
   if (!g_lv.task->getMessageByIndex(idx, m)) return;
   VoxWire::Envelope env;
@@ -47020,7 +47027,7 @@ static lv_coord_t chatVirtCreateBubble(LvChatPanel* p, int logical_i, int ring_i
   const bool photo_tap = chatMessagePhoto(m, &photo_env, nullptr, 0) && voxBubbleTappable(m, photo_env);
   if (photo_tap)
     lv_obj_add_event_cb(row, bubblePhotoTapCb, LV_EVENT_SHORT_CLICKED,
-                        reinterpret_cast<void*>(static_cast<intptr_t>(ring_idx)));
+                        reinterpret_cast<void*>(static_cast<intptr_t>(ring_idx + 1)));
 #if !defined(HAS_TDECK_PRO)
   if (link_label && !photo_tap) {
     lv_obj_add_flag(bubble, LV_OBJ_FLAG_EVENT_BUBBLE);
@@ -47130,7 +47137,7 @@ static lv_coord_t chatVirtCreateCompactRow(LvChatPanel* p, int logical_i, int ri
   VoxWire::Envelope compact_photo;
   if (chatMessagePhoto(m, &compact_photo, nullptr, 0) && voxBubbleTappable(m, compact_photo))
     lv_obj_add_event_cb(row, bubblePhotoTapCb, LV_EVENT_SHORT_CLICKED,
-                        reinterpret_cast<void*>(static_cast<intptr_t>(ring_idx)));
+                        reinterpret_cast<void*>(static_cast<intptr_t>(ring_idx + 1)));
   else if (compact_has_coords && !(m.outgoing && m.deliv_state == UITask::DELIV_FAILED))
     lv_obj_add_event_cb(row, bubbleCoordTapCb, LV_EVENT_SHORT_CLICKED,
                         reinterpret_cast<void*>(static_cast<intptr_t>(ring_idx)));
@@ -49225,6 +49232,63 @@ static void pagerLockingPopupShow() {
   lv_bar_set_range(s_pager_locking_bar, 0, 1000);
   lv_bar_set_value(s_pager_locking_bar, 0, LV_ANIM_OFF);
 }
+
+#if defined(TLORA_PAGER)
+// The Pager has no touchscreen, so a photo or voice bubble can't be tapped.
+// Holding Fn (Alt, the symbol key) on its own for 0.6 s in an open chat opens
+// the photo or voice message picked with the encoder, else the newest one on
+// screen, as a tap would (download, view, play). Holding it again within a
+// minute steps to the next older one. A hold
+// that types a symbol, turns the encoder or makes a chord is left alone, and
+// the hold that opens one doesn't arm the symbol layer when let go.
+static void updatePagerFnHoldMedia(unsigned long now) {
+  static constexpr uint32_t kHoldMs = 600;
+  static uint32_t s_start = 0;
+  static bool s_fired = false;
+  static int s_last_idx = -1;
+  static uint32_t s_last_ms = 0;
+  if (!pagerKeyboardAltHeldAlone()) { s_start = 0; s_fired = false; return; }
+  if (!s_start) { s_start = now ? now : 1; return; }
+  if (s_fired || now - s_start < kHoldMs) return;
+  s_fired = true;
+  LvChatPanel* cp = g_lv.ch.detail_open ? &g_lv.ch : (g_lv.dm.detail_open ? &g_lv.dm : nullptr);
+  if (!cp || !cp->msgs || !lv_obj_is_valid(cp->msgs) || !g_lv.task) return;
+  pagerKeyboardMarkAltUsed();   // letting go now mustn't arm the symbol layer
+  // A photo or voice bubble picked with the encoder: that one.
+  if (lv_obj_t* f = s_nav_group ? lv_group_get_focused(s_nav_group) : nullptr) {
+    const int v = (int)(intptr_t)lv_obj_get_event_user_data(f, bubblePhotoTapCb);
+    if (v > 0) {
+      s_last_idx = v - 1;
+      s_last_ms = now;
+      bubblePhotoOpen(v - 1);
+      g_lv.task->noteUserInput();
+      return;
+    }
+  }
+  // The photo and voice rows built for the chat (oldest first), by ring index.
+  int idx[48];
+  int n = 0;
+  const uint32_t kids = lv_obj_get_child_cnt(cp->msgs);
+  for (uint32_t i = 0; i < kids && n < 48; i++) {
+    lv_obj_t* row = lv_obj_get_child(cp->msgs, i);
+    const int v = (int)(intptr_t)lv_obj_get_event_user_data(row, bubblePhotoTapCb);
+    if (v > 0) idx[n++] = v - 1;
+  }
+  if (!n) {
+    g_lv.task->showAlert(TR("No photo or voice message on screen"), 1500);
+    return;
+  }
+  int pick = n - 1;   // the newest
+  if (s_last_idx >= 0 && now - s_last_ms < 60000) {
+    for (int i = n - 1; i >= 0; i--)
+      if (idx[i] == s_last_idx) { pick = i > 0 ? i - 1 : n - 1; break; }
+  }
+  s_last_idx = idx[pick];
+  s_last_ms = now;
+  bubblePhotoOpen(idx[pick]);
+  g_lv.task->noteUserInput();
+}
+#endif
 
 static void updatePagerSpaceHold(unsigned long now) {
   const bool held = pagerKeyboardSpaceHeld();
@@ -82902,6 +82966,9 @@ void UITask::loop() {
 #endif
     updatePagerBackspaceHold(now);
     updatePagerSpaceHold(now);
+#if defined(TLORA_PAGER)
+    updatePagerFnHoldMedia(now);
+#endif
     // Missing on this board until now (T-Deck/M9 both already call it in their
     // own equivalent branch): without this the lock-screen clock/unread badge
     // never refreshed again after the first reveal -- correct at the moment

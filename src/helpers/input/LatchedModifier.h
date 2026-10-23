@@ -77,6 +77,8 @@ class LatchedModifier {
   }
 
   bool held() const { return held_; }
+  // Held, and nothing has used it yet (no key, no chord, no encoder turn).
+  bool heldUnused() const { return held_ && !used_while_held_; }
   bool latched() const { return one_shot_ || locked_; }
   bool active() const { return held_ || one_shot_ || locked_; }
   bool locked() const { return locked_; }

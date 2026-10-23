@@ -187,6 +187,7 @@ While any text field is focused, including a Wi-Fi or repeater password:
 | **Space** (double-tap, within 250 ms) | Switches between English and your configured secondary keyboard layout | Nothing |
 | **Space** (hold ~1 s) | Nothing | Locks the screen (shows a "Locking…" progress bar; tapping any key cancels) |
 | **Fn (Alt)** (tap / double-tap) | Next key uses symbols / lock symbols until tapped again | Same |
+| **Fn (Alt)** (hold alone ~0.6 s) *in a chat* | Opens the photo or voice message picked with the encoder, otherwise the newest one on screen: downloads it, shows the photo, or plays the clip, as tapping it does on a touchscreen. Hold again within a minute for the next older one | Same |
 | **Fn (Alt) held + Enter** | **Paste** the clipboard at the cursor (replaces a highlighted range). The clipboard is filled by **Copy** in a message bubble's action menu. Fn must be held, not tapped | Nothing |
 
 The **BOOT** button (top of the device) instantly wakes the screen from
@@ -283,6 +284,7 @@ that changes keyboard language.
 | Fn + encoder click (text field focused) | Open special-character picker |
 | Fn tap alone | Use the symbol layer for the next key |
 | Fn double-tap | Lock the symbol layer; tap Fn again to unlock |
+| Fn held alone ~0.6 s (in a chat) | Open the picked photo or voice message, else the newest on screen; again for the next older |
 | Hold Shift + letter | Momentary uppercase |
 | Fn + Shift (editing a field) | Toggle Caps Lock |
 | Fn + Shift (not editing a field) | Nothing |

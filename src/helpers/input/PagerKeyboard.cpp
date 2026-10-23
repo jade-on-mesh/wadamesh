@@ -160,6 +160,8 @@ void pagerKeyboardSetBacklight(uint8_t level) {
 
 bool pagerKeyboardAltHeld() { return s_state.altHeld(); }
 
+bool pagerKeyboardAltHeldAlone() { return s_state.altHeldUnused(); }
+
 void pagerKeyboardMarkAltUsed() { s_state.markAltUsed(); }
 
 void pagerKeyboardDiscardAlt() {
