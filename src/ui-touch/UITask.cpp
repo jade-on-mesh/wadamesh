@@ -17580,11 +17580,12 @@ static void sysInfoTextLive(char* buf, size_t cap) {
     const uint32_t sw_s = s_seen_ms && dt ? (uint32_t)((uint64_t)(ms.switches - s_seen_sw) * 1000 / dt) : 0;
     s_seen_ms = now; s_seen_busy = ms.scan_busy_us; s_seen_sw = ms.switches;
     p += snprintf(buf + p, cap - p,
-                  "MediaMesh\n  radio2 %s%s\n  TX main %lu, radio2 %lu\n  RX main %lu, radio2 %lu\n"
+                  "MediaMesh\n  radio2 %s%s\n  %.3f MHz, %g kHz, SF%u, CR4/%u\n  TX main %lu, radio2 %lu\n  RX main %lu, radio2 %lu\n"
                   "  not sent %lu\n  scan %lu switches/s, radio %lu%%\n\n",
                   ms.mode == mediamesh::MODE_RXTX ? "on" : ms.mode == mediamesh::MODE_RX ? "listen only" : "off",
                   ms.mode == mediamesh::MODE_OFF ? "" : ms.scanning ? (ms.timing_valid ? ", scanning" : ", NO TIMING")
                                                                     : ", NOT SCANNING",
+                  (double)ms.r2.freq, (double)ms.r2.bw, (unsigned)ms.r2.sf, (unsigned)ms.r2.cr,
                   (unsigned long)ms.tx[0], (unsigned long)ms.tx[1], (unsigned long)ms.rx[0], (unsigned long)ms.rx[1],
                   (unsigned long)ms.dropped, (unsigned long)sw_s, (unsigned long)busy_pct);
   }

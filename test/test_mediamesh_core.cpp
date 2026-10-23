@@ -156,6 +156,7 @@ static void testHeard() {
   run("set radio2 911.15,250,7,5,rxtx", r, e, out);
   run("get radio2.status", r, e, out);
   assert(!strstr(out, "heard="));
+  assert(strstr(out, " r2=911.150/250/SF7/CR5"));   // to compare two radios' radio2
   e.stats.heard_s = 42;
   run("get radio2.status", r, e, out);
   assert(strstr(out, " heard=42s"));

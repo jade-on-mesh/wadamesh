@@ -186,6 +186,7 @@ struct Status {
   uint32_t dropped = 0;           // radio2 packets that never went out
   uint32_t scan_busy_us = 0;      // the scan's time holding the radio (and its SPI bus), since boot
   bool timing_valid = false;
+  Params r2;                      // the radio2 profile in use (to compare radios)
 };
 Status status();
 
