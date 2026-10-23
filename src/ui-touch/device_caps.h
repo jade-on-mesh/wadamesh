@@ -701,12 +701,14 @@
 // USB cable (Web Serial) while the USB Files app is open (UsbFilesSession.h).
 // Every ESP32-S3 board whose USB socket is the chip's own USB (ARDUINO_USB_CDC_ON_BOOT):
 // UsbFilesSession handles both of its serial drivers (HW-CDC and TinyUSB CDC), proven on
-// the T-Deck and the Heltec V4. Not yet: boards behind a USB-serial bridge chip (M9,
-// CrowPanel 3.5/5.0, Attaky, SenseCAP Indicator: 115200 baud and a UART receive buffer
-// that is fixed once running), the ESP32-P4 builds (IDF), and the T-Deck Pro family incl.
-// the Max (left out from the start; e-paper refresh during a transfer is untested).
+// the T-Deck and the Heltec V4. Wadamesh-tak: also the ThinkNode M9, behind its USB-serial
+// bridge: the page opens bridges (CH340/CP210x) at 115200, the M9's UART speed, and the
+// UART's receive buffer is sized at boot (main.cpp, kUsbFilesUartRxQueue) because it is
+// fixed once running. Not yet: the other bridge boards (CrowPanel 3.5/5.0, Attaky,
+// SenseCAP Indicator), the ESP32-P4 builds (IDF), and the T-Deck Pro family incl. the Max
+// (left out from the start; e-paper refresh during a transfer is untested).
 #ifndef CAP_USB_FILES
-  #if defined(ESP32) && ARDUINO_USB_CDC_ON_BOOT && !defined(HAS_TDECK_PRO) && \
+  #if defined(ESP32) && (ARDUINO_USB_CDC_ON_BOOT || defined(HAS_THINKNODE_M9)) && !defined(HAS_TDECK_PRO) && \
       !defined(HAS_TDISPLAY_P4) && !defined(HAS_CROWPANEL_P4_101) && !defined(HAS_TANMATSU)
     #define CAP_USB_FILES 1
   #else

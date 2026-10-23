@@ -22,6 +22,9 @@
 #include "wadamesh_mark_rgb.h"               // anti-aliased mesh-mark (RGB565) for the pre-LVGL boot screen
 #include "ui-touch/TouchSleep.h"             // idle light-sleep controller (loopEnd called at end of loop())
 #include "ui-touch/device_caps.h"            // CAP_BLE_KEYBOARD: keyboard mode keeps the phone link paused from boot
+#if CAP_USB_FILES
+#include "ui-touch/UsbFilesSession.h"   // kUsbFilesUartRxQueue
+#endif
 #endif
 
 #if defined(WADA_LVGL_O2)
@@ -786,6 +789,11 @@ static void wioTrackerL2GpsProbe() {
 
 
 void setup() {
+#if CAP_USB_FILES && !ARDUINO_USB_CDC_ON_BOOT
+  // USB Files over a USB-serial bridge (the M9): the UART's receive buffer can't
+  // grow once it runs, so it is sized for USB Files' frames here.
+  Serial.setRxBufferSize(kUsbFilesUartRxQueue);
+#endif
   Serial.begin(115200);
 #if defined(HAS_RAK_TAP_V2)
   delay(1500);  // USB-CDC enumeration before boot logs

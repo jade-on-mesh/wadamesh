@@ -26,6 +26,11 @@ extern volatile bool g_usb_files_owns_serial;
 
 #include "../helpers/esp32/UsbFilesProtocol.h"
 
+// A board on a USB-serial bridge (the ThinkNode M9): the UART's receive buffer,
+// set before Serial.begin() (main.cpp) because it can't change once running.
+// 2 KB holds a 1 KB chunk's whole frame: about 0.1 s a frame at 115200 baud.
+constexpr size_t kUsbFilesUartRxQueue = 2048;
+
 struct UsbFilesRootInfo {
   UsbFiles::Root id = UsbFiles::ROOT_NONE;
   const char* label = "";

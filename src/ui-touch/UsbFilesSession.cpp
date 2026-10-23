@@ -53,8 +53,8 @@ size_t setRxQueue(size_t n) {
 #elif ARDUINO_USB_CDC_ON_BOOT
   return Serial.setRxBufferSize(n);   // TinyUSB CDC keeps the old queue if this fails
 #else
-  (void)n;                            // hardware UART: fixed once running
-  return 0;
+  (void)n;                            // hardware UART: fixed once running, sized at boot
+  return kUsbFilesUartRxQueue;
 #endif
 }
 
