@@ -7168,10 +7168,25 @@ static lv_obj_t* navOpenDropdown() {
 // Tanmatsu's navPump() (below), the pager/M9 handleHwKey() Enter branches and the
 // touchscreen boards' external-keyboard Enter (bleKbdDispatch) — board-agnostic,
 // only touches s_nav_group/navOpenChatPanel/plain lv_obj calls.
+#if defined(HAS_M9_KEYBOARD)
+static void bubblePhotoTapCb(lv_event_t* e);
+static void bubblePhotoOpen(int idx);
+#endif
 static bool navEnterBubble() {
   lv_obj_t* foc = s_nav_group ? lv_group_get_focused(s_nav_group) : nullptr;
   LvChatPanel* cp = navOpenChatPanel();
   if (cp && cp->msgs && foc && lv_obj_is_valid(foc) && lv_obj_get_parent(foc) == cp->msgs) {
+#if defined(HAS_M9_KEYBOARD)
+    // The M9 has no touchscreen, so a photo or voice bubble could never be
+    // "tapped": Enter opens it (download, view, play), as a tap does. Its menu
+    // stays on the triangle key (the hold action). Sym can't do this: the
+    // keyboard's controller keeps Shift/Sym/Alt to itself.
+    const int v = (int)(intptr_t)lv_obj_get_event_user_data(foc, bubblePhotoTapCb);
+    if (v > 0) {
+      bubblePhotoOpen(v - 1);
+      return true;
+    }
+#endif
     lv_event_send(foc, LV_EVENT_LONG_PRESSED, nullptr);
     return true;
   }
