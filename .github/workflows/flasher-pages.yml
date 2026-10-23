@@ -15,11 +15,14 @@ name: flasher-pages
 # firmware copies don't pile up in history). Pages serves it at
 # https://jade-on-mesh.github.io/wadamesh-tak/ (Settings > Pages: branch gh-pages, / (root)).
 #
-# Runs after every successful fork-release, when the flasher changes, or by hand.
-# It also runs daily for new Spectra-Cascadia and Keymind Cascade releases; run it
-# by hand (Actions > flasher-pages > Run workflow) to publish one right away.
-# (A release created by fork-release with GITHUB_TOKEN does not fire `release`
-# events, which is why this listens for the workflow run instead.)
+# Stays in sync with all three firmwares:
+# - Wadamesh TAK: right after every successful fork-release (a release created
+#   with GITHUB_TOKEN fires no `release` event, hence workflow_run).
+# - Spectra-Cascadia and Keymind Cascade live in other repos, so every 30 minutes
+#   a quick check compares their newest releases (and Keymind's catalog) with what
+#   was last published, and republishes only when something changed.
+# - Also on changes to the flasher itself, and by hand (Actions > flasher-pages >
+#   Run workflow), which always republishes.
 
 on:
   workflow_run:
@@ -31,7 +34,7 @@ on:
       - "flasher/**"
       - ".github/workflows/flasher-pages.yml"
   schedule:
-    - cron: "17 11 * * *"   # daily: pick up new Spectra-Cascadia and Keymind Cascade releases
+    - cron: "7,37 * * * *"   # every 30 min: a cheap check, publishes only when something changed
   workflow_dispatch:
 
 permissions:
@@ -39,7 +42,7 @@ permissions:
 
 concurrency:
   group: flasher-pages
-  cancel-in-progress: true
+  cancel-in-progress: false   # never cut off a publish that is already running
 
 jobs:
   build:
@@ -50,7 +53,35 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Anything new since the last publish?
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          CATALOG: https://raw.githubusercontent.com/mikecarper/MeshCore/keymindCascade/mesh-america/keymind-cascade-v1.16.0-provider.json
+        run: |
+          set -euo pipefail
+          {
+            gh api "repos/$REPO/releases?per_page=20" --jq '.[] | select(.tag_name | startswith("tak-beta_")) | .tag_name'
+            gh api "repos/jade-on-mesh/spectra-cascadia/releases?per_page=30" --jq '.[] | .tag_name + " " + ([.assets[].name] | sort | join(","))'
+            curl -sSfL --retry 3 "$CATALOG" | sha256sum
+            sha256sum flasher/index.html .github/workflows/flasher-pages.yml
+          } > fingerprint.txt
+          fp=$(sha256sum fingerprint.txt | cut -c1-64)
+          echo "fp=$fp" >> "$GITHUB_OUTPUT"
+          last=""
+          if git fetch -q --depth 1 origin gh-pages 2>/dev/null; then last=$(git show FETCH_HEAD:sync-state.txt 2>/dev/null || true); fi
+          if [ "$EVENT" = "schedule" ] && [ "$fp" = "$last" ]; then
+            echo "Nothing new; the published flasher is current."
+            echo "go=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Publishing ($EVENT)."
+            echo "go=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Mirror the newest releases' USB images
+        if: steps.check.outputs.go == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -94,6 +125,7 @@ jobs:
           PY
 
       - name: Mirror Spectra-Cascadia (DX-LR30) releases
+        if: steps.check.outputs.go == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           SPECTRA: jade-on-mesh/spectra-cascadia
@@ -128,6 +160,7 @@ jobs:
           du -sh site
 
       - name: Mirror Keymind Cascade ESP32 companion and repeater USB images
+        if: steps.check.outputs.go == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           KEYMIND: mikecarper/MeshCore
@@ -178,7 +211,12 @@ jobs:
           PY3
           du -sh site site/keymind
 
+      - name: Record what was published
+        if: steps.check.outputs.go == 'true'
+        run: echo "${{ steps.check.outputs.fp }}" > site/sync-state.txt
+
       - name: Publish to the gh-pages branch
+        if: steps.check.outputs.go == 'true'
         uses: peaceiris/actions-gh-pages@v4.1.0
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}

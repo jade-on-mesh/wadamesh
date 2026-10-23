@@ -20,10 +20,12 @@ compared before the node is started. XL asks for confirmation that the board pas
 - `flasher/index.html` - the page. Settings are in `CONFIG` at the top of the script.
 - `.github/workflows/flasher-pages.yml` - publishes the page to GitHub Pages (gh-pages branch) with copies of
   the newest Wadamesh TAK images, all Spectra-Cascadia images and Keymind Cascade's ESP32
-  companion and repeater USB images, so every tab downloads with one click. Runs after each
-  Wadamesh TAK release, daily, and by hand (Actions > flasher-pages > Run workflow).
+  companion and repeater USB images, so every tab downloads with one click. Republishes right after
+  each Wadamesh TAK release, and within 30 minutes of a new Keymind Cascade or Spectra-Cascadia
+  release (a quick check that does nothing when nothing changed). Run it by hand from
+  Actions > flasher-pages > Run workflow to publish at once.
 - `proxy/cors-proxy-worker.js` - optional Cloudflare Worker relay, only needed if a file isn't on
-  the Pages copy (for example a Keymind build published since the last run). Put its URL in
+  the Pages copy yet (for example in the minutes after a new Keymind build is published). Put its URL in
   `CONFIG.proxy`.
 
 ## Why the copies
