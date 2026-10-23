@@ -59,6 +59,11 @@ jobs:
           g++ -std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined -I src \
               -o /tmp/test_predict_text test/test_predict_text.cpp
           /tmp/test_predict_text
+      - name: Back-track (track thinning and following back)
+        run: |
+          g++ -std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined -I src \
+              -o /tmp/test_backtrack test/test_backtrack.cpp
+          /tmp/test_backtrack
       - name: MediaMesh coverage margins (golden values shared with Open TAK)
         run: |
           g++ -std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined -I src \

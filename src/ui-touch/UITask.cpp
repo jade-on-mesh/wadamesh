@@ -39604,6 +39604,38 @@ static void mapOptTrackCb(lv_event_t* e) {
   refreshMapInfoLabel();
   renderMapMarkers();
 }
+// Map options > Follow my track back (BACKTRACK.md): this session's recorded
+// track, followed from where you are back to where it began, with the turn
+// cues of a shared route.
+#if CAP_TAK_EXTRAS
+bool teamFollowTrack(const int32_t* lat5, const int32_t* lon5, int n, const char* label);   // TeamUI.inc
+static void mapOptBacktrackCb(lv_event_t* e) {
+  if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+  const int total = s_trk_n < k_trk_max ? s_trk_n : k_trk_max;
+  if (!s_trk || total < 2) {
+    if (g_lv.task) g_lv.task->showAlert(TR("No track yet: turn on Record track and go for a walk first"), 2600);
+    return;
+  }
+  int32_t* la = (int32_t*)malloc(sizeof(int32_t) * total);
+  int32_t* lo = (int32_t*)malloc(sizeof(int32_t) * total);
+  bool ok = false;
+  if (la && lo) {
+    for (int k = 0; k < total; k++) {   // oldest first
+      const TrkPt& p = s_trk[(s_trk_n - total + k) % k_trk_max];
+      la[k] = p.lat_e6 / 10;
+      lo[k] = p.lon_e6 / 10;
+    }
+    ok = teamFollowTrack(la, lo, total, TR("Back to start"));
+  }
+  free(la);
+  free(lo);
+  lv_indev_t* a = lv_indev_get_act();
+  if (a) lv_indev_wait_release(a);
+  closeMapOptions();
+  if (g_lv.task) g_lv.task->showAlert(ok ? TR("Following your track back") : TR("Out of memory"), 1600);
+  renderMapMarkers();
+}
+#endif  // CAP_TAK_EXTRAS
 #endif
 static void mapOptFavOnlyCb(lv_event_t* e) {
   if (lv_event_get_code(e) != LV_EVENT_VALUE_CHANGED) return;
@@ -40019,6 +40051,9 @@ static void openMapOptions() {
     lv_obj_align(l, LV_ALIGN_LEFT_MID, 8, 0);
     y += 40;
   }
+#if CAP_TRACKS && CAP_TAK_EXTRAS
+  mk_row_btn(LV_SYMBOL_LOOP "  Follow my track back", mapOptBacktrackCb);
+#endif
   mk_row_btn(LV_SYMBOL_REFRESH "  Reload tiles in view", mapOptReloadCb);
   mk_row_btn(LV_SYMBOL_EYE_OPEN "  About / credits",     mapOptInfoCb);
 
