@@ -22,6 +22,22 @@ namespace {
 
 fs::FS* g_fs = nullptr;
 uint32_t g_version = 0;
+// Photos and talks whose fetch changed since stateVersion() last looked, and the
+// status each was last seen in: a packet arriving changes only the progress, a
+// new status (requesting, complete, failed) is what the chat must show soon.
+uint32_t g_state_version = 0;
+uint32_t g_touched[8];
+int g_touched_n = 0;
+struct LastSt { uint32_t sid; uint8_t st; };
+LastSt g_last_st[16];
+int g_last_st_next = 0;
+void touched(uint32_t sid) {
+  g_version++;
+  for (int i = 0; i < g_touched_n; i++) if (g_touched[i] == sid) return;
+  if (g_touched_n < 8) g_touched[g_touched_n++] = sid;
+  else g_state_version++;   // too many at once: treat it as a real change
+}
+void bumpState() { g_version++; g_state_version++; }
 
 // What each recent envelope was, so a finished clip is stored the right way:
 // a photo as its payload (/vox_<sid>.vi1, opens in Files), a voice clip as
@@ -148,7 +164,7 @@ class MeshIo : public VoxFetchIo {
     return true;
   }
 
-  void changed(uint32_t) override { g_version++; }
+  void changed(uint32_t sid) override { touched(sid); }
 };
 
 MeshIo g_io;
@@ -315,6 +331,24 @@ bool loadFile(uint32_t sid, bool voice, uint8_t** data, size_t* len) {
 
 uint32_t version() { return g_version; }
 
+uint32_t stateVersion() {
+  for (int i = 0; i < g_touched_n; i++) {
+    const uint32_t sid = g_touched[i];
+    const uint8_t st = (uint8_t)g_fetch.status(sid);
+    int at = -1;
+    for (int j = 0; j < 16; j++) if (g_last_st[j].sid == sid) { at = j; break; }
+    if (at < 0) {
+      at = g_last_st_next;
+      g_last_st_next = (g_last_st_next + 1) % 16;
+      g_last_st[at].sid = sid;
+      g_last_st[at].st = 0xFF;
+    }
+    if (g_last_st[at].st != st) { g_last_st[at].st = st; g_state_version++; }
+  }
+  g_touched_n = 0;
+  return g_state_version;
+}
+
 bool addRecording(uint8_t wire_mode, uint8_t* bits, size_t len, uint32_t ms, char* envelope, size_t cap,
                   uint32_t* sid_out, uint32_t want_sid) {
   const int pb = VoxWire::packetBytes(wire_mode);
@@ -344,7 +378,7 @@ bool addRecording(uint8_t wire_mode, uint8_t* bits, size_t len, uint32_t ms, cha
   VoxWire::parseEnvelope(envelope, &env);
   remember(env);
   g_serve.markOwn(sid);
-  g_version++;
+  bumpState();
   if (sid_out) *sid_out = sid;
   Serial.printf("[VOX] recorded clip %08lx: %u bytes, %d packets, %d s\n", (unsigned long)sid, (unsigned)len, total,
                 seconds);
@@ -366,7 +400,7 @@ bool storeHeard(uint32_t sid, uint8_t wire_mode, const uint8_t* bits, size_t len
   env.kind = VoxWire::kCodec2;
   env.mode = wire_mode;
   remember(env);
-  g_version++;
+  bumpState();
   Serial.printf("[VOX] talk %08lx heard live, kept: %u bytes\n", (unsigned long)sid, (unsigned)len);
   return true;
 }
@@ -376,7 +410,7 @@ void discardRecording(uint32_t sid) {
   char path[32];
   storePath(sid, true, path, sizeof path);
   g_fs->remove(path);
-  g_version++;
+  bumpState();
   Serial.printf("[VOX] discarded clip %08lx\n", (unsigned long)sid);
 }
 

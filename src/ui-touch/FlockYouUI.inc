@@ -103,6 +103,7 @@ static void loadCfg() {
     flockyou::loadSettings(buf, s_cfg);
     s_cfg_found = true;
   }
+  if (bgListenerResetOnce("flock") && s_cfg.armed) { s_cfg.armed = false; saveCfg(); }
 }
 
 static void appendLog(const Detection& d) {
@@ -1315,10 +1316,8 @@ static void pageOpen() {
   if (!ensureTable()) { toast(TR("Out of memory")); return; }
   if (s_root) return;
   if (s_cam_state == CamLoad::Idle) camsReload();
-  // The first time in: start listening (the 1.2 app did, and it is what the tile is for).
-  static bool s_opened_once = false;
-  if (!s_opened_once && !s_cfg.armed) setArmed(true);
-  s_opened_once = true;
+  // Not started by opening the page: scanning runs Wi-Fi and BLE all the time,
+  // so it waits for Start.
   s_root = appPageCreateRoot(COLOR_BG);
   appPageBeginSlim("Flock You", pageBack);
   s_tab_i = 0;

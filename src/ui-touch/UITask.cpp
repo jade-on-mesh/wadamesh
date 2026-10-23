@@ -58100,6 +58100,21 @@ enum AppDrawerAction {
 #include "OtpMessengerUI.inc"
 // Team (app drawer -> APPACT_TEAM): MeshCore Open TAK team awareness; rules in TeamCore.cpp.
 #include "TeamUI.inc"
+// Flock You, Drone Detector and Sound link used to switch themselves on the
+// first time their page opened, and stay on across reboots: each then runs all
+// the time (Wi-Fi/BLE scanning, or the mic decoder) and slows everything. Each
+// is switched off once on the first boot of this firmware; after that it only
+// runs when started by hand.
+#if defined(ESP32)
+__attribute__((unused)) static bool bgListenerResetOnce(const char* key) {
+  SdNvsPrefs p;
+  if (!p.begin("bgoff", false)) return false;
+  const bool first = !p.getBool(key, false);
+  if (first) p.putBool(key, true);
+  p.end();
+  return first;
+}
+#endif
 // Flock You (app drawer -> APPACT_FLOCK): Flock ALPR detection + known cameras; rules in FlockCore.h.
 #include "FlockYouUI.inc"
 // Drone Detector (app drawer -> APPACT_DRONE): Remote ID on Flock You's radios; glue in DroneCore.h.
@@ -81133,7 +81148,8 @@ static uint32_t     s_ui_cp_t0  = 0;
 // Where the time goes (Settings > About, "Busy"): each section's share of the
 // last 10 s, in microseconds so a 1 ms section still counts.
 struct PerfSlot { const char* tag; uint32_t us, max_us; };
-static PerfSlot s_perf[28], s_perf_last[28];
+constexpr int kPerfSlots = 40;   // more than the uiCp() sections, or the last ones go uncounted
+static PerfSlot s_perf[kPerfSlots], s_perf_last[kPerfSlots];
 static uint32_t s_perf_win_us = 0, s_perf_last_win_us = 0, s_perf_loops = 0, s_perf_last_loops = 0;
 static uint32_t s_ui_cp_us = 0;
 static void perfAdd(const char* tag, uint32_t us) {
@@ -81163,10 +81179,10 @@ static int perfText(char* buf, size_t cap) {
   if (!s_perf_last_win_us) return snprintf(buf, cap, "Busy\n  measuring...\n\n");
   int p = snprintf(buf, cap, "Busy (last 10 s, %lu loops/s)\n",
                    (unsigned long)(s_perf_last_loops * 1000000ull / s_perf_last_win_us));
-  bool used[28] = {false};
+  bool used[kPerfSlots] = {false};
   for (int k = 0; k < 6; k++) {
     int best = -1;
-    for (int i = 0; i < 28; i++)
+    for (int i = 0; i < kPerfSlots; i++)
       if (s_perf_last[i].tag && !used[i] && (best < 0 || s_perf_last[i].us > s_perf_last[best].us)) best = i;
     if (best < 0 || p >= (int)cap) break;
     used[best] = true;
@@ -82512,9 +82528,17 @@ void UITask::loop() {
       LvChatPanel* cp = g_lv.ch.detail_open ? &g_lv.ch : (g_lv.dm.detail_open ? &g_lv.dm : nullptr);
       if (cp && cp->msgs) lv_obj_invalidate(cp->msgs);
     }
+    // Each packet of a photo or talk arriving bumps version(); repainting the
+    // open chat for that (a full rebuild) once a second through a long burst
+    // cost the UI most of its time. A new state (requested, complete, failed)
+    // repaints within a second; progress alone every 5 s.
+    static uint32_t s_vox_state_seen = 0;
     const uint32_t v = VoxPhotos::version();
-    if (v != s_vox_seen && (uint32_t)(now - s_vox_paint_ms) >= 1000) {
+    const uint32_t sv = v != s_vox_seen ? VoxPhotos::stateVersion() : s_vox_state_seen;
+    const uint32_t vox_wait = sv != s_vox_state_seen ? 1000 : 5000;
+    if (v != s_vox_seen && (uint32_t)(now - s_vox_paint_ms) >= vox_wait) {
       s_vox_seen = v;
+      s_vox_state_seen = sv;
       s_vox_paint_ms = now;
       g_lv.dirty_timeline = true;
       if (s_vox_pending_sid) {
@@ -82538,6 +82562,7 @@ void UITask::loop() {
     }
   }
 
+  uiCp("ui:contacts");
   bool heavy_ok = !g_lv.defer_heavy_refresh || now >= g_lv.heavy_refresh_at_ms;
   if (g_lv.defer_heavy_refresh && heavy_ok) g_lv.defer_heavy_refresh = false;
 
@@ -82545,10 +82570,12 @@ void UITask::loop() {
     g_lv.dirty_contacts = false;
     refreshContactsList();
   }
+  uiCp("ui:thrlist");
   if (g_lv.dirty_threads && heavy_ok) {
     refreshThreadLists();
     g_lv.dirty_threads = false;
   }
+  uiCp("ui:chat");
   if (g_lv.dirty_timeline && heavy_ok) {
     // Only repaint the detail that is currently open.
     if (g_lv.dm.detail_open) refreshChatDetailAsync(g_lv.dm);
@@ -82563,6 +82590,7 @@ void UITask::loop() {
     else if (g_lv.ch.detail_open) jumpBtnsSetDim(&g_lv.ch, true);
     else                          s_jump_dimmed = true;   // nothing open: park the state
   }
+  uiCp("ui:sd");
 #if CAP_MICROSD && !CAP_SD
   // SD_MMC failures are discovered inside map/file I/O. Repoint the tile
   // backend here, outside those operations, and retry until the tile worker

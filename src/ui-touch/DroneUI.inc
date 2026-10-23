@@ -56,6 +56,7 @@ static int s_tab_i = 0;
 
 static void toast(const char* m, int ms = 2200) { if (g_lv.task) g_lv.task->showAlert(m, ms); }
 
+static void saveCfg();
 static void loadCfg() {
   if (s_cfg_loaded) return;
   s_cfg_loaded = true;
@@ -67,6 +68,7 @@ static void loadCfg() {
   s_cfg.scan900 = p.getBool("s900", false);
   snprintf(s_cfg.channel, sizeof s_cfg.channel, "%s", p.getString("channel", kDefaultChannel).c_str());
   p.end();
+  if (bgListenerResetOnce("drone") && s_cfg.armed) { s_cfg.armed = false; saveCfg(); }
 }
 
 static void saveCfg() {
@@ -710,9 +712,7 @@ static void pageClose() {
 static void pageOpen() {
   loadCfg();
   if (s_root) return;
-  static bool s_opened_once = false;
-  if (!s_opened_once && !s_cfg.armed) setArmed(true);   // the tile is for listening
-  s_opened_once = true;
+  // Not started by opening the page: listening scans Wi-Fi and BLE all the time.
   s_root = appPageCreateRoot(COLOR_BG);
   appPageBeginSlim("Drone Detector", pageBack);
   s_tab_i = 0;
