@@ -91,6 +91,12 @@ jobs:
             board: tlora-pager-sx1262
           - env: tlora_pager_lr1121_companion_radio_touch
             board: tlora-pager-lr1121
+          - env: heltec_v4_tft_companion_radio_usb_tcp_touch
+            board: heltec-v4
+          - env: heltec_v4_r8_tft_companion_radio_usb_tcp_touch
+            board: heltec-v4-r8
+          - env: wio_tracker_l2_companion_radio_touch
+            board: wio-tracker-l2
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

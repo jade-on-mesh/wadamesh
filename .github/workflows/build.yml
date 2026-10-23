@@ -139,7 +139,9 @@ jobs:
       fail-fast: false
       matrix:
         env: [LilyGo_TDeck_companion_radio_touch, ThinkNode_M9_companion_radio_touch,
-              tlora_pager_sx1262_companion_radio_touch, tlora_pager_lr1121_companion_radio_touch]
+              tlora_pager_sx1262_companion_radio_touch, tlora_pager_lr1121_companion_radio_touch,
+              heltec_v4_tft_companion_radio_usb_tcp_touch, heltec_v4_r8_tft_companion_radio_usb_tcp_touch,
+              wio_tracker_l2_companion_radio_touch]
     steps:
       - uses: actions/checkout@v4
         with:

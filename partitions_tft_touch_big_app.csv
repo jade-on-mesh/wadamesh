@@ -1,0 +1,23 @@
+# Wadamesh-tak: 16 MB touch boards with bigger app slots (Heltec V4, Heltec
+# V4-R8, Seeed Wio Tracker L2).
+#
+# The same layout as the T-Deck's (variants/lilygo_tdeck/partitions_tdeck_touch_big_app.csv):
+# the fork's image doesn't fit upstream's 3.875 MB slots, so each app slot is
+# 4.375 MB, taken from the map tile partition (4.75 -> 3.75 MB). spiffs (user
+# data) keeps its offset and size. Moving to it takes a USB install of the
+# merged image (the web flasher); the tile partition is reformatted on first
+# mount and fills again.
+#
+#   0x010000-0x470000  app0    4.375 MB (ota_0)
+#   0x470000-0x8D0000  app1    4.375 MB (ota_1)
+#   0x8D0000-0xC90000  tiles   3.75 MB  (LittleFS, 0x83)
+#   0xC90000-0xFF0000  spiffs  3.375 MB  [unchanged]
+
+# Name,   Type, SubType,  Offset,   Size,     Flags
+nvs,      data, nvs,      0x9000,   0x5000,
+otadata,  data, ota,      0xe000,   0x2000,
+app0,     app,  ota_0,    0x10000,  0x460000,
+app1,     app,  ota_1,    0x470000, 0x460000,
+tiles,    data, 0x83,     0x8D0000, 0x3C0000,
+spiffs,   data, spiffs,   0xC90000, 0x360000,
+coredump, data, coredump, 0xFF0000, 0x10000,
