@@ -53,3 +53,12 @@ set_source_files_properties(${GGWAVE_SRCS} PROPERTIES
 # ~100 KB over its 4 MB OTA slot at -O2. The pixel path the #167 underrun fix is
 # about (LVGL rendering, the DSI flush) is in other components and stays -O2.
 set_source_files_properties("${APP}/ui-touch/UITask.cpp" PROPERTIES COMPILE_OPTIONS "-Os")
+
+# The rest of our own app layer (src/: MyMesh, helpers, the other screens) at -Os
+# too: the image stood ~200 B under its 4 MB slot and every feature tipped it
+# over. None of it is the pixel path (LVGL rendering and the DSI flush are in the
+# lvgl component and variants/tdisplay_p4/, which stay -O2), nor the radio driver
+# (RadioLib, the meshcore component).
+set(APP_OS_SRCS ${APP_SRCS})
+list(FILTER APP_OS_SRCS EXCLUDE REGEX "/variants/")   # APP_SRCS is src/ plus variants/tdisplay_p4/
+set_source_files_properties(${APP_OS_SRCS} PROPERTIES COMPILE_OPTIONS "-Os")
