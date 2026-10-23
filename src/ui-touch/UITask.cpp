@@ -11393,50 +11393,69 @@ static bool wordBoxMaybeShow(lv_obj_t* ta) {
   const int n = d->suggest(text + at, wl, s_word_sugg);
   if (n == 0) return false;
   s_wordbox_ta = ta;
+  // A slim strip along the top of the composer field, as wide as the field:
+  // the words in the small font, split by hairlines, the best one first.
+  lv_area_t a;
+  lv_obj_get_coords(ta, &a);
+  const lv_coord_t font_h = lv_font_get_line_height(&g_font_12);
+  const lv_coord_t bh = font_h + 6;
+  const lv_coord_t bw = LV_MAX((lv_coord_t)90, (lv_coord_t)(a.x2 - a.x1 + 1));
   s_wordbox = lv_obj_create(lv_layer_top());
   lv_obj_add_flag(s_wordbox, NAV_SKIP_FLAG);
   lv_obj_remove_style_all(s_wordbox);
   lv_obj_set_style_bg_color(s_wordbox, lv_color_hex(COLOR_PANEL), LV_PART_MAIN);
-  lv_obj_set_style_bg_opa(s_wordbox, LV_OPA_COVER, LV_PART_MAIN);
-  lv_obj_set_style_radius(s_wordbox, 8, LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(s_wordbox, LV_OPA_90, LV_PART_MAIN);
+  lv_obj_set_style_radius(s_wordbox, 6, LV_PART_MAIN);
   lv_obj_set_style_border_color(s_wordbox, lv_color_hex(COLOR_ACCENT_BORDER), LV_PART_MAIN);
   lv_obj_set_style_border_width(s_wordbox, 1, LV_PART_MAIN);
-  lv_obj_set_style_pad_all(s_wordbox, 3, LV_PART_MAIN);
-  lv_obj_set_style_pad_column(s_wordbox, 3, LV_PART_MAIN);
+  lv_obj_set_style_border_opa(s_wordbox, LV_OPA_60, LV_PART_MAIN);
   lv_obj_set_flex_flow(s_wordbox, LV_FLEX_FLOW_ROW);
   lv_obj_clear_flag(s_wordbox, LV_OBJ_FLAG_SCROLLABLE);
-  const lv_coord_t sw = lv_disp_get_hor_res(nullptr);
-  const lv_coord_t cw = (lv_coord_t)LV_MIN(110, (sw - 24) / 3);
+  lv_obj_set_size(s_wordbox, bw, bh);
   for (int i = 0; i < n; ++i) {
-    lv_obj_t* b = lv_btn_create(s_wordbox);
+    if (i) {   // a hairline between words
+      lv_obj_t* sep = lv_obj_create(s_wordbox);
+      lv_obj_remove_style_all(sep);
+      lv_obj_add_flag(sep, NAV_SKIP_FLAG);
+      lv_obj_set_size(sep, 1, bh - 8);
+      lv_obj_set_style_align(sep, LV_ALIGN_LEFT_MID, LV_PART_MAIN);
+      lv_obj_set_style_bg_color(sep, lv_color_hex(COLOR_ACCENT_BORDER), LV_PART_MAIN);
+      lv_obj_set_style_bg_opa(sep, LV_OPA_COVER, LV_PART_MAIN);
+      lv_obj_set_style_translate_y(sep, 4, LV_PART_MAIN);
+    }
+    lv_obj_t* b = lv_obj_create(s_wordbox);
+    lv_obj_remove_style_all(b);
     lv_obj_add_flag(b, NAV_SKIP_FLAG);
-    lv_obj_set_size(b, cw, 28);
+    lv_obj_add_flag(b, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_flex_grow(b, 1);
+    lv_obj_set_height(b, bh);
     lv_obj_set_style_radius(b, 5, LV_PART_MAIN);
-    lv_obj_set_style_bg_color(b, lv_color_hex(COLOR_ACCENT_SURFACE), LV_PART_MAIN);
     lv_obj_set_style_bg_color(b, lv_color_hex(COLOR_ACCENT), LV_PART_MAIN | LV_STATE_PRESSED);
+    lv_obj_set_style_bg_opa(b, LV_OPA_COVER, LV_PART_MAIN | LV_STATE_PRESSED);
     lv_obj_add_event_cb(b, wordBoxCellCb, LV_EVENT_CLICKED, (void*)(intptr_t)i);
     lv_obj_t* l = lv_label_create(b);
     lv_label_set_text(l, s_word_sugg[i]);
-    lv_obj_set_style_text_font(l, &g_font_14, LV_PART_MAIN);
-    lv_obj_set_style_text_color(l, lv_color_hex(COLOR_TEXT), LV_PART_MAIN);
+    lv_obj_set_style_text_font(l, &g_font_12, LV_PART_MAIN);
+    lv_obj_set_style_text_color(l, lv_color_hex(i == 0 ? COLOR_TEXT : COLOR_SUB), LV_PART_MAIN);
     lv_label_set_long_mode(l, LV_LABEL_LONG_DOT);
-    lv_obj_set_width(l, cw - 8);
+    lv_obj_set_width(l, lv_pct(100));
+    lv_obj_set_style_pad_hor(l, 4, LV_PART_MAIN);
     lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
     lv_obj_center(l);
   }
-  lv_obj_set_size(s_wordbox, n * cw + (n - 1) * 3 + 6, 34);
-  // Above the composer, clear of the keyboard (as the @-mention box).
-  lv_area_t a;
-  lv_obj_get_coords(ta, &a);
-  const lv_coord_t bw = lv_obj_get_width(s_wordbox), bh = 34;
-  lv_coord_t by = a.y1 - bh - 4;
+  // Just above the field, lined up with it; clear of the on-screen keyboard.
+  lv_coord_t by = a.y1 - bh - 2;
   if (g_lv.keyboard && !lv_obj_has_flag(g_lv.keyboard, LV_OBJ_FLAG_HIDDEN)) {
     lv_coord_t limit = lv_disp_get_ver_res(nullptr) - chatKbH() - 2;
     if (s_kb_panel) limit -= s_comp_h;
     if (by + bh > limit) by = limit - bh;
   }
   if (by < STATUSBAR_H + 2) by = STATUSBAR_H + 2;
-  lv_obj_set_pos(s_wordbox, (sw - bw) / 2, by);
+  const lv_coord_t sw = lv_disp_get_hor_res(nullptr);
+  lv_coord_t bx = a.x1;
+  if (bx + bw > sw) bx = sw - bw;
+  if (bx < 0) bx = 0;
+  lv_obj_set_pos(s_wordbox, bx, by);
   lv_obj_move_foreground(s_wordbox);
   return true;
 }
@@ -19958,8 +19977,8 @@ static void buildKeyboardPage() {
 #endif
                  accentPopupsToggleCb);
 #if CAP_TAK_EXTRAS
-    setSwitchRow(c, "Word suggestions", "Up to three words that finish the one you're typing, over the message. "
-                 "The words you send come first.", predictOn(), predictToggleCb);
+    setSwitchRow(c, "Predictive text", "Up to three words that finish the one you're typing, in a slim strip "
+                 "over the message; tap one to use it. The words you send come first.", predictOn(), predictToggleCb);
 #endif
 #if defined(HAS_TDECK_KEYBOARD) || defined(HAS_M9_KEYBOARD)
     setSwitchRow(c, "Enter key sends message", "Off: Enter adds a new line, and Send sends.",

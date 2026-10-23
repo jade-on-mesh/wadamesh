@@ -1,8 +1,9 @@
 # Predictive text
 
 While you type a message, up to three words that finish the one you're on
-appear over the composer once it's two letters long; tap one to put it in,
-with a space after. They come from:
+appear in a slim strip along the top of the message field once it's two
+letters long, in the small font, the best match first and brightest; tap one to
+put it in, with a space after. They come from:
 
 - **the words you send**, first: the more often you send a word (and the more
   recently), the higher it ranks. Place names, callsigns and channel words you
@@ -11,16 +12,16 @@ with a space after. They come from:
 - **a built-in list** of about 300 common English words and mesh/team words
   ("repeater", "channel", "roger", "checkpoint"...).
 
-A capitalised start ("Tho") gives capitalised words ("Thornton"). The box steps
+A capitalised start ("Tho") gives capitalised words ("Thornton"). The strip steps
 aside for the @-mention and accent pickers. The learned words (up to 200) are
 kept in `/words` on the internal store, written 30 s after a send.
 
-*Settings › Keyboard › Typing › Word suggestions* turns it off. Not on the
-ThinkNode M9 or the T-Display P4, whose app space is full (`CAP_TAK_EXTRAS`).
+*Settings › Keyboard › Typing › Predictive text* turns it on or off. Not on the
+T-Display P4, whose app space is full (`CAP_TAK_EXTRAS`).
 
 ## Code
 
 | Piece | Where |
 | --- | --- |
 | Word list, learning, ranking, save/load (host-tested) | `src/ui-touch/PredictText.h`, `test/test_predict_text.cpp` |
-| The box over the composer, learning on send, the setting | `wordBoxMaybeShow`, `predictLearn`, `predictToggleCb` in `src/ui-touch/UITask.cpp` |
+| The strip over the message field, learning on send, the setting | `wordBoxMaybeShow`, `predictLearn`, `predictToggleCb` in `src/ui-touch/UITask.cpp` |
