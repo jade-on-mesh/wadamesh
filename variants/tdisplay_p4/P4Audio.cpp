@@ -29,6 +29,14 @@
 // hardware if clips come out noisy (lower) or quiet (raise).
 #define P4A_MIC_DIGITAL_GAIN 2   // 12 dB
 
+// DAC volume: 0xBF is 0 dB, 0.5 dB a step. 0xD8 is +12.5 dB, which the chimes
+// were tuned on (p4AudioTone's amplitude). A media stream is already scaled
+// to full scale (voice is normalised to a 23000 peak), so +12.5 dB on top of it
+// clipped every loud syllable in the DAC: the crackle in voice playback. The
+// stream takes those 12.5 dB back off (P4A_STREAM_Q14), so it plays at 0 dB.
+#define P4A_DAC_VOL     0xD8
+#define P4A_STREAM_Q14  3885   // 10^(-12.5/20) in Q14
+
 #define P4A_RATE      16000
 #define P4A_MCLK_HZ   (P4A_RATE * 256)
 
@@ -82,7 +90,7 @@ static bool es8311Init() {
   es8311Write(0x1C, 0x6A);                          // ADC EQ bypass, cancel DC offset
   es8311Write(0x37, 0x08);                          // bypass DAC equalizer
 
-  es8311Write(0x32, (uint8_t)(85 * 256 / 100 - 1)); // DAC volume ~85% (loudness = amplitude)
+  es8311Write(0x32, P4A_DAC_VOL);                   // DAC volume (see P4A_DAC_VOL)
   if (es8311Read(0x31, &v)) es8311Write(0x31, v & ~0x60);   // unmute
   return true;
 }
@@ -204,8 +212,11 @@ bool p4AudioStreamWrite(const int16_t* samples, size_t frames) {
   P4_PSRAM_BSS static int16_t stereo[256 * 2];
   while (frames) {
     const size_t count = frames > 256 ? 256 : frames;
-    for (size_t i = 0; i < count; ++i)
-      stereo[2 * i] = stereo[2 * i + 1] = samples[i];
+    for (size_t i = 0; i < count; ++i) {
+      // Rounded, so silence stays silence (no -1 hiss from the shift).
+      const int16_t v = (int16_t)(((int32_t)samples[i] * P4A_STREAM_Q14 + 8192) >> 14);
+      stereo[2 * i] = stereo[2 * i + 1] = v;
+    }
     size_t written = 0;
     const size_t bytes = count * 2 * sizeof(int16_t);
     if (i2s_channel_write(s_tx, stereo, bytes, &written, pdMS_TO_TICKS(300)) != ESP_OK ||

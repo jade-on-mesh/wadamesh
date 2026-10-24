@@ -175,6 +175,11 @@ AMOLED/SX1262 build is never reused. **Select the LCD at build time:** `WADA_P4_
 
 - **Codec2 is built in** (`lib/codec2`, added to `components/wadamesh_app`), so the P4 now plays
   MeshCore Open TAK voice messages (VE3) on its speaker and records them.
+- **Playback level:** the DAC runs at +12.5 dB (reg 0x32 = 0xD8), which the chimes were tuned on.
+  Voice clips are normalised to a 23000 peak before the speaker, so that gain on top clipped every
+  loud syllable in the DAC (crackling). `p4AudioStreamWrite()` scales media streams (voice, talk,
+  Sound link, Lua audio) by −12.5 dB (`P4A_STREAM_Q14`), so they reach the DAC at 0 dB, full scale
+  and unclipped. Chimes keep the gain.
 - **Microphone:** the ES8311's ADC on I2S DIN GPIO11 (LilyGo `es8311::kAdcData`), as the RX half of a
   duplex pair with the speaker's TX (same MCLK/BCLK/WS). `p4AudioCaptureBegin()` sets the mic input
   (reg 0x14 = 0x1A: analog MIC1, PGA 30 dB), digital gain (0x16, `P4A_MIC_DIGITAL_GAIN`, 12 dB) and
