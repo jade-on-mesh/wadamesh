@@ -15,7 +15,7 @@
 
 namespace forkupd_dev {
 
-enum class Kind : uint8_t { Latest, Slot, Sd };
+enum class Kind : uint8_t { Latest, Slot, Sd, Fetch };
 
 struct Job {
   Kind kind;
@@ -24,8 +24,15 @@ struct Job {
   volatile int* pct;
   char* msg;
   size_t msg_cap;
-  int result;               // Latest: N or -1; Slot/Sd: 1 ok, 0 failed
+  int result;               // Latest: N or -1; Slot/Sd/Fetch: 1 ok, 0 failed
   SemaphoreHandle_t done;
+  // Fetch: a file, whole, into buf. No default member initializers: the board
+  // builds are C++11, where they'd stop the brace-initialised Jobs above being
+  // aggregates (fields left out are zeroed anyway).
+  const char* url;
+  uint8_t* buf;
+  size_t cap;
+  size_t got;
 };
 
 // mbedTLS takes its memory from INTERNAL RAM in these builds
@@ -332,8 +339,43 @@ static bool fetchImage(Job& j) {
   return true;
 }
 
+// A small file (the predictive text dictionary), whole, into j.buf.
+static bool fetchToBuf(Job& j) {
+  Get g;
+  if (!getFollowing(j, j.url, g, "file")) return false;
+  const int len = g.h->getSize();
+  if (len <= 0 || (size_t)len > j.cap) {
+    char m[48];
+    snprintf(m, sizeof m, "unexpected size %d", len);
+    say(j, m);
+    return false;
+  }
+  auto* st = g.h->getStreamPtr();
+  j.got = 0;
+  uint32_t last = millis();
+  while (st && j.got < (size_t)len) {
+    const int a = st->available();
+    if (a <= 0) {
+      if (!st->connected() || millis() - last > 20000) break;
+      vTaskDelay(pdMS_TO_TICKS(5));
+      continue;
+    }
+    const int r = st->read(j.buf + j.got, (size_t)len - j.got);
+    if (r > 0) { j.got += (size_t)r; last = millis(); }
+  }
+  g.close();
+  if (j.got != (size_t)len) {
+    char m[48];
+    snprintf(m, sizeof m, "short read %u/%d", (unsigned)j.got, len);
+    say(j, m);
+    return false;
+  }
+  return true;
+}
+
 static void jobBody(Job& j) {
   if (j.kind == Kind::Latest) j.result = latest();
+  else if (j.kind == Kind::Fetch) j.result = fetchToBuf(j) ? 1 : 0;
   else j.result = fetchImage(j) ? 1 : 0;
 }
 
@@ -399,4 +441,15 @@ static bool forkInstallToSlot(int n, volatile int* pct, char* msg, size_t cap) {
 static bool forkSaveToSd(int n, const char* path, volatile int* pct, char* msg, size_t cap) {
   forkupd_dev::Job j{forkupd_dev::Kind::Sd, n, path, pct, msg, cap, 0, nullptr};
   return forkupd_dev::run(j) == 1;
+}
+
+// A file of at most `cap` bytes, over HTTPS (redirects followed), into `buf`.
+static bool forkFetchFile(const char* url, uint8_t* buf, size_t cap, size_t* got, char* msg, size_t msg_cap) {
+  forkupd_dev::Job j{forkupd_dev::Kind::Fetch, 0, nullptr, nullptr, msg, msg_cap, 0, nullptr};
+  j.url = url;
+  j.buf = buf;
+  j.cap = cap;
+  const bool ok = forkupd_dev::run(j) == 1;
+  if (got) *got = j.got;
+  return ok;
 }

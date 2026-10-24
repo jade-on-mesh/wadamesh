@@ -11353,10 +11353,73 @@ static bool mentionBoxMaybeShow(lv_obj_t* ta) {
 // typed, or, after a space, the likely next word. A tap puts one in with a space.
 // From a built-in dictionary and the words and word pairs you send (kept in
 // /words on the internal store).
-#if CAP_TAK_EXTRAS
+#if CAP_PREDICT_TEXT
 #include <new>
 #include "PredictText.h"
 static fs::FS* backupInternalFs();
+#if !PREDICT_BUILTIN_WORDS
+// No dictionary in flash on this board (the T-Display P4's app slot is full): it
+// is the file dictionaries/words-en.pwd, kept on the internal store. Found there,
+// or on the SD card (copied in), or else downloaded over Wi-Fi from this
+// firmware's own release (the worker: predictDictWorkerRun). Until then only
+// your own words and the next-word table are suggested. PREDICTIVE_TEXT.md.
+static uint8_t* s_pwd_img = nullptr;              // the loaded file (kept: the dictionary points into it)
+static volatile uint8_t s_pwd_state = 0;          // 0 have it / idle, 1 wanted, 2 downloading, 3 downloaded, 4 failed
+static volatile bool s_pwd_request = false;       // UI -> worker
+static uint8_t* volatile s_pwd_dl = nullptr;      // the worker's download buffer
+static volatile size_t s_pwd_dl_len = 0;
+static char s_pwd_msg[112];
+static uint32_t s_pwd_retry_ms = 0;
+static constexpr const char* kPwdPath = "/words-en.pwd";
+// Reads `path` whole (the P4's FAT can misreport sizes: read to the end) and
+// uses it if it is the dictionary this firmware expects.
+static bool predictDictLoadFrom(fs::FS* fs, const char* path) {
+  if (!fs || predict::dict::loaded()) return predict::dict::loaded();
+  File f = fs->open(path, "r");
+  if (!f) return false;
+  const size_t want = predict::words::kFileBytes;
+  uint8_t* buf = (uint8_t*)heap_caps_malloc(want + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!buf) buf = (uint8_t*)malloc(want + 1);
+  if (!buf) { f.close(); return false; }
+  size_t got = 0;
+  while (got < want + 1) {
+    const int r = f.read(buf + got, want + 1 - got);
+    if (r <= 0) break;
+    got += (size_t)r;
+  }
+  f.close();
+  if (got != want || !predict::dict::loadFile(buf, got)) { free(buf); return false; }
+  s_pwd_img = buf;
+  return true;
+}
+static bool predictDictSave(const uint8_t* img, size_t len) {
+  fs::FS* fs = backupInternalFs();
+  if (!fs) return false;
+  WdtHeavyGuard guard;
+  File f = fs->open(kPwdPath, "w");
+  if (!f) return false;
+  const size_t w = f.write(img, len);
+  f.close();
+  return w == len;
+}
+// At first use: the internal store's copy, else the SD card's (copied in).
+static void predictDictLoadLocal() {
+  if (predict::dict::loaded()) return;
+  if (predictDictLoadFrom(backupInternalFs(), kPwdPath)) return;
+#if CAP_SD
+  if (SD.cardType() != CARD_NONE) {
+    static const char* const kSd[] = {"/predict/words-en.pwd", "/PREDICT/words-en.pwd", "/words-en.pwd"};
+    for (const char* p : kSd) {
+      if (predictDictLoadFrom(&SD, p)) {
+        predictDictSave(s_pwd_img, predict::words::kFileBytes);
+        return;
+      }
+    }
+  }
+#endif
+  s_pwd_state = 1;   // wanted: downloaded once Wi-Fi is up (predictDictTick)
+}
+#endif
 static predict::Dict* s_words = nullptr;
 static bool s_words_on = true, s_words_loaded = false, s_words_dirty = false;
 static uint32_t s_words_dirty_ms = 0;
@@ -11400,11 +11463,55 @@ static predict::Dict* wordsDict() {
       }
     }
 #endif
+#if !PREDICT_BUILTIN_WORDS
+    if (s_words_on) predictDictLoadLocal();
+#endif
   }
   return s_words;
 }
+
+#if !PREDICT_BUILTIN_WORDS
+// From the loop: the dictionary's download, started when Wi-Fi is up, used when in.
+static void predictDictTick(uint32_t now) {
+#if defined(ESP32) && defined(MULTI_TRANSPORT_COMPANION) && WADA_FORK_RELEASES
+  if (s_pwd_state == 1 && s_words_on && (long)(now - s_pwd_retry_ms) >= 0 && firmwareReleaseN() >= 0 &&
+      WiFi.status() == WL_CONNECTED && (uint32_t)WiFi.localIP() != 0) {
+    uint8_t* b = (uint8_t*)heap_caps_malloc(predict::words::kFileBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!b) { s_pwd_retry_ms = now + 60000; return; }
+    s_pwd_dl = b;
+    s_pwd_dl_len = 0;
+    s_pwd_state = 2;
+    ensureTileFetchTaskRunning();
+    s_pwd_request = true;
+    return;
+  }
+  if (s_pwd_state == 3 || s_pwd_state == 4) {
+    uint8_t* b = s_pwd_dl;
+    s_pwd_dl = nullptr;
+    if (s_pwd_state == 3 && b && predict::dict::loadFile(b, s_pwd_dl_len)) {
+      s_pwd_img = b;
+      s_pwd_state = 0;
+      predictDictSave(b, s_pwd_dl_len);
+      Serial.printf("[PREDICT] dictionary downloaded: %d words\n", predict::dict::count());
+      if (g_lv.task) g_lv.task->showAlert(TR("Predictive text: dictionary installed"), 2200);
+      return;
+    }
+    if (s_pwd_state == 3) snprintf(s_pwd_msg, sizeof s_pwd_msg, "not the expected file");
+    Serial.printf("[PREDICT] dictionary download failed: %s\n", s_pwd_msg);
+    free(b);
+    s_pwd_state = 1;
+    s_pwd_retry_ms = now + 10UL * 60UL * 1000UL;   // try again in 10 min
+  }
+#else
+  (void)now;
+#endif
+}
+#endif
 // From the loop: the learned words go to the store a while after the last send.
 static void wordsSaveTick(uint32_t now) {
+#if !PREDICT_BUILTIN_WORDS
+  predictDictTick(now);
+#endif
   if (!s_words_dirty || now - s_words_dirty_ms < 30000 || !s_words) return;
   s_words_dirty = false;
 #if defined(ESP32)
@@ -20251,11 +20358,22 @@ static void buildKeyboardPage() {
                  s_accent_popups,
 #endif
                  accentPopupsToggleCb);
-#if CAP_TAK_EXTRAS
+#if CAP_PREDICT_TEXT
     setSwitchRow(c, "Predictive text", "Up to three words over the message that finish or fix the one you're "
                  "typing, or come next; tap one to use it. Your own words and phrases come first.", predictOn(), predictToggleCb);
     setSwitchRow(c, "Space completes the word", "With Predictive text on, Space fixes or finishes a word that isn't one, "
                  "as on a phone. Backspace straight after puts back what you typed.", predictSpaceOn(), predictSpaceToggleCb);
+#if !PREDICT_BUILTIN_WORDS
+    {
+      char nb[200];
+      if (predict::dict::loaded())
+        snprintf(nb, sizeof nb, TR("Dictionary: %d words."), predict::dict::count());
+      else
+        snprintf(nb, sizeof nb, "%s", TR("Dictionary: downloads over Wi-Fi the first time, or copy dictionaries/words-en.pwd "
+                                          "to the SD card's predict folder. Until then, your own words are suggested."));
+      setNote(c, nb);
+    }
+#endif
 #endif
 #if defined(HAS_TDECK_KEYBOARD) || defined(HAS_M9_KEYBOARD)
     setSwitchRow(c, "Enter key sends message", "Off: Enter adds a new line, and Send sends.",
@@ -37576,6 +37694,27 @@ static void tileFetchTaskFn(void* arg) {
       continue;
     }
 #endif
+#endif
+#if CAP_PREDICT_TEXT && !PREDICT_BUILTIN_WORDS && defined(ESP32) && defined(MULTI_TRANSPORT_COMPANION) && WADA_FORK_RELEASES
+    // Predictive text's dictionary (predictDictTick asked): this firmware's own
+    // release's copy, so it is the one it expects; the main branch's if the
+    // release has none.
+    if (s_pwd_request) {
+      s_pwd_request = false;
+      char tag[32], url[160];
+      forkupd::tagFor(firmwareReleaseN(), tag, sizeof tag);
+      s_pwd_msg[0] = 0;
+      size_t got = 0;
+      snprintf(url, sizeof url, "https://raw.githubusercontent.com/" WADA_FORK_REPO "/%s/dictionaries/words-en.pwd", tag);
+      bool ok = s_pwd_dl && forkFetchFile(url, s_pwd_dl, predict::words::kFileBytes, &got, s_pwd_msg, sizeof s_pwd_msg);
+      if (!ok && s_pwd_dl) {
+        snprintf(url, sizeof url, "https://raw.githubusercontent.com/" WADA_FORK_REPO "/main/dictionaries/words-en.pwd");
+        ok = forkFetchFile(url, s_pwd_dl, predict::words::kFileBytes, &got, s_pwd_msg, sizeof s_pwd_msg);
+      }
+      s_pwd_dl_len = got;
+      s_pwd_state = ok ? 3 : 4;
+      continue;
+    }
 #endif
     // Wi-Fi scan (user-initiated from the Network tab / setup wizard). Blocking
     // here on the Wi-Fi core, not the UI thread. Mirrors the CLI `wifi scan`.

@@ -21,7 +21,16 @@
 #include <stdint.h>
 #include <string.h>
 
+// The built-in dictionary is compiled in unless a board keeps it out of flash
+// (PREDICT_BUILTIN_WORDS 0: the T-Display P4), which loads the same dictionary
+// from a file instead (dict::loadFile): dictionaries/words-en.pwd.
+#ifndef PREDICT_BUILTIN_WORDS
+#define PREDICT_BUILTIN_WORDS 1
+#endif
+#if PREDICT_BUILTIN_WORDS
 #include "PredictWords.inc"
+#endif
+#include "PredictWordsInfo.h"
 
 namespace predict {
 
@@ -204,14 +213,69 @@ inline void prevWord(const char* text, size_t at, char out[kWordMax]) {
 
 // ---- the built-in dictionary ---------------------------------------------------
 
+// FNV-1a, 32 bit: the dictionary file's check (PredictWordsInfo.h).
+inline uint32_t fnv1a(const uint8_t* p, size_t n, uint32_t h = 0x811C9DC5u) {
+  for (size_t i = 0; i < n; i++) h = (h ^ p[i]) * 0x01000193u;
+  return h;
+}
+
 namespace dict {
-inline const uint8_t* blockStart(int b) { return words::kData + words::kBlockOff[b]; }
+// Where the dictionary is: the compiled-in arrays, or a loaded file. Empty
+// until a file is loaded on a board without the arrays (then only your own
+// words and the next-word table are suggested).
+struct Source {
+  const uint8_t* data = nullptr;
+  size_t len = 0;
+  const uint8_t* off = nullptr;   // kBlocks little-endian u32 offsets into data
+  int blocks = 0;
+  int count = 0;
+};
+inline Source& src() {
+#if PREDICT_BUILTIN_WORDS
+  static Source s = [] {
+    Source b;
+    b.data = words::kData;
+    b.len = sizeof words::kData;
+    b.off = reinterpret_cast<const uint8_t*>(words::kBlockOff);   // little-endian, as the file's
+    b.blocks = words::kBlocks;
+    b.count = words::kCount;
+    return b;
+  }();
+#else
+  static Source s;
+#endif
+  return s;
+}
+inline uint32_t u32le(const uint8_t* p) {
+  return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+inline bool loaded() { return src().blocks > 0; }
+inline int count() { return src().count; }
+// Uses a dictionary file ("PWD1", word count, block count, block offsets, the
+// data) held in memory that outlives it. False (nothing changed) unless it is
+// exactly the file this firmware expects.
+inline bool loadFile(const uint8_t* img, size_t len) {
+  if (!img || len != words::kFileBytes || fnv1a(img, len) != words::kFileFnv) return false;
+  if (len < 12 || img[0] != 'P' || img[1] != 'W' || img[2] != 'D' || img[3] != '1') return false;
+  const uint32_t n = u32le(img + 4), blocks = u32le(img + 8);
+  if (!blocks || 12 + (size_t)blocks * 4 > len) return false;
+  Source& s = src();
+  s.off = img + 12;
+  s.data = img + 12 + (size_t)blocks * 4;
+  s.len = len - 12 - (size_t)blocks * 4;
+  s.blocks = (int)blocks;
+  s.count = (int)n;
+  return true;
+}
+inline uint32_t blockOff(int b) { return u32le(src().off + (size_t)b * 4); }
+inline const uint8_t* blockStart(int b) { return src().data + blockOff(b); }
 inline const uint8_t* blockEnd(int b) {
-  return b + 1 < words::kBlocks ? words::kData + words::kBlockOff[b + 1] : words::kData + sizeof words::kData;
+  return b + 1 < src().blocks ? src().data + blockOff(b + 1) : src().data + src().len;
 }
 // The last block whose first word is <= key: where key (or its prefix range) starts.
 inline int blockFor(const char* key, size_t kl) {
-  int lo = 0, hi = words::kBlocks - 1;
+  int lo = 0, hi = src().blocks - 1;
+  if (hi < 0) return 0;
   while (lo < hi) {
     const int mid = (lo + hi + 1) / 2;
     const uint8_t* p = blockStart(mid);
@@ -222,7 +286,7 @@ inline int blockFor(const char* key, size_t kl) {
 // Each word from block b on, in order: f(word, len, freq) returns false to stop.
 template <class F> inline void scanFrom(int b, F f) {
   char w[kWordMax + 1];
-  for (; b < words::kBlocks; b++) {
+  for (; b < src().blocks; b++) {
     const uint8_t* p = blockStart(b);
     const uint8_t* end = blockEnd(b);
     while (p < end) {
