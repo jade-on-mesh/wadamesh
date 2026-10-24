@@ -284,6 +284,12 @@ jobs:
                   out.write("by object\n" + "\n".join(f"{n:8} {k}" for k, n in by_obj.most_common(150)) + "\n\n")
                   out.write("symbols\n" + "\n".join(f"{n:8} {s}" for n, s in syms[:200]) + "\n")
           PY
+          # Flash too (and the same internal-RAM view as the P4's), by symbol,
+          # library and object: scripts/build/mem-report.py.
+          if [ -f ram-report.txt ] && [ -f "$B/firmware.map" ]; then
+            { echo; echo "===== mem-report.py ====="; python3 scripts/build/mem-report.py "$B/firmware.elf" "$B/firmware.map" \
+                ~/.platformio/packages/toolchain-xtensa-esp32s3/bin/xtensa-esp32s3-elf-; } >> ram-report.txt || true
+          fi
           if [ -f ram-report.txt ]; then
             d=$(mktemp -d); cp ram-report.txt "$d/${{ matrix.env }}.txt"; cd "$d"
             git init -q -b ram-report && git add -A

@@ -25,6 +25,7 @@ alloc = [s for s in secs if s[2] and not s[0].startswith(".debug") and s[1]]
 
 def kind(name):
     n = name.lower()
+    if "dummy" in n: return "other"   # one memory seen through another bus (S3)
     if "ext_ram" in n or "psram" in n: return "PSRAM"
     if n.startswith(".flash") or "rodata" in n and "dram" not in n: return "flash"
     if any(k in n for k in ("dram", "iram", "rtc", "tcm", "lp_", ".noinit", ".data", ".bss")): return "internal RAM"
