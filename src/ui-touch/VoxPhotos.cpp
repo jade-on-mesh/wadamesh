@@ -44,6 +44,22 @@ void touched(uint32_t sid) {
 }
 void bumpState() { g_version++; g_state_version++; }
 
+// Photos whose thumbnail is to be made again from the photo: it was the early
+// one from the first packet, or the photo has just completed.
+uint32_t g_thumb_redo[16];
+uint8_t g_thumb_redo_next = 0;
+void thumbRedoSet(uint32_t sid, bool on) {
+  for (auto& r : g_thumb_redo) if (r == sid) { if (!on) r = 0; return; }
+  if (on) g_thumb_redo[g_thumb_redo_next++ % 16] = sid;
+}
+bool thumbRedo(uint32_t sid) {
+  for (uint32_t r : g_thumb_redo) if (sid && r == sid) return true;
+  return false;
+}
+// Photos whose early thumbnail was asked for, so it's asked for once.
+uint32_t g_early_asked[16];
+uint8_t g_early_asked_next = 0;
+
 // Photos that want a thumbnail made (a download just finished, or a bubble
 // showed one without). The UI takes them one at a time (nextThumbWanted).
 uint32_t g_thumb_want[8];
@@ -375,6 +391,8 @@ void normName(const char* in, char* out, size_t cap) {
   while (o && out[o - 1] == ' ') out[--o] = '\0';
 }
 
+void earlyThumbCheck(uint32_t sid);
+
 class MeshIo : public VoxFetchIo {
  public:
   uint32_t nowMs() override { return millis(); }
@@ -455,13 +473,19 @@ class MeshIo : public VoxFetchIo {
     char path[40];
     storePath(sid, voice, path, sizeof path);
     if (!writeStore(path, voice ? &e->mode : nullptr, data, len)) return false;
-    if (!voice) wantThumb(sid);   // the UI decodes it in the background for the bubble
+    if (!voice) {   // the UI decodes it in the background for the bubble
+      thumbRedoSet(sid, true);   // over the early one from the first packet, if any
+      wantThumb(sid);
+    }
     Serial.printf("[VOX] %s %08lx complete, %u bytes\n", voice ? "voice" : "photo", (unsigned long)sid,
                   (unsigned)len);
     return true;
   }
 
-  void changed(uint32_t sid) override { touched(sid); }
+  void changed(uint32_t sid) override {
+    touched(sid);
+    earlyThumbCheck(sid);
+  }
 };
 
 MeshIo g_io;
@@ -474,6 +498,20 @@ T& inPsram(Io& io) {
   return *new (p) T(io);
 }
 VoxFetch& g_fetch = inPsram<VoxFetch>(g_io);
+
+// A photo's first packet just came in (asked for, or pushed on a channel): if
+// it carries the thumbnail, have that decoded for the bubble now, long before
+// the rest of the photo is in.
+void earlyThumbCheck(uint32_t sid) {
+  const Seen* e = seen(sid);
+  if (!e || e->kind != VoxWire::kImage) return;
+  for (uint32_t a : g_early_asked) if (a == sid) return;
+  const uint8_t* first = nullptr;
+  size_t n = 0, tl = 0;
+  if (!g_fetch.firstPacket(sid, &first, &n) || !VoxWire::imageThumbObus(first, n, &tl)) return;
+  g_early_asked[g_early_asked_next++ % 16] = sid;
+  if (!thumbSize(sid, nullptr, nullptr)) wantThumb(sid);
+}
 
 // Answers downloads of the clips this radio holds (VoxServe).
 class ServeIo : public VoxServeIo {
@@ -806,7 +844,7 @@ bool photoEnvelope(uint32_t sid, char* out, size_t cap) {
   if (!f) return false;
   const size_t len = f.size();
   uint8_t ver = 0;
-  const bool ok = len > 1 && f.read(&ver, 1) == 1 && ver == VoxWire::kImagePayloadVersion;
+  const bool ok = len > 1 && f.read(&ver, 1) == 1 && VoxWire::isImagePayloadVersion(ver);
   f.close();
   if (!ok) return false;
   const int pb = VoxWire::packetBytes(VoxWire::kImageModeId);
@@ -836,7 +874,7 @@ bool photoEnvelope(uint32_t sid, char* out, size_t cap) {
 }
 
 bool importPhoto(const uint8_t* data, size_t len, uint32_t* sid_out) {
-  if (!g_fs || !data || len < 2 || data[0] != VoxWire::kImagePayloadVersion) return false;
+  if (!g_fs || !data || len < 2 || !VoxWire::isImagePayloadVersion(data[0])) return false;
   const int pb = VoxWire::packetBytes(VoxWire::kImageModeId);
   if ((len + (size_t)pb - 1) / (size_t)pb > (size_t)VoxWire::kMaxPackets) return false;
   uint32_t sid = 0;
@@ -863,6 +901,31 @@ bool deletePhoto(uint32_t sid) {
   bumpState();
   return ok;
 }
+
+bool earlyThumbPayload(uint32_t sid, uint8_t* out, size_t cap, size_t* len) {
+  const uint8_t* first = nullptr;
+  size_t n = 0, tl = 0;
+  if (!out || !g_fetch.firstPacket(sid, &first, &n)) return false;
+  const uint8_t* obus = VoxWire::imageThumbObus(first, n, &tl);
+  if (!obus || tl + 1 > cap) return false;
+  out[0] = VoxWire::kImagePayloadVersion;
+  memcpy(out + 1, obus, tl);
+  *len = tl + 1;
+  return true;
+}
+
+bool saveThumbScaledUp(uint32_t sid, const uint16_t* src, int sw, int sh);
+
+bool saveEarlyThumb(uint32_t sid, const uint16_t* src, int sw, int sh) {
+  if (!src || sw <= 0 || sh <= 0) return false;
+  if (!storeHas(sid, false) && saveThumbScaledUp(sid, src, sw, sh)) {
+    thumbRedoSet(sid, true);   // the photo's own replaces it once the photo is in
+    return true;
+  }
+  return false;
+}
+
+bool thumbFinal(uint32_t sid) { return thumbSize(sid, nullptr, nullptr) && !thumbRedo(sid); }
 
 uint32_t nextThumbWanted() {
   if (!g_thumb_want_n) return 0;
@@ -1001,9 +1064,49 @@ bool saveThumb(uint32_t sid, const uint16_t* src, int sw, int sh) {
     if (HaveEntry* e = haveFind(sid, true)) { e->tw = (uint8_t)tw; e->th = (uint8_t)th; }
     idxNote(sid, 2, true, (uint8_t)tw, (uint8_t)th);   // writeStore noted it without its size
     thumbCachePut(sid, tw, th, out);
+    thumbRedoSet(sid, false);
     bumpState();
   }
   free(buf);
+  return ok;
+}
+
+// A thumbnail smaller than the bubble's (the early one, 64 px at most) scaled
+// up to fit kThumbMax bilinearly, so the bubble keeps its size when the
+// photo's own replaces it. Stored as saveThumb does.
+bool saveThumbScaledUp(uint32_t sid, const uint16_t* src, int sw, int sh) {
+  int tw = sw, th = sh;
+  if (sw >= sh) { tw = kThumbMax; th = (int)((long)sh * kThumbMax / sw); }
+  else { th = kThumbMax; tw = (int)((long)sw * kThumbMax / sh); }
+  if (tw <= sw || th < 1 || tw < 1) return saveThumb(sid, src, sw, sh);
+  uint16_t* big = (uint16_t*)heap_caps_malloc((size_t)tw * th * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!big) return saveThumb(sid, src, sw, sh);
+  for (int y = 0; y < th; y++) {
+    // Source position of this pixel's centre, in 1/256ths.
+    int fy = (int)(((2L * y + 1) * sh * 128) / th) - 128;
+    if (fy < 0) fy = 0;
+    int y0 = fy >> 8, wy = fy & 255;
+    if (y0 >= sh - 1) { y0 = sh - 1; wy = 0; }
+    const int y1 = y0 + 1 < sh ? y0 + 1 : y0;
+    for (int x = 0; x < tw; x++) {
+      int fx = (int)(((2L * x + 1) * sw * 128) / tw) - 128;
+      if (fx < 0) fx = 0;
+      int x0 = fx >> 8, wx = fx & 255;
+      if (x0 >= sw - 1) { x0 = sw - 1; wx = 0; }
+      const int x1 = x0 + 1 < sw ? x0 + 1 : x0;
+      const uint16_t p00 = src[y0 * sw + x0], p01 = src[y0 * sw + x1];
+      const uint16_t p10 = src[y1 * sw + x0], p11 = src[y1 * sw + x1];
+      auto mix = [&](int shift, int mask) {
+        const int a = (p00 >> shift) & mask, b = (p01 >> shift) & mask;
+        const int c = (p10 >> shift) & mask, d = (p11 >> shift) & mask;
+        const int top = a * (256 - wx) + b * wx, bot = c * (256 - wx) + d * wx;
+        return ((top * (256 - wy) + bot * wy) + 32768) >> 16;
+      };
+      big[y * tw + x] = (uint16_t)((mix(11, 31) << 11) | (mix(5, 63) << 5) | mix(0, 31));
+    }
+  }
+  const bool ok = saveThumb(sid, big, tw, th);
+  heap_caps_free(big);
   return ok;
 }
 

@@ -121,6 +121,9 @@ class VoxFetch {
   // How a downloaded clip's packets arrived: bit 0 main mesh, bit 1 radio2
   // (MediaMesh); 0 when not known (radio2 off, or downloaded before a reboot).
   uint8_t via(uint32_t sid) const;
+  // The first packet's bytes of a photo still coming in (where a version 2
+  // payload carries its thumbnail), once it's here. False otherwise.
+  bool firstPacket(uint32_t sid, const uint8_t** data, size_t* len) const;
   // "Received via MediaMesh", "Received via main mesh", "Received via
   // MediaMesh and main mesh", or nullptr for a via() of 0.
   static const char* viaText(uint8_t via);

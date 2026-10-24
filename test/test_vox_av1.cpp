@@ -102,6 +102,24 @@ int main(int argc, char** argv) {
   assert(worst_peak < 1536 * 1024);
   assert(resident < 300 * 1024);
 
+  // A version 2 payload: the thumbnail from its first packet alone. (Its
+  // photo is chelsea_2750's, checked bit-exact in the list above.)
+  {
+    snprintf(path, sizeof path, "%s/chelsea_2750_v2.vi1", dir);
+    size_t len = 0;
+    uint8_t* v2 = readFile(path, &len);
+    assert(v2 && len > (size_t)VoxWire::kBytesPerPacket);
+    size_t tl = 0;
+    const uint8_t* t = VoxWire::imageThumbObus(v2, VoxWire::kBytesPerPacket, &tl);
+    assert(t && tl <= (size_t)VoxWire::kBytesPerPacket - 2);
+    VoxAv1Image th;
+    assert(voxAv1Decode(t, tl, kVoxAv1Rgb565, 256, &th) == kVoxAv1Ok);
+    assert(th.width == 64 && th.height > 0 && th.height <= 64);
+    printf("thumbnail from the first packet: %dx%d from %zu bytes\n", th.width, th.height, tl);
+    voxAv1Free(th.pixels);
+    free(v2);
+  }
+
   // Damaged input: every truncation, and bit flips throughout. Must fail or
   // succeed cleanly (ASan/UBSan watch the decoder), never crash or leak.
   size_t obu_len = 0;

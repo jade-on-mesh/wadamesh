@@ -431,6 +431,14 @@ int VoxFetch::attempts(uint32_t sid) const {
   return s ? s->attempts : 0;
 }
 
+bool VoxFetch::firstPacket(uint32_t sid, const uint8_t** data, size_t* len) const {
+  const Session* s = find(sid);
+  if (!s || s->st == kComplete || !s->storage || !s->asm_.total() || !s->asm_.have(0)) return false;
+  *data = s->storage;
+  *len = s->asm_.total() == 1 ? s->asm_.payloadLen() : (size_t)s->packet_bytes;
+  return true;
+}
+
 uint8_t VoxFetch::via(uint32_t sid) const {
   const Session* s = find(sid);
   if (!s) return 0;
