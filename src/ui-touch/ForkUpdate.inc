@@ -26,10 +26,13 @@ struct Job {
   size_t msg_cap;
   int result;               // Latest: N or -1; Slot/Sd/Fetch: 1 ok, 0 failed
   SemaphoreHandle_t done;
-  const char* url = nullptr;   // Fetch: a file, whole, into buf
-  uint8_t* buf = nullptr;
-  size_t cap = 0;
-  size_t got = 0;
+  // Fetch: a file, whole, into buf. No default member initializers: the board
+  // builds are C++11, where they'd stop the brace-initialised Jobs above being
+  // aggregates (fields left out are zeroed anyway).
+  const char* url;
+  uint8_t* buf;
+  size_t cap;
+  size_t got;
 };
 
 // mbedTLS takes its memory from INTERNAL RAM in these builds
