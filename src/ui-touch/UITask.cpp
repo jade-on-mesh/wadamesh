@@ -39426,7 +39426,7 @@ struct MapMarkerStyles {
   lv_style_t icon;
   lv_style_t link;
 };
-static const MapMarkerStyles& mapMarkerStyles() {
+static MapMarkerStyles& mapMarkerStyles() {   // non-const: LVGL 8 takes lv_style_t*
   static MapMarkerStyles* st = nullptr;
   if (st) return *st;
   st = (MapMarkerStyles*)psAlloc(sizeof(MapMarkerStyles));
@@ -39616,7 +39616,7 @@ static void renderMapMarkers() {
     // Shared styles, not per-object local ones: every local style property is a
     // separate allocation on the object, ~20 per marker, all made again on each
     // pan and zoom. Size and position stay per object.
-    const MapMarkerStyles& ms = mapMarkerStyles();
+    MapMarkerStyles& ms = mapMarkerStyles();
     const int disc = c.type == ADV_TYPE_REPEATER ? 3 : c.type == ADV_TYPE_ROOM ? 4 :
                      c.type == ADV_TYPE_SENSOR ? 5 : age <= 3600 ? 0 : age <= 86400 ? 1 : 2;
     const int dot  = age <= 3600 ? 0 : age <= 86400 ? 1 : 2;
