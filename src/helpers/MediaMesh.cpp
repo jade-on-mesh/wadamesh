@@ -9,6 +9,7 @@
 
 #include "MediaMeshRadio.h"
 #include "esp32/TouchPrefsStore.h"
+#include "PsramStatic.h"
 
 namespace mediamesh {
 
@@ -18,11 +19,11 @@ constexpr const char* kPrefsKey = "mediamesh";
 constexpr const char* kRoutesKey = "mmroutes";
 
 Runtime s_rt;
-Routes s_routes;
+Routes& s_routes = psramObject<Routes>();   // these rings: ~6 KB, in PSRAM, not internal RAM
 bool s_loaded = false;
-MarkRing s_marks;            // choices made before a packet is queued, by hash
-QueueMarks s_queued;         // each queued packet's profiles, by packet
-OriginRing s_origins;
+MarkRing& s_marks = psramObject<MarkRing>();            // choices made before a packet is queued, by hash
+QueueMarks& s_queued = psramObject<QueueMarks>();         // each queued packet's profiles, by packet
+OriginRing& s_origins = psramObject<OriginRing>();
 SavedPrimaryFn s_saved_primary = nullptr;
 ContactPolicyResolver s_resolver = nullptr;
 volatile uint8_t s_ctx = kNoContext;
@@ -32,7 +33,7 @@ uint8_t s_rx_origin = kNoMark;   // while a received packet is being processed
 // carried here from noteForward() to queueOutbound().
 const mesh::Packet* s_fwd_pkt = nullptr;
 uint8_t s_fwd_origin = 0;
-MarkRing s_forwarded;            // the profiles each forwarded packet went out on, by hash
+MarkRing& s_forwarded = psramObject<MarkRing>();            // the profiles each forwarded packet went out on, by hash
 bool s_temp1_applied = false;
 
 // Profile generations: bumped whenever a profile in use changes, so queued
@@ -59,7 +60,7 @@ void ensureLoaded() {
   size_t n = touchPrefsGetBlob(kPrefsKey, blob, sizeof blob);
   Config c;
   if (n && decode(blob, n, c)) s_rt.saved = c;
-  static uint8_t rblob[Routes::kBlobMax];
+  static auto& rblob = psramStatic<uint8_t[Routes::kBlobMax]>();
   n = touchPrefsGetBlob(kRoutesKey, rblob, sizeof rblob);
   if (n) s_routes.decode(rblob, n);
 }
@@ -71,7 +72,7 @@ bool save() {
 }
 
 bool saveRoutes() {
-  static uint8_t blob[Routes::kBlobMax];
+  static auto& blob = psramStatic<uint8_t[Routes::kBlobMax]>();
   const size_t n = s_routes.encode(blob);
   return touchPrefsSetBlob(kRoutesKey, blob, n);
 }
