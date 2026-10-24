@@ -59,6 +59,9 @@ jobs:
           g++ -std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined -I src \
               -o /tmp/test_predict_text test/test_predict_text.cpp
           /tmp/test_predict_text
+          g++ -std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined -I src \
+              -o /tmp/test_predict_file test/test_predict_file.cpp
+          /tmp/test_predict_file dictionaries/words-en.pwd
       - name: Back-track (track thinning and following back)
         run: |
           g++ -std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined -I src \

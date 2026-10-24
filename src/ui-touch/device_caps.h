@@ -350,6 +350,25 @@
   #endif
 #endif
 
+// Predictive text (PREDICTIVE_TEXT.md): wherever the extras are, and on the
+// T-Display P4 too, which keeps its dictionary out of flash (its app slot is
+// full): it loads dictionaries/words-en.pwd from its storage, the SD card or a
+// download instead (PREDICT_BUILTIN_WORDS 0).
+#ifndef CAP_PREDICT_TEXT
+  #if CAP_TAK_EXTRAS || defined(HAS_TDISPLAY_P4)
+    #define CAP_PREDICT_TEXT 1
+  #else
+    #define CAP_PREDICT_TEXT 0
+  #endif
+#endif
+#ifndef PREDICT_BUILTIN_WORDS
+  #if defined(HAS_TDISPLAY_P4)
+    #define PREDICT_BUILTIN_WORDS 0
+  #else
+    #define PREDICT_BUILTIN_WORDS 1
+  #endif
+#endif
+
 // A keyboard that comes and goes at runtime and is routed like the Bluetooth
 // one above (bleKbdDispatch() and friends): Bluetooth itself, an M5Stack CardKB,
 // or the T-Display P4's clip-on keyboard expansion. CAP_BLE_KEYBOARD stays the

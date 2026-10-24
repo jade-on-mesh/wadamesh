@@ -25,7 +25,7 @@ int main() {
   static Dict d;
   char out[kSuggest][kWordMax];
   // The dictionary: sorted, front-coded, findable.
-  assert(words::kCount > 9000);
+  assert(dict::count() > 9000 && dict::count() == words::kFileWords);
   assert(dict::find("the", 3) > 70);
   assert(dict::find("repeater", 8) >= 45);   // a mesh word, with its floor
   assert(dict::find("zzqx", 4) == 0);
@@ -34,7 +34,7 @@ int main() {
   assert(dict::find("dont", 4) == 0 && dict::find("don't", 5) > 0);
   int seen = 0;
   dict::scanFrom(0, [&](const char*, size_t, uint8_t) { seen++; return true; });
-  assert(seen == words::kCount);
+  assert(seen == dict::count());
 
   // Completions, most used first, from one letter.
   int n = d.suggest("th", 2, out);

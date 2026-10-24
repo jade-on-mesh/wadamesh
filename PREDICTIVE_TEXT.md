@@ -53,8 +53,28 @@ aside for the @-mention and accent pickers. The learned words and pairs are
 kept in `/words` on the internal store, written 30 s after a send. Older
 firmware reads the words from that file and skips the pairs.
 
-*Settings › Keyboard › Typing › Predictive text* turns it on or off. It isn't
-on the T-Display P4, whose app space is full (`CAP_TAK_EXTRAS`).
+*Settings › Keyboard › Typing › Predictive text* turns it on or off.
+
+## The T-Display P4
+
+The P4's app slot is full, so its firmware has no dictionary built in
+(`PREDICT_BUILTIN_WORDS 0`). It uses the same dictionary as a 57 KB file,
+`dictionaries/words-en.pwd`, kept on its internal storage. The P4 gets it from
+the first of these that works:
+
+1. its internal storage (`/words-en.pwd`), once it has the file;
+2. the SD card, in `/predict/words-en.pwd` (or `/words-en.pwd` at the top). It
+   copies the file to internal storage, so the card can come out again;
+3. a download over Wi-Fi, the first time Wi-Fi is up. It fetches the copy in its
+   own firmware release's tag on GitHub (or `main`'s), and retries every 10
+   minutes until it works.
+
+A notice says when a download is installed. *Settings › Keyboard › Typing*
+shows the dictionary's state under the switches.
+
+The firmware only takes the exact file it was built with: its size and an
+FNV-1a checksum are in `PredictWordsInfo.h`, generated with the file. Until the
+P4 has the dictionary, it suggests your own words and the next-word table.
 
 ## Rebuilding the dictionary
 
@@ -63,13 +83,22 @@ pip install wordfreq better_profanity
 python3 scripts/predict/gen_words.py            # PREDICT_WORDS=15000 for more
 ```
 
-This writes `src/ui-touch/PredictWords.inc`. The words are sorted, front-coded in
-blocks of 32 with an index for binary search, and carry a frequency byte (zipf × 10).
+This writes three files:
+
+- `src/ui-touch/PredictWords.inc`: the dictionary, compiled in.
+- `dictionaries/words-en.pwd`: the same dictionary as a file, for the P4.
+- `src/ui-touch/PredictWordsInfo.h`: the file's size and checksum.
+
+The words are sorted, front-coded in blocks of 32 with an index for binary
+search, and carry a frequency byte (zipf × 10). The file is `PWD1`, then the word
+count and the block count (u32 LE), then the block offsets, then the data.
 
 ## Code
 
 | Piece | Where |
 | --- | --- |
 | Dictionary lookup, completions, corrections, next word, ranking, Space's choice, learning, save/load (host-tested) | `src/ui-touch/PredictText.h`, `test/test_predict_text.cpp` |
-| The dictionary (generated) | `src/ui-touch/PredictWords.inc`, `scripts/predict/gen_words.py` |
+| The dictionary (generated) | `src/ui-touch/PredictWords.inc`, `dictionaries/words-en.pwd`, `src/ui-touch/PredictWordsInfo.h`, `scripts/predict/gen_words.py` |
+| Loading the file (host-tested) | `dict::loadFile` in `PredictText.h`, `test/test_predict_file.cpp` |
+| The P4's copy: storage, SD, download | `predictDictLoadLocal`, `predictDictTick` in `UITask.cpp`; the worker's `s_pwd_request`; `forkFetchFile` in `ForkUpdate.inc` |
 | The strip over the message field, Space (`wordSpaceComplete`), learning on send and on undo, the settings | `wordBoxMaybeShow`, `predictLearn`, `predictToggleCb` in `src/ui-touch/UITask.cpp` |
