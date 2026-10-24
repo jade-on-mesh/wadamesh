@@ -446,6 +446,11 @@ uint32_t mediaRadio2AirMs(int payload_len) {
   const uint8_t media = effectiveMedia(s_rt.saved);
   if (!supported() || effectiveShare(s_rt.saved) || media == TX_AUTO) return 0;
   if (policyMask(s_rt, media) != 2) return 0;
+  return radio2AirMs(payload_len);
+}
+
+uint32_t radio2AirMs(int payload_len) {
+  if (!radio2Defined()) return 0;
   const Profile2 a = s_rt.active2();
   uint16_t pre = a.p.preamble;
 #if defined(MEDIAMESH_RADIO)

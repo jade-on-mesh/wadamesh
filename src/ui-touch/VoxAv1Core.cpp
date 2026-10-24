@@ -117,42 +117,57 @@ inline uint8_t clamp8(int v) { return (uint8_t)(v < 0 ? 0 : (v > 255 ? 255 : v))
 
 // Bit-for-bit the conversion in meshcore-open-tak's vox_av1.c i420_to_rgb:
 // full-range BT.601, centre-sited 4:2:0 chroma upsampled bilinearly, float math.
-void toRgb(const Dav1dPicture& p, VoxAv1Format fmt, uint8_t* out) {
+// 4:2:0 to RGB, bilinear chroma, exactly as the app's i420_to_rgb. Chroma
+// sits between luma samples, so every weight is 1/4 or 3/4 and the blend is an
+// integer in 1/16ths: s/16 is the float the app gets, bit for bit (every step
+// of its float sum is exact). The rows are blended once per output row, not
+// once per pixel; only the colour matrix is float, as the app's is. False if
+// the two row buffers can't be had.
+bool toRgb(const Dav1dPicture& p, VoxAv1Format fmt, uint8_t* out) {
   const int w = p.p.w, h = p.p.h, cw = (w + 1) / 2, ch = (h + 1) / 2;
   const uint8_t* Yp = (const uint8_t*)p.data[0];
   const uint8_t* Up = (const uint8_t*)p.data[1];
   const uint8_t* Vp = (const uint8_t*)p.data[2];
   const ptrdiff_t ys = p.stride[0], cs = p.stride[1];
+  uint16_t* rows = (uint16_t*)voxAv1Alloc((size_t)cw * 2 * sizeof(uint16_t));
+  if (!rows) return false;
+  uint16_t* cu = rows;        // a row of U blended vertically, in 1/4ths
+  uint16_t* cv = rows + cw;   // and of V
   uint16_t* o16 = (uint16_t*)out;
+  uint8_t* o24 = out;
   for (int y = 0; y < h; y++) {
-    const float fy = (y - 0.5f) * 0.5f;
-    const int y0 = (int)(fy < 0 ? -1 : fy);
-    const float wy = fy - y0;
+    // fy = (y - 0.5) / 2: an odd row is 1/4 past chroma row y/2, an even one
+    // 3/4 past the row before (clamped at the edges).
+    const int y0 = (y & 1) ? (y >> 1) : (y >> 1) - 1;
+    const int wy = (y & 1) ? 1 : 3;
     const int ya = y0 < 0 ? 0 : y0, yb = y0 + 1 >= ch ? ch - 1 : y0 + 1;
     const uint8_t* ua = Up + ya * cs; const uint8_t* ub = Up + yb * cs;
     const uint8_t* va = Vp + ya * cs; const uint8_t* vb = Vp + yb * cs;
+    for (int i = 0; i < cw; i++) {
+      cu[i] = (uint16_t)((4 - wy) * ua[i] + wy * ub[i]);
+      cv[i] = (uint16_t)((4 - wy) * va[i] + wy * vb[i]);
+    }
     const uint8_t* yr = Yp + y * ys;
     for (int x = 0; x < w; x++) {
-      const float fx = (x - 0.5f) * 0.5f;
-      const int x0 = (int)(fx < 0 ? -1 : fx);
-      const float wx = fx - x0;
+      const int x0 = (x & 1) ? (x >> 1) : (x >> 1) - 1;
+      const int wx = (x & 1) ? 1 : 3;
       const int xa = x0 < 0 ? 0 : x0, xb = x0 + 1 >= cw ? cw - 1 : x0 + 1;
-      const float u = (1 - wy) * ((1 - wx) * ua[xa] + wx * ua[xb]) +
-                      wy * ((1 - wx) * ub[xa] + wx * ub[xb]) - 128;
-      const float v = (1 - wy) * ((1 - wx) * va[xa] + wx * va[xb]) +
-                      wy * ((1 - wx) * vb[xa] + wx * vb[xb]) - 128;
+      const float u = (float)((4 - wx) * cu[xa] + wx * cu[xb]) * (1.0f / 16) - 128;
+      const float v = (float)((4 - wx) * cv[xa] + wx * cv[xb]) * (1.0f / 16) - 128;
       const float Y = yr[x];
       const uint8_t r = clamp8((int)(Y + 1.402f * v + 0.5f));
       const uint8_t g = clamp8((int)(Y - 0.344136f * u - 0.714136f * v + 0.5f));
       const uint8_t b = clamp8((int)(Y + 1.772f * u + 0.5f));
       if (fmt == kVoxAv1Rgb888) {
-        uint8_t* o = out + ((size_t)y * w + x) * 3;
-        o[0] = r; o[1] = g; o[2] = b;
+        o24[0] = r; o24[1] = g; o24[2] = b;
+        o24 += 3;
       } else {
-        o16[(size_t)y * w + x] = (uint16_t)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
+        *o16++ = (uint16_t)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
       }
     }
   }
+  voxAv1Free(rows);
+  return true;
 }
 
 void noFree(const uint8_t*, void*) {}
@@ -206,8 +221,10 @@ VoxAv1Result voxAv1Decode(const uint8_t* obus, size_t len, VoxAv1Format format,
           uint8_t* px = (uint8_t*)voxAv1Alloc((size_t)pic.p.w * pic.p.h * bpp);
           if (!px) {
             res = kVoxAv1NoMemory;
+          } else if (!toRgb(pic, format, px)) {
+            voxAv1Free(px);
+            res = kVoxAv1NoMemory;
           } else {
-            toRgb(pic, format, px);
             out->width = pic.p.w;
             out->height = pic.p.h;
             out->format = format;

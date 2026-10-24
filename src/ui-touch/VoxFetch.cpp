@@ -159,24 +159,59 @@ int VoxFetch::hops(const Session& s) {
   return imax(io_.contactHops(s.pub), 0);
 }
 
-uint32_t VoxFetch::packetGap(bool flood, int h) {
-  const uint32_t air = io_.packetAirMs();
+uint32_t VoxFetch::packetGap(bool flood, int h, uint32_t air) {
   if (flood) return (uint32_t)imax(800, (int)(air * 4 + 150));
   if (h <= 0) return (uint32_t)imax(400, (int)(air * 2 + 150));
   const double relay_air = air * 1.15;
   return (uint32_t)(air + imin(h, 2) * 2.5 * relay_air + 400);
 }
 
-uint32_t VoxFetch::zeroHopGap() {
-  const uint32_t g = io_.packetAirMs() + 60;   // VoxServe::zeroHopGap
+uint32_t VoxFetch::zeroHopGap(uint32_t air) {
+  const uint32_t g = air + 60;   // VoxServe::zeroHopGap
   return g > 150 ? g : 150;
+}
+
+// A clip coming in over radio2 alone is paced by radio2's airtime, which is
+// usually far shorter than the main radio's.
+uint32_t VoxFetch::airMs(const Session& s) {
+  if (s.via_count[kViaRadio2] && !s.via_count[kViaMain]) {
+    const uint32_t r2 = io_.radio2PacketAirMs();
+    if (r2) return r2;
+  }
+  return io_.packetAirMs();
+}
+
+// The gap expected between this transfer's packets. The model's, until a few
+// have come in: then twice the gap they actually came at, when that's sooner,
+// so a lost tail is asked for again in seconds, not tens of seconds.
+uint32_t VoxFetch::burstGap(Session& s) {
+  const uint32_t air = airMs(s);
+  const uint32_t model = packetGap(s.last == kChannel, hops(s), air);
+  if (s.rx_gaps < 3) return model;
+  uint32_t seen = s.rx_gap_ms * 2;
+  const uint32_t low = zeroHopGap(air);
+  if (seen < low) seen = low;
+  return seen < model ? seen : model;
+}
+
+// Packets of one burst: smooth the gap between them. The first packet after a
+// request starts a new burst (its gap is the round trip, not the pacing).
+void VoxFetch::noteGap(Session& s, uint32_t now) {
+  if (s.rx_last_ms) {
+    const uint32_t g = now - s.rx_last_ms;
+    if (g < 60000) {
+      s.rx_gap_ms = s.rx_gaps ? (s.rx_gap_ms * 3 + g) / 4 : g;
+      if (s.rx_gaps < 0xFF) s.rx_gaps++;
+    }
+  }
+  s.rx_last_ms = now;
 }
 
 uint32_t VoxFetch::waitFor(Session& s) {
   const int h = hops(s);
   // Once packets flow the stream is live: silence for a few packet gaps means
   // its tail was lost, not that the request is still on its way.
-  if (s.st == kReceiving) return stallWait(packetGap(s.last == kChannel, h));
+  if (s.st == kReceiving) return stallWait(burstGap(s));
   const uint32_t hop_ms = io_.packetAirMs() * 2 + 700;
   const uint32_t trips = s.last == kDm ? 5 : s.last == kChannel ? 3 : 2;
   return trips * (uint32_t)(h + 1) * hop_ms + 8000;
@@ -228,6 +263,7 @@ void VoxFetch::attempt(Session& s) {
   s.last = m;
   if (m == kChannel) s.tried_channel = true;
   s.at_last_attempt = s.asm_.total() ? s.asm_.received() : 0;
+  s.rx_last_ms = 0;   // the next packet starts a new burst
 
   uint8_t missing[VoxWire::kMaxPackets];
   int n_missing = 0;
@@ -333,6 +369,7 @@ void VoxFetch::accept(Session& s, const VoxWire::Packet& p, uint8_t via, const u
     if (s.r2_hop_len) memcpy(s.r2_hop, hop, s.r2_hop_len);
   }
   s.last_touch = io_.nowMs();
+  if (s.st == kRequesting || s.st == kReceiving) noteGap(s, s.last_touch);
   if (s.asm_.complete()) {
     complete(s);
     return;
@@ -343,14 +380,15 @@ void VoxFetch::accept(Session& s, const VoxWire::Packet& p, uint8_t via, const u
     s.st = kReceiving;
     if (p.index == s.expected_last) {
       // The sender's burst is over, so the gaps are final: ask again soon.
-      arm(s, gapRequestDelay(s.relayed, packetGap(s.last == kChannel, hops(s)), zeroHopGap()));
+      arm(s, gapRequestDelay(s.relayed, burstGap(s), zeroHopGap(airMs(s))));
     } else {
       arm(s, waitFor(s));
     }
   } else if (s.st == kRemote && s.channel >= 0) {
     // Pushed, or sent for another listener: if it stops short, ask for the
     // rest. Everyone in range hears the same push stop, so spread out.
-    const uint32_t gap = s.relayed ? packetGap(true, 0) : zeroHopGap();
+    const uint32_t air = airMs(s);
+    const uint32_t gap = s.relayed ? packetGap(true, 0, air) : zeroHopGap(air);
     arm(s, stallWait(gap) + io_.random32() % 1500);
   }
   io_.changed(s.sid);
