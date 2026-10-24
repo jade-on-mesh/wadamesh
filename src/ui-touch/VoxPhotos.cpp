@@ -13,6 +13,7 @@
 
 #include "../MyMesh.h"
 #include "ChannelSenderSplit.h"
+#include "VoxAv1Core.h"
 #include "VoxServe.h"
 #include "VoxVoice.h"
 #include "device_caps.h"
@@ -563,11 +564,13 @@ bool onDirectText(const char* text, const uint8_t sender_pub[32]) {
   VoxWire::Envelope env;
   if (!VoxWire::parseEnvelope(text, &env) || !canFetch(env)) return false;
   remember(env);
-  // A voice message sent to us is fetched as it arrives, as the app does (its
-  // auto-play setting, on by default), so a tap plays it at once. It's a few
-  // packets, and only its sender is asked. Photos and channel posts still wait
-  // for a tap; a channel's clip is pushed to the radios in range anyway.
-  g_fetch.onEnvelope(env, sender_pub, nullptr, -1, env.kind == VoxWire::kCodec2);
+  // A photo or voice message sent to us is fetched as it arrives, as the app
+  // does (its auto-play setting, on by default): the photo's thumbnail then
+  // shows in the chat by itself, and a tap opens or plays it at once. Only
+  // its sender is asked. A channel's post is pushed to the radios in range,
+  // which keep it the same way (VoxFetch's passive packets). A build that
+  // can't show photos (no AV1 decoder) leaves them to a tap.
+  g_fetch.onEnvelope(env, sender_pub, nullptr, -1, env.kind != VoxWire::kImage || VOX_AV1_AVAILABLE);
   return false;
 }
 

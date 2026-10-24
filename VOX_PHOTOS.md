@@ -35,10 +35,13 @@ reduced still-picture header and no AVIF container, 2,750 B ("Standard") or
   to download", then "Requesting...", "Downloading 12/36", "Photo - tap to
   view". `VR3:` fetch-request DMs never show in chat (a connected app still
   gets them).
-- Tapping starts the download. Nothing is fetched until then, so photos cost
-  no airtime unless someone wants them. Packets that arrive anyway (another
-  listener's channel transfer, or the phone app's own fetch through this
-  radio) are kept, and can finish a photo without a request.
+- A photo sent to you in a DM downloads as soon as it arrives, as the app's
+  auto-play does (on by default), and its thumbnail shows in the bubble by
+  itself. A photo posted on a channel is pushed by its sender to the radios in
+  range, which keep its packets the same way, so its thumbnail shows up too.
+  Packets that arrive anyway (another listener's channel transfer, or the
+  phone app's own fetch through this radio) are kept, and can finish a photo
+  without a request. A channel photo that didn't all arrive downloads on a tap.
 - The fetch follows the app (`voice_service.dart`), so Open TAK senders answer
   it unchanged:
   1. **direct**: a binary request over raw data along our route, carrying that
@@ -64,10 +67,9 @@ reduced still-picture header and no AVIF container, 2,750 B ("Standard") or
 
 - A `VE3:` (Codec2) message shows as a voice bubble with its length: "Voice 7s
   - tap to play".
-- A voice message sent to you in a DM downloads as soon as it arrives, as the
-  app's auto-play does, so a tap plays it at once. It's a few packets, asked
-  only of its sender. Photos, and clips posted on a channel, still wait for a
-  tap. A channel's clip is pushed to the radios in range anyway.
+- A voice message sent to you in a DM downloads as soon as it arrives, like a
+  photo, so a tap plays it at once. A channel's clip is pushed to the radios
+  in range.
 - A tap on a clip that isn't here yet downloads it the same way as a photo and
   plays it as soon as it arrives. Later taps play it again, or stop it while it
   plays.
