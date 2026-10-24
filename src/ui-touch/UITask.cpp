@@ -8904,6 +8904,7 @@ static bool      s_verchk_ran       = false;     // a check has completed (ok or
 static volatile bool s_verchk_request  = false;  // UI -> core-0 worker: please check
 static volatile bool s_verchk_done     = false;  // worker -> UI: result ready
 static bool          s_verchk_recheck  = false;  // force a fresh check now (e.g. update channel changed)
+static bool          s_verchk_manual   = false;  // "Check for updates" was pressed: say how it went
 
 // microSD size/free for the About page. usedBytes() scans the FAT (slow, and contends
 // with the worker's own SD writes) — doing it on the UI thread froze the About sheet and
@@ -9798,6 +9799,16 @@ static void versionCheckService(unsigned long now) {
       fail_streak = 0;
     }
     versionCheckUpdateUi();
+    if (s_verchk_manual) {   // asked for: say how it went, wherever the user is now
+      s_verchk_manual = false;
+      if (g_lv.task) {
+        char m[96];
+        if (s_verchk_latest_n < 0) snprintf(m, sizeof m, "%s", TR("Couldn't reach the update server"));
+        else if (s_update_available) snprintf(m, sizeof m, TR("Update available: %s"), relName(s_verchk_latest_n));
+        else snprintf(m, sizeof m, TR("Up to date (%s)"), relName(firmwareReleaseN()));
+        g_lv.task->showAlert(m, 2600);
+      }
+    }
   }
 #else
   (void)now;
@@ -9818,6 +9829,32 @@ static void betaUpdatesToggleCb(lv_event_t* e) {
   s_verchk_recheck   = true;      // ...and re-query the newly-selected channel
   versionCheckUpdateUi();         // status line falls back to "Checking…" (also greys the button)
   if (g_lv.task) g_lv.task->showAlert(on ? TR("Test builds: on") : TR("Test builds: off"), 2000);
+}
+#endif
+#if defined(ESP32) && defined(MULTI_TRANSPORT_COMPANION)
+// Settings > Firmware > Check for updates: a fresh check now, instead of
+// waiting for the next one (at boot, then every 6 h).
+static void checkUpdatesCb(lv_event_t* e) {
+  if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+  if (firmwareReleaseN() < 0) {
+    if (g_lv.task) g_lv.task->showAlert(TR("Development build: the update check is off."), 2200);
+    return;
+  }
+  if (WiFi.status() != WL_CONNECTED || (uint32_t)WiFi.localIP() == 0) {
+    if (g_lv.task) g_lv.task->showAlert(TR("Connect to Wi-Fi to check for updates"), 2200);
+    return;
+  }
+  s_verchk_manual = true;
+  if (s_verchk_request) {   // one is on its way already: its answer is reported
+    if (g_lv.task) g_lv.task->showAlert(TR("Checking for updates..."), 1500);
+    return;
+  }
+  s_verchk_ran       = false;
+  s_update_available = false;
+  s_verchk_latest_n  = -1;
+  s_verchk_recheck   = true;   // versionCheckService starts it
+  versionCheckUpdateUi();      // "Checking for updates over Wi-Fi..."
+  if (g_lv.task) g_lv.task->showAlert(TR("Checking for updates..."), 1500);
 }
 #endif
 static void applySwipeGesture(int8_t swipe_x, int8_t swipe_y) {
@@ -43427,6 +43464,10 @@ static void buildAboutSettings() {
     lv_obj_set_style_pad_left(s_update_about_lbl, 2, LV_PART_MAIN);
     lv_label_set_text(s_update_about_lbl, "");
 #if defined(ESP32) && defined(MULTI_TRANSPORT_COMPANION)
+#if CAP_FW_UPDATE_CHECK
+    if (firmwareReleaseN() >= 0)
+      setActionRow(c, LV_SYMBOL_REFRESH, "Check for updates", nullptr, checkUpdatesCb);
+#endif
     // Install over the air: a tagged build with a spare slot only. The callback checks
     // again (Wi-Fi up, update known) and reports in the status line under it.
     if (FIRMWARE_OTA_ENV[0] && firmwareReleaseN() >= 0 && touchHasOtaUpdateSlot()) {
