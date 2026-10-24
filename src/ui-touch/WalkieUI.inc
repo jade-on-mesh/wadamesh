@@ -202,11 +202,12 @@ static void playJob(void*) {
     const int spf = codec.samplesPerFrame();
     const size_t bpf = (size_t)codec.bytesPerFrame();
     int16_t pcm[320];
-    int16_t out[256];
+    int16_t out[256 + 16];
     size_t n_out = 0;
-    uint32_t phase = 0;
     bool failed = false;
     uint32_t idle_ms = 0;
+    VoxPlayOut po;   // interpolated + low-passed to the speaker's rate (VoxVoice.h)
+    po.begin(sink.output_rate, sink.gain);
     static Chunk c;
     while (!s_job_stop && !failed) {
       if (xQueueReceive(s_q, &c, pdMS_TO_TICKS(40)) != pdTRUE) {
@@ -228,16 +229,10 @@ static void playJob(void*) {
       for (size_t i = 0; i + bpf <= c.len && !failed && !s_job_stop; i += bpf) {
         codec.decode(c.data + i, pcm);
         for (int k = 0; k < spf && !failed; k++) {
-          int32_t v = (int32_t)((float)pcm[k] * sink.gain);
-          v = v > 32767 ? 32767 : (v < -32768 ? -32768 : v);
-          phase += sink.output_rate;   // 8 kHz to the sink's rate
-          while (phase >= (uint32_t)kVoxVoiceSampleRate) {
-            phase -= kVoxVoiceSampleRate;
-            out[n_out++] = (int16_t)v;
-            if (n_out == sizeof out / sizeof out[0]) {
-              failed = !luaAudioSinkWrite(&sink, out, n_out);
-              n_out = 0;
-            }
+          po.push(pcm[k], out, sizeof out / sizeof out[0], &n_out);
+          if (n_out >= 256) {
+            failed = !luaAudioSinkWrite(&sink, out, n_out);
+            n_out = 0;
           }
         }
       }

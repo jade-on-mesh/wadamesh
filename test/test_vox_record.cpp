@@ -300,6 +300,57 @@ static void testPeakMeter() {
   CHECK(p.takePeak() == 0, "takePeak should reset");
 }
 
+// The noise gate: hiss between words comes out well below what the AGC alone
+// left (it held the gain, so hiss stayed at its input level), and speech after
+// it passes at full level.
+static void testPrepNoiseGate() {
+  VoxMicPrep p;
+  std::vector<int16_t> s(2 * 32000);   // 2 s of hiss, peak ~120 (under the gate)
+  uint32_t lcg = 11;
+  for (auto& v : s) { lcg = lcg * 1103515245u + 12345u; v = (int16_t)(((int)((lcg >> 16) & 0xFF)) - 128); }
+  const auto quiet = runPrep(p, s);
+  const double hiss = rms(quiet.data() + 8000, quiet.size() - 8000);
+  const auto talk = runPrep(p, stereoTone(1.0, 500, 2000, 0, 0));
+  const double speech = rms(talk.data() + 4000, 4000);
+  printf("gate: hiss rms %.1f, speech rms %.0f\n", hiss, speech);
+  CHECK(hiss < 120, "hiss let through at rms %.1f", hiss);
+  CHECK(speech > 4000, "speech after the hiss came out at only %.0f", speech);
+}
+
+// Playback: 8 kHz to 16 kHz doubles the samples, keeps a 1 kHz tone's level,
+// and (unlike repeating each sample) leaves almost nothing at its 7 kHz image.
+static void testPlayOut() {
+  const int n8 = 8000;
+  std::vector<int16_t> in(n8);
+  for (int i = 0; i < n8; i++) in[i] = (int16_t)lrint(8000 * sin(2 * M_PI * 1000 * i / 8000.0));
+  VoxPlayOut po;
+  po.begin(16000, 1.0f);
+  std::vector<int16_t> out(2 * n8 + 16);
+  size_t n = 0;
+  for (int i = 0; i < n8; i++) po.push(in[i], out.data(), out.size(), &n);
+  CHECK(n >= 2 * (size_t)n8 - 2 && n <= 2 * (size_t)n8 + 2, "16 kHz gave %zu samples for %d", n, n8);
+  const double f1 = tone(out.data() + 1600, 12800, 1000, 16000);
+  const double img = tone(out.data() + 1600, 12800, 7000, 16000);
+  // The old way, for comparison: each sample twice.
+  std::vector<int16_t> zoh(2 * n8);
+  for (int i = 0; i < n8; i++) zoh[2 * i] = zoh[2 * i + 1] = in[i];
+  const double zimg = tone(zoh.data() + 1600, 12800, 7000, 16000);
+  const double f_in = tone(in.data() + 800, 6400, 1000, 8000);   // the same measure, on the input
+  printf("playout: 1 kHz %.0f (in %.0f), 7 kHz image %.1f (sample-repeat: %.0f)\n", f1, f_in, img, zimg);
+  CHECK(f1 > f_in * 0.85 && f1 < f_in * 1.1, "1 kHz came out at %.0f for %.0f in", f1, f_in);
+  CHECK(f1 / (img > 1e-9 ? img : 1e-9) > 30, "7 kHz image only %.1f dB down", 20 * log10(f1 / img));
+  CHECK(img < zimg / 4, "image %.1f not well under sample-repeat's %.0f", img, zimg);
+  // 8 kHz out: passes straight through.
+  VoxPlayOut same;
+  same.begin(8000, 1.0f);
+  size_t m = 0;
+  for (int i = 0; i < 100; i++) same.push(in[i], out.data(), out.size(), &m);
+  CHECK(m == 100 && out[50] == in[50], "8 kHz out should pass through");
+  // Levelling: quiet clips up to 6x, loud ones left alone.
+  CHECK(voxPlayNormGain(23000) == 1.0f && voxPlayNormGain(30000) == 1.0f, "loud clip gain");
+  CHECK(voxPlayNormGain(2000) == 6.0f && voxPlayNormGain(-1) == 1.0f, "quiet / unknown clip gain");
+}
+
 // The full recording path: 16 kHz stereo mic samples of the synthetic speech,
 // through VoxMicPrep, encoded. The clip must be a whole number of frames that
 // decodes, and the prep must not add latency beyond a frame.
@@ -346,6 +397,8 @@ int main(int argc, char** argv) {
   testPrepAgc();
   testPrepSilenceNotPumped();
   testPeakMeter();
+  testPrepNoiseGate();
+  testPlayOut();
   testPipeline();
   if (g_fail) {
     printf("%d check(s) failed\n", g_fail);
