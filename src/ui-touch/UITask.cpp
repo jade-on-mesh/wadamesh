@@ -7172,20 +7172,35 @@ static lv_obj_t* navOpenDropdown() {
 static void bubblePhotoTapCb(lv_event_t* e);
 static void bubblePhotoOpen(int idx);
 #endif
+#if defined(HAS_M9_KEYBOARD)
+// The M9 has no touchscreen, so a photo or voice bubble could never be
+// "tapped": OK opens it (download, view, play), as a tap does, and so does
+// holding OK. Its menu stays on the triangle key (the hold action). Sym can't do
+// this: the keyboard's controller keeps Shift/Sym/Alt to itself. True if the
+// focused item was a photo or voice bubble.
+static uint32_t s_m9_media_open_ms = 0;
+static int s_m9_media_open_idx = -1;
+static bool navOpenMediaBubble(bool held = false) {
+  lv_obj_t* foc = s_nav_group ? lv_group_get_focused(s_nav_group) : nullptr;
+  LvChatPanel* cp = navOpenChatPanel();
+  if (!cp || !cp->msgs || !foc || !lv_obj_is_valid(foc) || lv_obj_get_parent(foc) != cp->msgs) return false;
+  const int v = (int)(intptr_t)lv_obj_get_event_user_data(foc, bubblePhotoTapCb);
+  if (v <= 0) return false;
+  // A hold whose press already opened it doesn't open it again (playing, then
+  // stopping); two presses do (play, stop).
+  if (held && v - 1 == s_m9_media_open_idx && millis() - s_m9_media_open_ms < 1500) return true;
+  s_m9_media_open_idx = v - 1;
+  s_m9_media_open_ms = millis();
+  bubblePhotoOpen(v - 1);
+  return true;
+}
+#endif
 static bool navEnterBubble() {
   lv_obj_t* foc = s_nav_group ? lv_group_get_focused(s_nav_group) : nullptr;
   LvChatPanel* cp = navOpenChatPanel();
   if (cp && cp->msgs && foc && lv_obj_is_valid(foc) && lv_obj_get_parent(foc) == cp->msgs) {
 #if defined(HAS_M9_KEYBOARD)
-    // The M9 has no touchscreen, so a photo or voice bubble could never be
-    // "tapped": Enter opens it (download, view, play), as a tap does. Its menu
-    // stays on the triangle key (the hold action). Sym can't do this: the
-    // keyboard's controller keeps Shift/Sym/Alt to itself.
-    const int v = (int)(intptr_t)lv_obj_get_event_user_data(foc, bubblePhotoTapCb);
-    if (v > 0) {
-      bubblePhotoOpen(v - 1);
-      return true;
-    }
+    if (navOpenMediaBubble()) return true;
 #endif
     lv_event_send(foc, LV_EVENT_LONG_PRESSED, nullptr);
     return true;
@@ -53468,6 +53483,10 @@ static bool m9HandleNavKey(int key) {
       s_nav_show = true; if (g_lv.task) g_lv.task->noteUserInput(); return true;
     }
     case M9_KEY_ENTER_LONG: {
+      // Held on a photo or voice message in a chat: open it or play it.
+      if (!anyPopupOpen() && navOpenMediaBubble(true)) {
+        s_nav_show = true; if (g_lv.task) g_lv.task->noteUserInput(); return true;
+      }
       lv_obj_t* foc = s_nav_group ? lv_group_get_focused(s_nav_group) : nullptr;
       if (foc && lv_obj_is_valid(foc)) lv_event_send(foc, LV_EVENT_LONG_PRESSED, nullptr);
       s_nav_show = true; if (g_lv.task) g_lv.task->noteUserInput(); return true;
