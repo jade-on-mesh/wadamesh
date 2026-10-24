@@ -300,6 +300,8 @@ jobs:
   # Espressif's IDF image by scripts/build/ci-p4.sh. Its vendored libraries come from
   # the T-Deck env's PlatformIO libdeps.
   p4:
+    permissions:
+      contents: write   # the memory report goes to the ram-report/tdisplay-p4 branch
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -333,6 +335,19 @@ jobs:
           echo "::error title=build log tail::$(tail -40 build.log | sed 's/%/%25/g' | sed ':a;N;$!ba;s/\n/%0A/g')"
       - name: Size
         run: echo "::notice title=tdisplay-p4 size::application.bin $(stat -c %s dist/wadamesh-tdisplay-p4.bin) bytes (4 MB slot)"
+      # Flash, internal RAM and PSRAM by section, symbol, library and object
+      # (scripts/build/mem-report.py), on a branch: annotations are too small.
+      - name: Memory report
+        if: always()
+        shell: bash
+        run: |
+          f=dist/mem-report-tdisplay-p4.txt
+          [ -f "$f" ] || { echo "::warning::no memory report"; exit 0; }
+          grep "^total " "$f" | while IFS= read -r l; do echo "::notice title=tdisplay-p4 memory::$l"; done
+          d=$(mktemp -d); cp "$f" "$d/tdisplay-p4.txt"; cd "$d"
+          git init -q -b ram-report && git add -A
+          git -c user.name=ci -c user.email=ci@users.noreply.github.com commit -qm "Memory report ${GITHUB_SHA::7} tdisplay-p4"
+          git push -qf "https://x-access-token:${{ github.token }}@github.com/${GITHUB_REPOSITORY}.git" "ram-report:ram-report/tdisplay-p4" || true
       # The OTA image and the merged one for a USB flash, like the other boards'.
       - uses: actions/upload-artifact@v4
         with:
