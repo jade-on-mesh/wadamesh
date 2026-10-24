@@ -284,6 +284,12 @@ jobs:
                   out.write("by object\n" + "\n".join(f"{n:8} {k}" for k, n in by_obj.most_common(150)) + "\n\n")
                   out.write("symbols\n" + "\n".join(f"{n:8} {s}" for n, s in syms[:200]) + "\n")
           PY
+          # Flash too (and the same internal-RAM view as the P4's), by symbol,
+          # library and object: scripts/build/mem-report.py.
+          if [ -f ram-report.txt ] && [ -f "$B/firmware.map" ]; then
+            { echo; echo "===== mem-report.py ====="; python3 scripts/build/mem-report.py "$B/firmware.elf" "$B/firmware.map" \
+                ~/.platformio/packages/toolchain-xtensa-esp32s3/bin/xtensa-esp32s3-elf-; } >> ram-report.txt || true
+          fi
           if [ -f ram-report.txt ]; then
             d=$(mktemp -d); cp ram-report.txt "$d/${{ matrix.env }}.txt"; cd "$d"
             git init -q -b ram-report && git add -A
@@ -300,6 +306,8 @@ jobs:
   # Espressif's IDF image by scripts/build/ci-p4.sh. Its vendored libraries come from
   # the T-Deck env's PlatformIO libdeps.
   p4:
+    permissions:
+      contents: write   # the memory report goes to the ram-report/tdisplay-p4 branch
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -333,6 +341,19 @@ jobs:
           echo "::error title=build log tail::$(tail -40 build.log | sed 's/%/%25/g' | sed ':a;N;$!ba;s/\n/%0A/g')"
       - name: Size
         run: echo "::notice title=tdisplay-p4 size::application.bin $(stat -c %s dist/wadamesh-tdisplay-p4.bin) bytes (4 MB slot)"
+      # Flash, internal RAM and PSRAM by section, symbol, library and object
+      # (scripts/build/mem-report.py), on a branch: annotations are too small.
+      - name: Memory report
+        if: always()
+        shell: bash
+        run: |
+          f=dist/mem-report-tdisplay-p4.txt
+          [ -f "$f" ] || { echo "::warning::no memory report"; exit 0; }
+          grep "^total " "$f" | while IFS= read -r l; do echo "::notice title=tdisplay-p4 memory::$l"; done
+          d=$(mktemp -d); cp "$f" "$d/tdisplay-p4.txt"; cd "$d"
+          git init -q -b ram-report && git add -A
+          git -c user.name=ci -c user.email=ci@users.noreply.github.com commit -qm "Memory report ${GITHUB_SHA::7} tdisplay-p4"
+          git push -qf "https://x-access-token:${{ github.token }}@github.com/${GITHUB_REPOSITORY}.git" "ram-report:ram-report/tdisplay-p4" || true
       # The OTA image and the merged one for a USB flash, like the other boards'.
       - uses: actions/upload-artifact@v4
         with:

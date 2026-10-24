@@ -82,4 +82,10 @@ python3 -m esptool --chip esp32p4 merge_bin --flash_mode dio --flash_size 16MB -
   0x8000 "$B/partition_table/partition-table.bin" \
   0xf000 "$B/ota_data_initial.bin" \
   0x20000 "$APP"
+# Where the memory goes (flash, internal RAM, PSRAM), for ram-report/<variant>.
+ELF="$(ls "$B"/*.elf | head -1)"; MAP="$(ls "$B"/*.map | head -1)"
+if [ -n "$ELF" ] && [ -n "$MAP" ]; then
+  python3 "$ROOT/scripts/build/mem-report.py" "$ELF" "$MAP" riscv32-esp-elf- > "$ROOT/$OUT/mem-report-$NAME.txt" || true
+  python3 -m esp_idf_size "$MAP" >> "$ROOT/$OUT/mem-report-$NAME.txt" 2>/dev/null || true
+fi
 ls -la "$ROOT/$OUT"
