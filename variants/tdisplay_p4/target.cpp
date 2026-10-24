@@ -12,7 +12,7 @@ Xl9535 xl9535;                        // board-global expander (declared extern 
 // TODO(device): if polling RX is unreliable, route DIO1 through the XL9535 INT (GPIO5).
 static SPIClass spi(FSPI);
 RADIO_CLASS   radio = new Module(P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY, spi);
-WRAPPER_CLASS radio_driver(radio, board);
+RADIO_DRIVER_CLASS radio_driver(radio, board);
 
 #if defined(USE_LR2021)
 static const uint32_t s_lr2021_rf_switch_dios[] = {

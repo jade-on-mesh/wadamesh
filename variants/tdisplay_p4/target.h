@@ -26,6 +26,7 @@ extern "C" void set_boot_phase(int phase);
 #endif
 #include "Xl9535.h"
 #include <esp_system.h>
+#include "../../src/helpers/MediaMeshRadio.h"   // RADIO_DRIVER_CLASS (MediaMesh radio2 scan, SX1262 only)
 
 #if defined(USE_LR2021)
 class TDisplayP4LR2021Wrapper : public CustomLR2021Wrapper {
@@ -73,7 +74,7 @@ public:
 };
 
 extern TDisplayP4Board board;
-extern WRAPPER_CLASS   radio_driver;
+extern RADIO_DRIVER_CLASS radio_driver;   // MediaMesh-capable wrapper on the SX1262 build
 extern RADIO_CLASS     radio;   // raw SX1262/LR2021 (also driven directly by the Spectrum sweep)
 extern ClockFloorRTC   rtc_clock;
 extern EnvironmentSensorManager sensors;
