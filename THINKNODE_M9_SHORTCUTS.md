@@ -57,7 +57,7 @@ under a running operation.
 | **BACK** | Close the top layer (see above) | None |
 | **CTRL** | Open the Control Center (quick toggles, incl. the keyboard light: off / on / auto) | None |
 | **Triangle** | The focused item's hold action, e.g. a chat row's menu | None |
-| **OK / Enter** | Activate the focused item; send a message; run a terminal command; newline in the editor | **Long-press the focused item / unlock the lock screen** |
+| **OK / Enter** | Activate the focused item; send a message; run a terminal command; newline in the editor; open a photo or play a voice message in a chat | **Long-press the focused item / unlock the lock screen**; on a photo or voice message in a chat, open or play it (its menu is on Triangle) |
 
 The **MSG**, **HOME**, **@**, **ADV**, **MAP**, and **CTRL** shortcuts remain
 active while typing or using a picker. Back, the d-pad, and OK remain contextual
