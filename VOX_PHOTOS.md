@@ -63,8 +63,18 @@ reduced still-picture header and no AVIF container, 2,750 B ("Standard") or
 ## Voice clips
 
 - A `VE3:` (Codec2) message shows as a voice bubble with its length: "Voice 7s
-  - tap to play". A tap downloads it the same way as a photo and plays it as
-  soon as it arrives; later taps play it again, or stop it while it plays.
+  - tap to play".
+- A voice message sent to you in a DM downloads as soon as it arrives, as the
+  app's auto-play does, so a tap plays it at once. It's a few packets, asked
+  only of its sender. Photos, and clips posted on a channel, still wait for a
+  tap. A channel's clip is pushed to the radios in range anyway.
+- A tap on a clip that isn't here yet downloads it the same way as a photo and
+  plays it as soon as it arrives. Later taps play it again, or stop it while it
+  plays.
+- Downloads of voice and photos share their timing. A clip coming over radio2
+  (MediaMesh) is timed by radio2's airtime. Once a few packets are in, the
+  stall wait follows the gaps they actually came at, so a lost tail is asked
+  for again in seconds.
 - Decoding uses the app's own Codec2 tree (`lib/codec2`, speech codec only,
   codebooks in flash) and is sample-exact with it (`test/test_vox_voice.cpp`,
   four modes). Every mode the app can send plays except 700C, compiled out to

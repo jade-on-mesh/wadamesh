@@ -563,7 +563,11 @@ bool onDirectText(const char* text, const uint8_t sender_pub[32]) {
   VoxWire::Envelope env;
   if (!VoxWire::parseEnvelope(text, &env) || !canFetch(env)) return false;
   remember(env);
-  g_fetch.onEnvelope(env, sender_pub, nullptr, -1, false);
+  // A voice message sent to us is fetched as it arrives, as the app does (its
+  // auto-play setting, on by default), so a tap plays it at once. It's a few
+  // packets, and only its sender is asked. Photos and channel posts still wait
+  // for a tap; a channel's clip is pushed to the radios in range anyway.
+  g_fetch.onEnvelope(env, sender_pub, nullptr, -1, env.kind == VoxWire::kCodec2);
   return false;
 }
 
