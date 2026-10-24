@@ -500,6 +500,23 @@ int main() {
     printf("tail loss on the main mesh, radio2 on: complete after %lu ms\n", (unsigned long)(sim.now - start));
   }
 
+  // 15d. The first packet of a photo still coming in (where a version 2
+  //      payload carries its thumbnail) can be read before the rest.
+  {
+    Sim sim; setup(sim, 2750);
+    VoxFetch f(sim); sim.fetch = &f;
+    const uint8_t* first = nullptr;
+    size_t n = 0;
+    f.onEnvelope(envFor(sim), sim.sender_pub, nullptr, -1, true);
+    assert(!f.firstPacket(kSid, &first, &n));
+    int got = 0;
+    while (got < 1 && sim.now < 60000) { sim.run(50); f.status(kSid, &got); }
+    assert(got >= 1 && f.status(kSid) == VoxFetch::kReceiving);
+    assert(f.firstPacket(kSid, &first, &n) && n == (size_t)sim.pb && !memcmp(first, sim.payload.data(), n));
+    sim.run(60000);
+    assert(gotIt(sim, f) && !f.firstPacket(kSid, &first, &n));   // complete: the store has it
+  }
+
   // 16. The shared timing (lib/vox/vox_timing.dart).
   assert(VoxFetch::gapRequestDelay(false, 800, 210) == 610);
   assert(VoxFetch::gapRequestDelay(true, 800, 210) == 1800);

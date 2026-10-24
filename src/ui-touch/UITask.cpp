@@ -29324,6 +29324,7 @@ static uint32_t s_chat_thumb_gen    = 0;
 static uint32_t s_vox_open_sid      = 0;   // set around voxShowStoredPhoto's start
 static uint32_t s_vox_view_sid      = 0;   // the photo the viewer job is decoding
 static uint32_t s_thumb_job_sid     = 0;   // a background thumbnail decode running
+static bool     s_thumb_job_early   = false;   // ...of the thumbnail a photo sends first
 static bool     s_thumb_then_view   = false;   // ...and the viewer wants that same photo
 static uint32_t s_thumb_next_view   = 0;   // the viewer asked for another one meanwhile
 static char     s_thumb_next_title[48] = {0};
@@ -29400,7 +29401,7 @@ static void fmVoxPhotoPollCb(lv_timer_t*) {
   }
   // A photo opened from its bubble: keep a thumbnail of it for the bubble.
   const uint32_t viewed_sid = s_vox_view_sid;
-  if (s_vox_view_sid && !VoxPhotos::thumbSize(s_vox_view_sid, nullptr, nullptr) &&
+  if (s_vox_view_sid && !VoxPhotos::thumbFinal(s_vox_view_sid) &&
       VoxPhotos::saveThumb(s_vox_view_sid, (const uint16_t*)img.pixels, img.width, img.height))
     voxThumbLanded();
   s_vox_view_sid = 0;
@@ -29437,7 +29438,7 @@ static void fmVoxPhotoStart(const char* name, const uint8_t* payload, size_t len
   if (s_thumb_job_sid) {
     // The background thumbnail decode has the job. The same photo: show it when
     // that decode is done. Another one: start it straight after.
-    if (sid && sid == s_thumb_job_sid) {
+    if (sid && sid == s_thumb_job_sid && !s_thumb_job_early) {
       s_thumb_then_view = true;
       snprintf(s_vox_name, sizeof s_vox_name, "%s", name);
     } else if (sid) {
@@ -29474,9 +29475,22 @@ static void voxThumbTick() {
     VoxAv1Job::Stats st;
     const VoxAv1Result r = VoxAv1Job::finish(&img, &st);
     const uint32_t sid = s_thumb_job_sid;
+    const bool early = s_thumb_job_early;
     s_thumb_job_sid = 0;
-    Serial.printf("[VOX] thumbnail %08lx: %s %dx%d, %lu ms\n", (unsigned long)sid, voxAv1ResultText(r),
-                  img.width, img.height, (unsigned long)st.decode_ms);
+    s_thumb_job_early = false;
+    Serial.printf("[VOX] %sthumbnail %08lx: %s %dx%d, %lu ms\n", early ? "early " : "", (unsigned long)sid,
+                  voxAv1ResultText(r), img.width, img.height, (unsigned long)st.decode_ms);
+    if (early) {   // the one sent in the first packet: the bubble shows it while the rest comes
+      if (r == kVoxAv1Ok && VoxPhotos::saveEarlyThumb(sid, (const uint16_t*)img.pixels, img.width, img.height))
+        voxThumbLanded();
+      voxAv1Free(img.pixels);
+      if (s_thumb_next_view) {
+        const uint32_t next = s_thumb_next_view;
+        s_thumb_next_view = 0;
+        voxShowStoredPhoto(next, s_thumb_next_title);
+      }
+      return;
+    }
     if (r == kVoxAv1Ok && VoxPhotos::saveThumb(sid, (const uint16_t*)img.pixels, img.width, img.height))
       voxThumbLanded();
     if (s_thumb_then_view && r == kVoxAv1Ok) {   // the viewer asked for this one meanwhile
@@ -29508,10 +29522,20 @@ static void voxThumbTick() {
   if (s_last_ms && now - s_last_ms < 1500) return;   // a breather between decodes
   s_last_ms = now;
   const uint32_t sid = VoxPhotos::nextThumbWanted();
-  if (!sid || VoxPhotos::thumbSize(sid, nullptr, nullptr)) return;
+  if (!sid || VoxPhotos::thumbFinal(sid)) return;
   uint8_t* payload = nullptr;
   size_t len = 0;
-  if (!VoxPhotos::load(sid, &payload, &len)) return;
+  if (!VoxPhotos::load(sid, &payload, &len)) {
+    // Still downloading: the thumbnail it sent first, if it has one.
+    if (VoxPhotos::thumbSize(sid, nullptr, nullptr)) return;
+    uint8_t first[VoxWire::kBytesPerPacket];
+    if (!VoxPhotos::earlyThumbPayload(sid, first, sizeof first, &len)) return;
+    if (VoxAv1Job::start(first, len, 256)) {
+      s_thumb_job_sid = sid;
+      s_thumb_job_early = true;
+    }
+    return;
+  }
   voxLastMakeRoom();
   if (VoxAv1Job::start(payload, len)) s_thumb_job_sid = sid;
   free(payload);

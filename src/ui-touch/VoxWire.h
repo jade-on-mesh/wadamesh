@@ -53,7 +53,12 @@ constexpr int      kPacketHeaderLen   = 6;
 constexpr int      kMaxPackets        = 255;
 constexpr int      kFetchMinLen       = 13;
 constexpr int      kMaxFetchIndices   = 140;    // keeps a request (and a reply path) inside one packet
+// A photo's payload: [1][AV1 OBUs] (version 1), or what the app sends now,
+// [2][thumbnail length][thumbnail OBUs][photo OBUs] (version 2): a thumbnail of
+// up to 64 px small enough to be all in the first packet (length 0: none).
 constexpr uint8_t  kImagePayloadVersion = 0x01;
+constexpr uint8_t  kImagePayloadV2      = 0x02;
+inline bool isImagePayloadVersion(uint8_t v) { return v == kImagePayloadVersion || v == kImagePayloadV2; }
 
 constexpr int      kMimiModeId        = 32;
 
@@ -493,11 +498,26 @@ class Assembly {
   uint8_t  have_[(kMaxPackets + 7) / 8] = {0};
 };
 
-// The AV1 OBUs inside a complete payload, or nullptr if this build can't read it.
+// The photo's AV1 OBUs inside a complete payload, or nullptr if this build
+// can't read it.
 inline const uint8_t* imageObus(const uint8_t* payload, size_t len, size_t* obu_len) {
-  if (!payload || len < 2 || payload[0] != kImagePayloadVersion) return nullptr;
-  *obu_len = len - 1;
-  return payload + 1;
+  if (!payload || len < 2) return nullptr;
+  size_t head;
+  if (payload[0] == kImagePayloadVersion) head = 1;
+  else if (payload[0] == kImagePayloadV2) head = 2 + (size_t)payload[1];
+  else return nullptr;
+  if (len <= head) return nullptr;
+  *obu_len = len - head;
+  return payload + head;
+}
+
+// The thumbnail's AV1 OBUs from the start of a payload (the first packet is
+// enough), or nullptr when it has none or not all of it is in `prefix` yet.
+inline const uint8_t* imageThumbObus(const uint8_t* prefix, size_t len, size_t* obu_len) {
+  if (!prefix || len < 2 || prefix[0] != kImagePayloadV2 || !prefix[1]) return nullptr;
+  if (len < 2 + (size_t)prefix[1]) return nullptr;
+  *obu_len = prefix[1];
+  return prefix + 2;
 }
 
 }  // namespace VoxWire

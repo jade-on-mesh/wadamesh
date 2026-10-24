@@ -55,6 +55,17 @@ reduced still-picture header and no AVIF container, 2,750 B ("Standard") or
 - Channel posts carry only a name; the author is matched to a contact by name
   (case-insensitive, emoji variation selectors ignored). If none matches, only
   the channel fallback is possible.
+- **Thumbnail first.** The app sends photos as payload version 2:
+  `[2][thumbnail length][thumbnail OBUs][photo OBUs]`.
+  - The thumbnail is an AV1 picture of up to 64 px, all of it in the first
+    packet (154 bytes at most). It comes out of the photo's budget, so the
+    photo costs the same airtime.
+  - As soon as packet 0 is in (asked for, or pushed on a channel), the radio
+    decodes the thumbnail and the bubble shows it, scaled up to the bubble's
+    size, while the rest downloads.
+  - When the photo completes, its own thumbnail replaces that one.
+  - Version 1 payloads (`[1][photo OBUs]`) still open. Versions before this
+    one can't read version 2.
 - Finished photos are stored as `/vox_<sid>.vi1` on internal storage, so they
   survive a reboot and open in Files too. When a download you started
   finishes, the photo is decoded on the background task and opens in the image

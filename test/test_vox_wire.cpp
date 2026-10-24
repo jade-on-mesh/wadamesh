@@ -161,8 +161,23 @@ int main() {
   size_t obu_len = 0;
   const uint8_t* obus = imageObus(a.payload(), a.payloadLen(), &obu_len);
   assert(obus == a.payload() + 1 && obu_len == (size_t)kLen - 1);
-  uint8_t badver[] = {0x02, 0x12};
+  uint8_t badver[] = {0x09, 0x12};
   assert(!imageObus(badver, 2, &obu_len));
+  // Version 2: a thumbnail first, the photo after it.
+  {
+    uint8_t v2[] = {0x02, 3, 0xA1, 0xA2, 0xA3, 0xB1, 0xB2};
+    assert(imageObus(v2, sizeof v2, &obu_len) == v2 + 5 && obu_len == 2);
+    size_t tl = 0;
+    assert(imageThumbObus(v2, sizeof v2, &tl) == v2 + 2 && tl == 3);
+    assert(imageThumbObus(v2, 4, &tl) == nullptr);           // not all of it in yet
+    uint8_t none[] = {0x02, 0, 0xB1};
+    assert(!imageThumbObus(none, sizeof none, &tl));         // sent without one
+    assert(imageObus(none, sizeof none, &obu_len) == none + 2 && obu_len == 1);
+    assert(!imageThumbObus(a.payload(), a.payloadLen(), &tl));   // version 1 has none
+    uint8_t cut[] = {0x02, 3, 0xA1, 0xA2, 0xA3};
+    assert(!imageObus(cut, sizeof cut, &obu_len));           // a thumbnail and no photo
+    assert(isImagePayloadVersion(1) && isImagePayloadVersion(2) && !isImagePayloadVersion(3));
+  }
 
   free(payload);
 
