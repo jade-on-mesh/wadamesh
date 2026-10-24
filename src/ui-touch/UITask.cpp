@@ -45752,6 +45752,50 @@ static bool voxIsTalk(const VoxWire::Envelope& env, const char* cap, size_t cap_
   return (cap && cap_len == 3 && !strncmp(cap, "PTT", 3)) || walkie::heardTalk(env.sid);
 }
 
+// OTP Messenger's pad housekeeping on a channel: a sync ("z3s..", "z3p..") or a
+// nack ("z4Cz"). Machine talk between pads, never something to notify about.
+static bool msgIsOtpControl(const char* t) {
+  if (!t || t[0] != 'z') return false;
+  if (t[1] == '3') return t[2] == 's' || t[2] == 'S' || t[2] == 'p' || t[2] == 'P';
+  if (t[1] == '4') return (t[2] == 'C' || t[2] == 'D' || t[2] == 'G') && t[3] == 'z';
+  return false;
+}
+
+// A message as a notification or a preview shows it: a photo, voice message or
+// talk by what it is ("Photo: caption", "Voice message (4s)", "Talk"), not as
+// its "VI1:..."/"VE3:..." envelope; anything else as it is. False when it
+// shouldn't be shown at all (OTP pad housekeeping). `body` is the message
+// without a channel's "Name: ".
+static bool msgPreviewText(const char* body_in, char* out, size_t cap) {
+  if (!out || !cap) return false;
+  if (!body_in) { out[0] = 0; return true; }
+  char body[UITask::MAX_MSG_TEXT + 1];   // `out` may be `body_in` itself
+  snprintf(body, sizeof body, "%s", body_in);
+  out[0] = 0;
+  if (msgIsOtpControl(body)) return false;
+  VoxWire::Envelope env;
+  if (VoxPhotos::parse(body, &env)) {
+    size_t cl = 0;
+    const char* c = VoxWire::envelopeCaption(body, &cl);
+    if (env.kind == VoxWire::kImage) {
+      if (c && cl) snprintf(out, cap, "%s: %.*s", TR("Photo"), (int)cl, c);
+      else snprintf(out, cap, "%s", TR("Photo"));
+    } else if (voxIsTalk(env, c, cl)) {
+      if (env.seconds()) snprintf(out, cap, "%s (%us)", TR("Talk"), (unsigned)env.seconds());
+      else snprintf(out, cap, "%s", TR("Talk"));
+    } else {
+      char vm[48];
+      if (env.seconds()) snprintf(vm, sizeof vm, "%s (%us)", TR("Voice message"), (unsigned)env.seconds());
+      else snprintf(vm, sizeof vm, "%s", TR("Voice message"));
+      if (c && cl) snprintf(out, cap, "%s: %.*s", vm, (int)cl, c);
+      else snprintf(out, cap, "%s", vm);
+    }
+    return true;
+  }
+  snprintf(out, cap, "%s", body);
+  return true;
+}
+
 // Waveforms, worked out off the UI task (decoding a 20 s clip takes a moment
 // here) and kept for the last few talks shown.
 struct TalkWave { uint32_t sid; volatile uint8_t state; uint8_t bars[kVoxWaveBars]; };   // 1 working, 2 ready, 3 failed
@@ -48653,8 +48697,13 @@ static void refreshChatList(LvChatPanel& p) {
       bool pout = false;
       uint8_t pdeliv = 0, pmeta = 0, ppath = 0;
       char preview[120] = "";
-      const bool have = g_lv.task->getThreadLastMessage(idxs[i], psender, sizeof psender, ptext, sizeof ptext,
-                                                        &pout, &pdeliv, &pmeta, &ppath);
+      bool have = g_lv.task->getThreadLastMessage(idxs[i], psender, sizeof psender, ptext, sizeof ptext,
+                                                  &pout, &pdeliv, &pmeta, &ppath);
+      if (have) {   // a photo or voice message by what it is; OTP housekeeping not at all
+        char pt[sizeof ptext];
+        have = msgPreviewText(ptext, pt, sizeof pt);
+        snprintf(ptext, sizeof ptext, "%s", have ? pt : "");
+      }
       if (have) {
         char raw[112];
         if (ch && psender[0] && !pout) snprintf(raw, sizeof raw, "%s: %s", psender, ptext);
@@ -51267,7 +51316,8 @@ static void lockCardCreate(lv_obj_t* parent, int idx) {
     char sender[UITask::MAX_SENDER_NAME + 1] = "";
     char text[80] = "";
     bool out = false;
-    if (g_lv.task->getThreadLastMessage(idx, sender, sizeof sender, text, sizeof text, &out)) {
+    if (g_lv.task->getThreadLastMessage(idx, sender, sizeof sender, text, sizeof text, &out) &&
+        msgPreviewText(text, text, sizeof text)) {
       char raw[112];
       if (out)                    snprintf(raw, sizeof raw, "%s %s", TR("You:"), text);
       else if (ch && sender[0])   snprintf(raw, sizeof raw, "%s: %s", senderShownName(sender), text);
@@ -64250,7 +64300,8 @@ static void hwUnreadUpdate(int i) {
       char sender[UITask::MAX_SENDER_NAME + 1], text[UITask::MAX_MSG_TEXT + 1];
       bool out = false;
       said[0] = 0;
-      if (g_lv.task->getThreadLastMessage(idx[k], sender, sizeof sender, text, sizeof text, &out)) {
+      if (g_lv.task->getThreadLastMessage(idx[k], sender, sizeof sender, text, sizeof text, &out) &&
+          msgPreviewText(text, text, sizeof text)) {
         if (out) snprintf(said, sizeof d->lst_txt[n], "%s: %s", TR("You"), text);
         else if (c && sender[0]) snprintf(said, sizeof d->lst_txt[n], "%s: %s", senderShownName(sender), text);
         else snprintf(said, sizeof d->lst_txt[n], "%s", text);
@@ -64268,7 +64319,8 @@ static void hwUnreadUpdate(int i) {
   if (t >= 0) {
     char sender[40], text[80];
     bool out = false;
-    if (g_lv.task->getThreadLastMessage(t, sender, sizeof sender, text, sizeof text, &out)) {
+    if (g_lv.task->getThreadLastMessage(t, sender, sizeof sender, text, sizeof text, &out) &&
+        msgPreviewText(text, text, sizeof text)) {
       if (sender[0] && !out) snprintf(b, sizeof b, "%s: %s", sender, text);
       else snprintf(b, sizeof b, "%s", text);
     }
@@ -81642,6 +81694,8 @@ void UITask::newMsgImpl(uint8_t path_len, const char* from_name, const char* tex
   }
 #endif
 
+  // OTP Messenger's pad syncs and nacks: no chime, no glance (still in the chat).
+  const bool otp_quiet = msgIsOtpControl(body);
 #if defined(HAS_UI_SOUND) || defined(HAS_TANMATSU)
   // Notification chime (T-Deck I2S speaker / Heltec V4 piezo / Tanmatsu I2S codec).
   // @-mentions get a distinct sound + their own enable, so an operator can mute message
@@ -81650,7 +81704,7 @@ void UITask::newMsgImpl(uint8_t path_len, const char* from_name, const char* tex
     const bool is_mention = channel && text && textMentionsMe(text);
     const bool is_dm = (g_last_event == UIEventType::contactMessage);   // private/direct message
     const uint8_t cmute = channel ? touchPrefsGetChannelMute(thread) : 0;
-    if (!isBuzzerQuiet() && !dndActive()) {   // master Sound switch / Do Not Disturb: either silences everything
+    if (!isBuzzerQuiet() && !dndActive() && !otp_quiet) {   // master Sound switch / Do Not Disturb: either silences everything
       if (is_mention && touchPrefsGetSoundMentions() && !(cmute & TOUCH_CHMUTE_MEN)) uiPlaySlot(TOUCH_SND_MEN);
       else if (is_dm) { if (touchPrefsGetSoundDirect()) uiPlaySlot(TOUCH_SND_DM); }
       else if (touchPrefsGetSoundMessages() && !(cmute & TOUCH_CHMUTE_MSG))          uiPlaySlot(TOUCH_SND_MSG);
@@ -81698,7 +81752,7 @@ void UITask::newMsgImpl(uint8_t path_len, const char* from_name, const char* tex
 #else
   const bool lit_by_msg = false;
 #endif
-  if (glance_enabled_ok && !dndActive() && glance_locked_ok && !glance_muted &&
+  if (glance_enabled_ok && !dndActive() && glance_locked_ok && !glance_muted && !otp_quiet &&
       (_screen_off || s_glance_lit_ms || lit_by_msg)) {
     const bool was_off = _screen_off || lit_by_msg;
     // Title carries WHO and HOW FAR, not just where. Reading "3 unread" off a
@@ -81714,7 +81768,11 @@ void UITask::newMsgImpl(uint8_t path_len, const char* from_name, const char* tex
     }
     // A channel post names the speaker as well as the room; a direct message is
     // already titled with the sender, so naming them twice adds nothing.
-    GlanceMsg gm = { thread, (channel && sender) ? sender : "", channel, hops, body };
+    // A photo or voice message reads as one ("Voice message (4s)"), not as its
+    // envelope; OTP pad housekeeping never gets this far (otp_quiet above).
+    char shown[UITask::MAX_MSG_TEXT + 32];
+    msgPreviewText(body, shown, sizeof shown);
+    GlanceMsg gm = { thread, (channel && sender) ? sender : "", channel, hops, shown };
     atGlanceShow(gm, was_off);   // fade in only on the initial reveal of a burst
     // Over the screensaver the panel is lit already: the glance just covers it,
     // and when the glance times out the screensaver is what remains (loop()).
