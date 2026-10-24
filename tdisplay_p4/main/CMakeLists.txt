@@ -69,6 +69,9 @@ set(WADA_DEFS
   LORA_TX_POWER=22 MAX_LORA_TX_POWER=22               # sub-GHz PA max (dBm); user-tunable in Settings
   MAX_CONTACTS=2000 MAX_GROUP_CHANNELS=40             # P4 + 32MB PSRAM: ample
   ENABLE_PRIVATE_KEY_IMPORT=1 ENABLE_PRIVATE_KEY_EXPORT=1
+  # No core web OTA (ElegantOTA's ~54 KB page and the "ota url" downloader, ~60 KB of
+  # flash): this fork updates from its own signed GitHub releases (ForkUpdate.inc).
+  DISABLE_WIFI_OTA=1
 
   # --- LoRa radio (SPI_1) — SX1262 or LR2021 selected above. Both P4 V1 modules use
   # the same CS/BUSY/SPI pins, with RST+DIO1 on the XL9535 expander. ---

@@ -113,3 +113,11 @@ CONFIG_CACHE_L2_CACHE_256KB=y
 CONFIG_CACHE_L2_CACHE_LINE_64B=n
 CONFIG_CACHE_L2_CACHE_LINE_128B=y
 
+
+# --- Internal RAM (about 76 KB free at runtime, largest piece about 42 KB) ---------------------
+# Static buffers may live in PSRAM (components/wadamesh_app/linker.lf maps our own there).
+CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y
+# The heap's and the ring buffers' code from flash (PSRAM, with XIP) instead of IRAM: ~13 KB.
+# Fine here: with CONFIG_SPIRAM_XIP_FROM_PSRAM the cache is never disabled for a flash write.
+CONFIG_HEAP_PLACE_FUNCTION_INTO_FLASH=y
+CONFIG_RINGBUF_PLACE_FUNCTIONS_INTO_FLASH=y

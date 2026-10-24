@@ -1,0 +1,24 @@
+# The T-Display P4's internal RAM is short (about 76 KB free at runtime, its
+# largest piece about 42 KB, after the 256 KB L2 cache, IRAM and the static data
+# take their share), while its 32 MB of PSRAM is mostly idle. Our own static
+# buffers (the app layer's and main's .bss: about 80 KB) live in PSRAM instead.
+#
+# Safe here because code and constants run from PSRAM (CONFIG_SPIRAM_XIP_FROM_PSRAM),
+# so the cache, and with it PSRAM, stays enabled through flash writes. The display
+# drivers keep their state internal: their DSI transfer-done ISRs touch it.
+# Needs CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY (sdkconfigs/tdisplay_p4).
+
+[mapping:wadamesh_app_extram]
+archive: libwadamesh_app.a
+entries:
+    * (extram_bss)
+    RM69A10Display (default)
+    HI8561Display (default)
+    esp_lcd_rm69a10 (default)
+    esp_lcd_hi8561 (default)
+    Hi8561Touch (default)
+
+[mapping:wadamesh_main_extram]
+archive: libmain.a
+entries:
+    * (extram_bss)
