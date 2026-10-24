@@ -7180,18 +7180,25 @@ static void bubblePhotoOpen(int idx);
 // focused item was a photo or voice bubble.
 static uint32_t s_m9_media_open_ms = 0;
 static int s_m9_media_open_idx = -1;
+static void bubbleLongPressMenuCb(lv_event_t* e);
+static bool chatRowIsMedia(int ring_idx);
 static bool navOpenMediaBubble(bool held = false) {
   lv_obj_t* foc = s_nav_group ? lv_group_get_focused(s_nav_group) : nullptr;
   LvChatPanel* cp = navOpenChatPanel();
   if (!cp || !cp->msgs || !foc || !lv_obj_is_valid(foc) || lv_obj_get_parent(foc) != cp->msgs) return false;
-  const int v = (int)(intptr_t)lv_obj_get_event_user_data(foc, bubblePhotoTapCb);
-  if (v <= 0) return false;
+  // The message the row shows, by its tap handler; else by its menu's (every
+  // row has one), when that message is a photo or voice message.
+  int idx = (int)(intptr_t)lv_obj_get_event_user_data(foc, bubblePhotoTapCb) - 1;
+  if (idx < 0) {
+    idx = (int)(intptr_t)lv_obj_get_event_user_data(foc, bubbleLongPressMenuCb);
+    if (!chatRowIsMedia(idx)) return false;
+  }
   // A hold whose press already opened it doesn't open it again (playing, then
   // stopping); two presses do (play, stop).
-  if (held && v - 1 == s_m9_media_open_idx && millis() - s_m9_media_open_ms < 1500) return true;
-  s_m9_media_open_idx = v - 1;
+  if (held && idx == s_m9_media_open_idx && millis() - s_m9_media_open_ms < 1500) return true;
+  s_m9_media_open_idx = idx;
   s_m9_media_open_ms = millis();
-  bubblePhotoOpen(v - 1);
+  bubblePhotoOpen(idx);
   return true;
 }
 #endif
@@ -7201,6 +7208,9 @@ static bool navEnterBubble() {
   if (cp && cp->msgs && foc && lv_obj_is_valid(foc) && lv_obj_get_parent(foc) == cp->msgs) {
 #if defined(HAS_M9_KEYBOARD)
     if (navOpenMediaBubble()) return true;
+    Serial.printf("[M9] OK on a chat row: message menu (tap %d, row %d)\n",
+                  (int)(intptr_t)lv_obj_get_event_user_data(foc, bubblePhotoTapCb),
+                  (int)(intptr_t)lv_obj_get_event_user_data(foc, bubbleLongPressMenuCb));
 #endif
     lv_event_send(foc, LV_EVENT_LONG_PRESSED, nullptr);
     return true;
@@ -47268,7 +47278,14 @@ static bool chatMessagePhoto(const UITask::UIMessage& m, VoxWire::Envelope* env,
   if (m.channel && (m.sender[0] == '\0' || !strcmp(m.sender, "rx"))) {
     body = ChannelSenderSplit::split(m.text, split_name, sizeof split_name);
   }
-  if (!VoxPhotos::parse(body, env)) return false;
+  if (!VoxPhotos::parse(body, env)) {
+    // The bubble reads "Name: VI1:..." as a photo from Name in more places
+    // than a channel post (a room server's posts, a channel thread's): so must
+    // this, or the bubble shows a photo that nothing opens.
+    if (m.outgoing || body != m.text) return false;
+    body = ChannelSenderSplit::split(m.text, split_name, sizeof split_name);
+    if (body == m.text || !VoxPhotos::parse(body, env)) return false;
+  }
   if (sender && sender_cap) snprintf(sender, sender_cap, "%s", split_name[0] ? split_name : m.sender);
   return true;
 }
@@ -47279,6 +47296,16 @@ static bool voxBubbleTappable(const UITask::UIMessage& m, const VoxWire::Envelop
   if (!m.outgoing) return true;
   return env.kind == VoxWire::kCodec2 && m.deliv_state != UITask::DELIV_FAILED;
 }
+
+#if defined(HAS_M9_KEYBOARD)
+// The message at `ring_idx` is a photo or voice message a tap opens.
+static bool chatRowIsMedia(int ring_idx) {
+  UITask::UIMessage m;
+  VoxWire::Envelope env;
+  return ring_idx >= 0 && g_lv.task && g_lv.task->getMessageByIndex(ring_idx, m) &&
+         chatMessagePhoto(m, &env, nullptr, 0) && voxBubbleTappable(m, env);
+}
+#endif
 
 static void bubblePhotoOpen(int idx);
 // The row's user data is the ring index + 1, so 0 (no handler) is never a message.
