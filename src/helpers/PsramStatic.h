@@ -36,3 +36,19 @@ inline T& psramStatic() {
   if (!p) abort();   // as a static that didn't fit would have failed to link
   return *static_cast<T*>(p);
 }
+
+// The same for an object that has a constructor (default member initialisers,
+// say): constructed in place, in PSRAM, and never destroyed, like the static.
+//     static Ring s_ring;   ->   static Ring& s_ring = psramObject<Ring>();
+#include <new>
+template <typename T>
+inline T& psramObject() {
+  static_assert(!std::is_array<T>::value, "psramObject: one object; arrays of plain data: psramStatic");
+  void* p = nullptr;
+#if defined(ESP32)
+  p = heap_caps_calloc(1, sizeof(T), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+#endif
+  if (!p) p = calloc(1, sizeof(T));
+  if (!p) abort();
+  return *new (p) T();
+}

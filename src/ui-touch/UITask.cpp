@@ -17067,7 +17067,7 @@ static void mmFindEnd(const char* why) {
 static bool mmFindAsked() {
   mediamesh::Radio2Report rep[MyMesh::DISCOVER_MAX];
   const MyMesh::DiscoverHit* who[MyMesh::DISCOVER_MAX];
-  static MyMesh::DiscoverHit hits[MyMesh::DISCOVER_MAX];
+  static auto& hits = psramStatic<MyMesh::DiscoverHit[MyMesh::DISCOVER_MAX]>();   // 4 KB: not internal RAM
   size_t n = 0, said = 0, total = 0;
   for (int i = 0; i < the_mesh.discoverCount(); i++) {
     if (!the_mesh.discoverGet((uint8_t)i, hits[total]) || hits[total].node_type != ADV_TYPE_REPEATER) continue;
@@ -17087,7 +17087,7 @@ static bool mmFindAsked() {
   if (s_mm_find_btn && lv_obj_is_valid(s_mm_find_btn)) lv_obj_clear_state(s_mm_find_btn, LV_STATE_DISABLED);
   if (s_mm_find_timer) { lv_timer_del(s_mm_find_timer); s_mm_find_timer = nullptr; }
 
-  static char msg[640];
+  static auto& msg = psramStatic<char[640]>();
   size_t k = 0;
   char prof[64];
   if (s_mm_find_have_prof) {
@@ -18074,7 +18074,7 @@ static void refreshSysInfo(unsigned long now) {
     if (lv_indev_get_scroll_dir(in) != LV_DIR_NONE) { next = now + 120; return; }
   }
   next = now + 1000;
-  static char buf[2048];   // static: the busy table made it too big for the stack
+  static auto& buf = psramStatic<char[2048]>();   // static: the busy table made it too big for the stack; PSRAM: not internal RAM
   sysInfoTextLive(buf, sizeof buf);
   lv_label_set_text(s_sysinfo_lbl, buf);
   // Slow tier: pushing identical text would still invalidate + repaint the whole
@@ -18147,7 +18147,7 @@ static void refreshSleepDiag(unsigned long now) {
 
 static void buildSystemInfoSettings() {
   lv_obj_t* body = createSettingsModal(TR("System Information"), SettingsModalKind::SystemInfo);
-  static char buf[2048];
+  static auto& buf = psramStatic<char[2048]>();
 
   // FLEX COLUMN, deliberately not the manual y cursor the rest of this file uses.
   // Both labels below are re-texted AFTER build with text whose LINE COUNT
@@ -30612,7 +30612,7 @@ static lv_obj_t*     s_reader_go     = nullptr;
 static lv_obj_t*     s_reader_editbtn= nullptr;    // floating "edit URL" button (shown while reading)
 static lv_obj_t*     s_reader_scroll = nullptr;    // flex-column body container (holds text + link labels)
 static lv_obj_t*     s_reader_status = nullptr;    // status / error line
-static char          s_reader_url[300] = "";       // the URL being (or last) fetched
+static auto&         s_reader_url = psramStatic<char[300]>();   // the URL being (or last) fetched
 static char*         s_reader_text   = nullptr;    // PSRAM: extracted text (NUL-terminated)
 static volatile bool s_reader_dirty  = false;      // worker -> UI: text/status changed
 static volatile bool s_reader_busy   = false;      // a fetch is in flight
@@ -30622,7 +30622,7 @@ static volatile bool s_reader_sd_busy = false;      // open reader File owns the
 static TaskHandle_t  s_reader_sd_owner = nullptr;
 static volatile uint32_t s_reader_generation = 0;
 static volatile uint32_t s_reader_task_generation = 0;
-static char          s_reader_pending_url[300] = "";
+static auto&         s_reader_pending_url = psramStatic<char[300]>();
 static char          s_reader_msg[110] = "";       // status text (worker writes, UI shows)
 static TaskHandle_t  s_reader_task    = nullptr;
 static bool          s_reader_pristine = false;    // URL field still holds the untouched default
@@ -45941,7 +45941,7 @@ struct TalkWave { uint32_t sid; volatile uint8_t state; uint8_t bars[kVoxWaveBar
 // 32 of them: with fewer slots, a chat showing more talks than slots evicted one
 // to decode the next, the finished decode repainted the chat, the repaint
 // evicted another... decoding and redrawing the chat over and over.
-static TalkWave s_talk_waves[32] = {};
+static auto& s_talk_waves = psramStatic<TalkWave[32]>();   // 1.5 KB, PSRAM: not internal RAM
 static uint32_t s_talk_wave_last_ms = 0;   // one decode started a second at most
 static volatile bool s_talk_wave_retry = false;   // one waited for that: repaint once it may start
 static int s_talk_wave_next = 0;
@@ -66014,7 +66014,7 @@ static void hwLuaUpdate(int i) {
   for (int p = 0; p < s.spark_n; ++p) h = hwHash(h, (uint32_t)(uint16_t)s.spark[p]);
   if (h == w.memo2) return;
   w.memo2 = h;
-  static int16_t spark[kHwMax][LUA_WIDGET_SPARK_MAX];   // the figure keeps a pointer: a copy of its own
+  static auto& spark = psramStatic<int16_t[kHwMax][LUA_WIDGET_SPARK_MAX]>();   // the figure keeps a pointer: a copy of its own
   HwFig* f = hwF(i, 1);
   memcpy(spark[i], s.spark, sizeof(int16_t) * s.spark_n);
   f->a = spark[i]; f->n = s.spark_n; f->lo = 0; f->hi = 0; f->none = INT16_MIN;
@@ -82217,7 +82217,8 @@ static uint32_t     s_ui_cp_t0  = 0;
 // last 10 s, in microseconds so a 1 ms section still counts.
 struct PerfSlot { const char* tag; uint32_t us, max_us; };
 constexpr int kPerfSlots = 40;   // more than the uiCp() sections, or the last ones go uncounted
-static PerfSlot s_perf[kPerfSlots], s_perf_last[kPerfSlots];
+static auto& s_perf = psramStatic<PerfSlot[kPerfSlots]>();        // PSRAM: not internal RAM
+static auto& s_perf_last = psramStatic<PerfSlot[kPerfSlots]>();
 static uint32_t s_perf_win_us = 0, s_perf_last_win_us = 0, s_perf_loops = 0, s_perf_last_loops = 0;
 static uint32_t s_ui_cp_us = 0;
 static void perfAdd(const char* tag, uint32_t us) {
