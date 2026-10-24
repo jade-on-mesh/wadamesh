@@ -17587,10 +17587,12 @@ extern uint8_t  g_stall_cnt, g_stall_w;
 // rendering while System Information was open (the "ui:lvgl" stall-ring entries).
 static int perfText(char* buf, size_t cap);   // with UITask::loop below
 static int chatOpenText(char* buf, size_t cap);   // with refreshChatDetail
+static int mapRenderText(char* buf, size_t cap);  // with renderMapTiles
 static void sysInfoTextLive(char* buf, size_t cap) {
   int p = 0;
   p += perfText(buf, cap);   // where the time goes, first: the slowdown hunt reads it
   p += chatOpenText(buf + p, cap - p);
+  p += mapRenderText(buf + p, cap - p);
 #if defined(ESP32)
   // MediaMesh: what radio2 sent and heard, what never went out, and how much of
   // the radio's (and on the T-Deck, the display's shared SPI bus's) time the
@@ -35913,6 +35915,13 @@ constexpr uint32_t k_map_progressive_ms = 350;
 constexpr int     k_map_grid_radius_max = 2;   // max tiles/axis we ever request (Tanmatsu)
 constexpr int     k_map_visible_tiles_max =
     (2 * k_map_grid_radius_max + 1) * (2 * k_map_grid_radius_max + 1);
+// Recently shown tiles, kept decoded after they scroll or zoom out of view, so
+// panning back or zooming back out shows them again with no read and no decode.
+// Slots beyond the visible ones only get a buffer on boards with room to spare
+// (>= 8 MB PSRAM and plenty free); elsewhere a released visible slot still keeps
+// its last tile until another one needs the buffer.
+constexpr int     k_map_tile_cache_extra = 8;
+constexpr int     k_map_tile_slots = k_map_visible_tiles_max + k_map_tile_cache_extra;
 // Runtime per-axis radius (recomputed from k_map_canvas_w/h when the map
 // tab is built — see mapComputeGridRadius). Default to 1 for the common
 // small-screen case before the map tab exists.
@@ -35935,9 +35944,11 @@ struct MapTile {
   lv_img_dsc_t dsc;
   lv_obj_t* img;
   bool      in_use;      // true = slot's (z,x,y) is valid; false = empty slot
+  bool      cached;      // !in_use, but rgb565 still holds the decoded (z,x,y)
+  uint32_t  used;        // last shown (s_map_tile_seq), for evicting the oldest
 };
 
-static MapTile* s_map_tiles = (MapTile*)psAlloc(sizeof(MapTile) * k_map_visible_tiles_max);   // PSRAM (1.1 KB off internal .bss)
+static MapTile* s_map_tiles = (MapTile*)psAlloc(sizeof(MapTile) * k_map_tile_slots);   // PSRAM (1.1 KB off internal .bss)
 // Recompute the per-axis tile radius from the current canvas size. Enough
 // tiles must straddle the center so the grid covers the FULL viewport even
 // when the center coordinate sits at the very edge of its center tile:
@@ -35972,6 +35983,19 @@ static int       s_map_last_missing = 0;
 // declared earlier, before tilesFsLowSpace which writes it.)
 static int       s_tile_dec_ok   = 0;                  // tiles placed in the last render pass
 static int       s_tile_dec_want = 0;                  // tiles wanted (grid size) in the last pass
+static uint32_t  s_map_tile_seq  = 0;                  // MapTile::used stamps
+// The last map render's cost, for System Information ("Last map render"): where
+// a slow pan or zoom spends its time.
+struct MapRenderStats {
+  uint32_t at_ms = 0, total_ms = 0, markers_ms = 0, read_ms = 0, decode_ms = 0, paint_ms = 0;
+  int warm = 0, cold = 0, wanted = 0, markers = 0;
+};
+static MapRenderStats s_map_render;
+// When renderMapTiles last rebuilt the markers: the trailing renderMapMarkers()
+// nearly every caller makes right after it is skipped (see renderMapMarkers).
+static uint32_t  s_map_markers_built_ms = 0;
+static uint8_t   s_map_markers_built_zoom = 0;
+static double    s_map_markers_built_lat = 0, s_map_markers_built_lon = 0;
 
 // Release a slot's WIDGET but KEEP its 128 KB PSRAM buffer for the next tile that
 // lands here. Per-render tile churn used to malloc/free 128 KB up to nine times a
@@ -35981,7 +36005,10 @@ static int       s_tile_dec_want = 0;                  // tiles wanted (grid siz
 static void releaseMapTileSlot(MapTile& t) {
   if (t.img) { lv_obj_del(t.img); t.img = nullptr; }
   lv_img_cache_invalidate_src(&t.dsc);   // this slot's dsc content is now stale
-  t.in_use = false;                       // t.rgb565 intentionally kept for reuse
+  // t.rgb565 intentionally kept for reuse, and with it the decoded tile: shown
+  // again for free if it's wanted before the buffer goes to another tile.
+  t.cached = t.in_use && t.rgb565 && t.w > 0;
+  t.in_use = false;
 }
 static void freeMapTileSlot(MapTile& t) {
   if (t.img)    { lv_obj_del(t.img); t.img = nullptr; }
@@ -35997,6 +36024,7 @@ static void freeMapTileSlot(MapTile& t) {
   if (t.rgb565) { lvglPsramFree(t.rgb565); t.rgb565 = nullptr; }
   t.w = t.h  = 0;
   t.in_use   = false;
+  t.cached   = false;
 }
 
 // Decode a JPEG (in-memory) into a freshly-PSRAM-alloced RGB565 buffer.
@@ -38064,6 +38092,33 @@ static uint8_t* decodePngToRgb565(const uint8_t* png, size_t png_len, int* out_w
 // 0x47 (PNG) is auto-routed to SJPG or lv_png respectively. So this
 // function just reads bytes — decode happens later in
 // decodeJpegToRgb565 (which is a misnomer now; it handles both).
+// Which of the SD pack layouts loadTileJpeg tries hold anything, learned per
+// zoom. A card with only the Wi-Fi .jpg cache (the common case) used to pay six
+// failed FAT opens per tile, each a directory walk over SPI, before reaching
+// it: ~0.3 s of a nine-tile render. A layout that has missed 8 times at a zoom
+// with no hit is skipped there, re-tried every 32nd tile so a pack covering
+// only another area is still found; any hit keeps it in for good. Reset when
+// the storage, style or mode changes (freeMapTiles).
+constexpr int kMapSdLayouts = 6;    // /MAPS|/maps osm png|PNG, /tiles png, /tiles PNG
+constexpr int kMapSdZooms   = 21;
+struct MapSdLayoutStat { uint8_t hit; uint16_t miss; };
+static MapSdLayoutStat s_map_sd_layout[kMapSdLayouts][kMapSdZooms];
+static inline void mapSdLayoutReset() { memset(s_map_sd_layout, 0, sizeof s_map_sd_layout); }
+static inline bool mapSdLayoutWorthTrying(int l, uint8_t z) {
+  if (z >= kMapSdZooms) return true;
+  MapSdLayoutStat& st = s_map_sd_layout[l][z];
+  if (st.hit || st.miss < 8) return true;
+  if (((st.miss - 8) % 32) == 0) return true;
+  if (st.miss < 0xFFF0) ++st.miss;   // a skip counts towards the next re-try
+  return false;
+}
+static inline void mapSdLayoutNote(int l, uint8_t z, bool hit) {
+  if (z >= kMapSdZooms) return;
+  MapSdLayoutStat& st = s_map_sd_layout[l][z];
+  if (hit) st.hit = 1;
+  else if (st.miss < 0xFFF0) ++st.miss;
+}
+
 static bool loadTileJpeg(uint8_t z, int32_t x, int32_t y,
                          uint8_t** out_data, size_t* out_len,
                          bool* out_repairable_cache) {
@@ -38105,26 +38160,25 @@ static bool loadTileJpeg(uint8_t z, int32_t x, int32_t y,
     // difference rather than a wrong path.
     //
     // Ask for both spellings, upper first since that is the one we create.
+    //
+    // Then plain /tiles/<z>/<x>/<y>.{png,PNG} — a PNG pack dropped straight into
+    // /tiles/ (OSM's native format), not the /maps/osm layout. Decoded via lodepng
+    // like the /maps/osm PNGs; the .jpg fallback below covers JPEG /tiles/ packs.
+    // Layouts that never hold anything at this zoom are skipped (see
+    // mapSdLayoutWorthTrying).
     File fsd;
     static const char* const kMapRoots[2] = { "/MAPS", "/maps" };
     static const char* const kPngExt[2]   = { "png", "PNG" };
-    for (int r = 0; r < 2 && !fsd; ++r) {
-      for (int e = 0; e < 2 && !fsd; ++e) {
+    for (int l = 0; l < kMapSdLayouts && !fsd; ++l) {
+      if (!mapSdLayoutWorthTrying(l, z)) continue;
+      if (l < 4)
         snprintf(ppath, sizeof(ppath), "%s/osm/%u/%ld/%ld.%s",
-                 kMapRoots[r], (unsigned)z, (long)x, (long)y, kPngExt[e]);
-        fsd = map_sd->open(ppath, FILE_READ);
-      }
-    }
-    // Plain /tiles/<z>/<x>/<y>.{png,PNG} — a PNG pack dropped straight into /tiles/
-    // (OSM's native format), not the /maps/osm layout. Decoded via lodepng like the
-    // /maps/osm PNGs above; the .jpg fallback below covers JPEG /tiles/ packs.
-    if (!fsd) {
-      snprintf(ppath, sizeof(ppath), "/tiles/%u/%ld/%ld.png", (unsigned)z, (long)x, (long)y);
+                 kMapRoots[l / 2], (unsigned)z, (long)x, (long)y, kPngExt[l % 2]);
+      else
+        snprintf(ppath, sizeof(ppath), "/tiles/%u/%ld/%ld.%s",
+                 (unsigned)z, (long)x, (long)y, kPngExt[l - 4]);
       fsd = map_sd->open(ppath, FILE_READ);
-    }
-    if (!fsd) {
-      snprintf(ppath, sizeof(ppath), "/tiles/%u/%ld/%ld.PNG", (unsigned)z, (long)x, (long)y);
-      fsd = map_sd->open(ppath, FILE_READ);
+      mapSdLayoutNote(l, z, (bool)fsd);
     }
     // /tiles/<z>/<x>/<y>.jpg is the WRITABLE download cache (where the fetcher
     // merges Wi-Fi tiles into the library), not a read-only pack — track that so
@@ -38218,7 +38272,8 @@ static bool loadTileJpeg(uint8_t z, int32_t x, int32_t y,
 
 // Free everything currently in the tile cache.
 static void freeMapTiles() {
-  for (int _ti = 0; _ti < k_map_visible_tiles_max; ++_ti) freeMapTileSlot(s_map_tiles[_ti]);
+  for (int _ti = 0; _ti < k_map_tile_slots; ++_ti) freeMapTileSlot(s_map_tiles[_ti]);
+  mapSdLayoutReset();   // storage, style or mode changed: learn the card's layout again
 }
 
 // The tile storage changed underneath us: a card was remounted (wedge recovery,
@@ -38388,6 +38443,18 @@ static uint8_t bestAvailableZoom(double lat, double lon) {
 
 // Build the visible tile grid for the current center+zoom. Cheap: only
 // runs on tab activation or pan/zoom (not on every refresh tick).
+static int mapRenderText(char* buf, size_t cap) {
+  const MapRenderStats& r = s_map_render;
+  if (!r.at_ms || !cap) return 0;
+  const int n = snprintf(buf, cap,
+      "Last map render (%lus ago)\n  %lu ms, %d tiles: %d loaded, %d from RAM\n"
+      "  read %lu, decode %lu, paint %lu ms\n  markers %lu ms (%d)\n\n",
+      (unsigned long)((millis() - r.at_ms) / 1000), (unsigned long)r.total_ms,
+      r.wanted, r.cold, r.warm, (unsigned long)r.read_ms, (unsigned long)r.decode_ms,
+      (unsigned long)r.paint_ms, (unsigned long)r.markers_ms, r.markers);
+  return n < 0 ? 0 : (n >= (int)cap ? (int)cap - 1 : n);
+}
+
 static void renderMapTiles() {
   if (!s_map_canvas) return;
 
@@ -38463,14 +38530,14 @@ static void renderMapTiles() {
   // Cap to the pool: if more tiles touch the viewport than we can hold, keep the
   // ones nearest the screen centre (selection sort front — n_wanted is tiny). The
   // dropped tiles are the farthest out (under the bars / screen edge).
-  if (n_wanted > pool_cap) {
-    for (int a = 0; a < pool_cap; ++a) {
-      int best = a;
-      for (int b = a + 1; b < n_wanted; ++b) if (wanted[b].d2 < wanted[best].d2) best = b;
-      if (best != a) { Wanted tmp = wanted[a]; wanted[a] = wanted[best]; wanted[best] = tmp; }
-    }
-    n_wanted = pool_cap;
+  // Always sorted, so the tiles load centre first: the one the user is looking
+  // at paints first, the ones under the bars last.
+  for (int a = 0; a < n_wanted; ++a) {
+    int best = a;
+    for (int b = a + 1; b < n_wanted; ++b) if (wanted[b].d2 < wanted[best].d2) best = b;
+    if (best != a) { Wanted tmp = wanted[a]; wanted[a] = wanted[best]; wanted[best] = tmp; }
   }
+  if (n_wanted > pool_cap) n_wanted = pool_cap;
 
   s_tile_dec_want = n_wanted;   // diagnostics: visible tiles this pass (see the zoom label)
 
@@ -38486,12 +38553,14 @@ static void renderMapTiles() {
   // last tile lands (the "dots update ~2 s after the zoom" report). Callers
   // still invoke renderMapMarkers() afterwards to rebuild links/route overlays;
   // that trailing pass is now a cheap no-visual-change refresh.
+  const uint32_t t_markers0 = millis();
   renderMapMarkers();
+  const uint32_t markers_ms = millis() - t_markers0;
 
   // Pass 1 — keep matching slots, RELEASE non-matching ones (keep their 128 KB
   // buffer for reuse below — see releaseMapTileSlot; freeing per-render is what
   // fragmented PSRAM).
-  for (int _ti = 0; _ti < k_map_visible_tiles_max; ++_ti) { MapTile& t = s_map_tiles[_ti];
+  for (int _ti = 0; _ti < k_map_tile_slots; ++_ti) { MapTile& t = s_map_tiles[_ti];
     if (!t.in_use) continue;
     if (t.z != s_map_zoom) { releaseMapTileSlot(t); continue; }
     bool kept = false;
@@ -38501,6 +38570,7 @@ static void renderMapTiles() {
         const int sx = (int)((double)t.x * 256.0 - cwx + k_map_canvas_w / 2);
         const int sy = (int)((double)t.y * 256.0 - cwy + k_map_canvas_h / 2);
         lv_obj_set_pos(t.img, sx, sy);
+        t.used = ++s_map_tile_seq;
         wanted[i].placed = true;
         kept = true;
         break;
@@ -38514,50 +38584,104 @@ static void renderMapTiles() {
   // fragmentation fix). Cap the pool so the map's PSRAM stays bounded: the tiny
   // 2 MB-PSRAM V4 can't spare more than ~4 buffers alongside contacts+LVGL+web.
   static const size_t kTileBufBytes = 256u * 256u * sizeof(lv_color_t);   // 128 KB, fixed tile size
+  // Recently shown tiles kept decoded (k_map_tile_cache_extra): only on 8 MB
+  // boards, and only while PSRAM has room to spare after the new buffer.
+  const bool roomy        = kPsramTotalB >= 8u * 1024 * 1024;
+  const int  buf_cap      = pool_cap + (roomy ? k_map_tile_cache_extra : 0);
+  constexpr size_t kTileSpareB = 2u * 1024 * 1024;
   lv_obj_t* parent = s_map_pan_layer ? s_map_pan_layer : s_map_canvas;
   bool any_loaded = false;
   int  n_missing  = 0;   // visible tiles we couldn't load from disk
+  int  n_warm = 0, n_cold = 0;
+  uint32_t read_ms = 0, decode_ms = 0, paint_ms = 0;
+  const uint32_t t_tiles0 = millis();
   // Progressive-paint throttle — see the lv_refr_now() call inside the loop.
   uint32_t prog_last_ms = 0;
   int      prog_painted = 0;
+
+  // Show a decoded tile (dst->dsc already describes it) at wanted[i].
+  auto placeTile = [&](MapTile* dst, int i) {
+    lv_img_cache_invalidate_src(&dst->dsc);
+    dst->img = lv_img_create(parent);
+    lv_img_set_src(dst->img, &dst->dsc);
+    const int sx = (int)((double)wanted[i].tx * 256.0 - cwx + k_map_canvas_w / 2);
+    const int sy = (int)((double)wanted[i].ty * 256.0 - cwy + k_map_canvas_h / 2);
+    lv_obj_set_pos(dst->img, sx, sy);
+    // Sink the tile to the back of the pan layer. JPEG tiles are opaque,
+    // so without this a tile created in a later (dirty) render pass would
+    // paint over the contact / self markers that were created earlier on
+    // the same layer — they'd vanish behind the map. Tiles never overlap
+    // each other (grid), so their relative order doesn't matter; what
+    // matters is that ALL tiles stay below ALL markers.
+    lv_obj_move_background(dst->img);
+    dst->in_use = true;
+    dst->cached = false;
+    dst->used = ++s_map_tile_seq;
+    wanted[i].placed = true;
+    any_loaded = true;
+  };
+
+  // Pass 2a — tiles still decoded from an earlier view (panned or zoomed back):
+  // no read, no decode, so they all appear at once before any cold load starts.
   for (int i = 0; i < n_wanted; ++i) {
     if (wanted[i].placed) { any_loaded = true; continue; }
-    // Pick an empty slot, PREFERRING one that already owns a reusable 128 KB
-    // buffer (decode in place → no malloc → no fragmentation); else any empty slot.
+    for (int _ti = 0; _ti < k_map_tile_slots; ++_ti) { MapTile& t = s_map_tiles[_ti];
+      if (!t.in_use && t.cached && t.rgb565 && t.z == s_map_zoom &&
+          t.x == wanted[i].tx && t.y == wanted[i].ty) {
+        placeTile(&t, i);
+        ++n_warm;
+        break;
+      }
+    }
+  }
+
+  // Pass 2b — the rest from storage.
+  for (int i = 0; i < n_wanted; ++i) {
+    if (wanted[i].placed) continue;
+    // A buffer for it, cheapest first: a free slot that already owns one; a new
+    // one (up to pool_cap, or up to buf_cap while PSRAM has room to spare); else
+    // the buffer of the cached tile shown longest ago.
     MapTile* dst = nullptr;
-    for (int _ti = 0; _ti < k_map_visible_tiles_max; ++_ti) { MapTile& t = s_map_tiles[_ti];
-      if (!t.in_use && t.rgb565) { dst = &t; break; }
+    for (int _ti = 0; _ti < k_map_tile_slots; ++_ti) { MapTile& t = s_map_tiles[_ti];
+      if (!t.in_use && !t.cached && t.rgb565) { dst = &t; break; }
     }
-    if (!dst) for (int _ti = 0; _ti < k_map_visible_tiles_max; ++_ti) { MapTile& t = s_map_tiles[_ti];
-      if (!t.in_use) { dst = &t; break; }
-    }
-    if (!dst) break;  // shouldn't happen — wanted count <= slot count
-    // Ensure the slot has its persistent buffer. Allocate up to pool_cap buffers
-    // (bounds the map's PSRAM to pool_cap*128 KB); beyond that, steal a buffer from
-    // another released slot so the pool never grows past the cap. If neither works
-    // (fragmented/OOM on a cold cache) skip this tile — it retries next render, and
-    // once a buffer is grabbed it sticks (reused forever), so coverage heals.
-    if (!dst->rgb565) {
+    if (!dst) {
       int bufs = 0;
-      for (int _ti = 0; _ti < k_map_visible_tiles_max; ++_ti) if (s_map_tiles[_ti].rgb565) ++bufs;
-      if (bufs < pool_cap) {
-        dst->rgb565 = (uint8_t*)lvglPsramAlloc(kTileBufBytes);
-      } else {
-        for (int _ti = 0; _ti < k_map_visible_tiles_max; ++_ti) { MapTile& s = s_map_tiles[_ti];
-          if (!s.in_use && s.rgb565 && &s != dst) {
-            lv_img_cache_invalidate_src(&s.dsc);
-            dst->rgb565 = s.rgb565; s.rgb565 = nullptr;
+      for (int _ti = 0; _ti < k_map_tile_slots; ++_ti) if (s_map_tiles[_ti].rgb565) ++bufs;
+      const bool grow = bufs < pool_cap ||
+          (bufs < buf_cap && heap_caps_get_free_size(MALLOC_CAP_SPIRAM) > kTileBufBytes + kTileSpareB);
+      if (grow) {
+        for (int _ti = 0; _ti < k_map_tile_slots; ++_ti) { MapTile& t = s_map_tiles[_ti];
+          if (!t.in_use && !t.rgb565) {
+            t.rgb565 = (uint8_t*)lvglPsramAlloc(kTileBufBytes);
+            if (t.rgb565) { t.cached = false; dst = &t; }
             break;
           }
         }
       }
     }
-    if (!dst->rgb565) { ++n_missing; continue; }   // no buffer available this pass
+    if (!dst) {
+      MapTile* lru = nullptr;
+      for (int _ti = 0; _ti < k_map_tile_slots; ++_ti) { MapTile& t = s_map_tiles[_ti];
+        if (!t.in_use && t.cached && t.rgb565 && (!lru || (int32_t)(t.used - lru->used) < 0)) lru = &t;
+      }
+      if (lru) {
+        lv_img_cache_invalidate_src(&lru->dsc);
+        lru->cached = false;
+        dst = lru;
+      }
+    }
+    // No buffer this pass (fragmented/OOM on a cold cache): skip this tile — it
+    // retries next render, and once a buffer is grabbed it sticks (reused forever).
+    if (!dst) { ++n_missing; continue; }
     uint8_t* jpeg = nullptr;
     size_t   jlen = 0;
     bool repairable_cache = false;
-    if (!loadTileJpeg(s_map_zoom, wanted[i].tx, wanted[i].ty,
-                      &jpeg, &jlen, &repairable_cache)) {
+    const uint32_t t_read0 = millis();
+    const bool got = loadTileJpeg(s_map_zoom, wanted[i].tx, wanted[i].ty,
+                                  &jpeg, &jlen, &repairable_cache);
+    read_ms += millis() - t_read0;
+    if (!got) {
 #if defined(ESP32) && defined(MULTI_TRANSPORT_COMPANION)
       // Tile not on disk — queue an OSM download if Wi-Fi is up. No-op
       // when offline; if/when Wi-Fi comes up later, the next render
@@ -38572,11 +38696,13 @@ static void renderMapTiles() {
     // per-tile malloc, so PSRAM never fragments. PNG (0x89 'P' 'N' 'G') → lodepng
     // (LVGL's lv_png is broken here); else the DIRECT tjpgd path (streams MCUs into
     // the buffer through a shared 4 KB work pool). 256 px cap == native tile size.
+    const uint32_t t_dec0 = millis();
     uint8_t* rgb = (jlen >= 4 && jpeg[0] == 0x89 && jpeg[1] == 'P' && jpeg[2] == 'N' && jpeg[3] == 'G')
                      ? decodePngToRgb565(jpeg, jlen, &dw, &dh, dst->rgb565, kTileBufBytes)
                      : decodeJpegScaledToRgb565(jpeg, jlen, &dw, &dh, 256, dst->rgb565, kTileBufBytes);
     lvglPsramFree(jpeg);
     if (!rgb) {
+      decode_ms += millis() - t_dec0;
 #if defined(ESP32) && defined(MULTI_TRANSPORT_COMPANION)
       if (repairable_cache) {
         char bad_path[48];
@@ -38601,6 +38727,7 @@ static void renderMapTiles() {
 #if defined(HAS_TDECK_PRO)
     TDeckProDisplay::prepareMapTileRGB565((uint16_t*)rgb, dw, dh);
 #endif
+    decode_ms += millis() - t_dec0;
     dst->z = s_map_zoom; dst->x = wanted[i].tx; dst->y = wanted[i].ty;
     dst->rgb565 = rgb;   // == the slot's persistent buffer (decoded in place)
     dst->w = dw; dst->h = dh;
@@ -38610,24 +38737,10 @@ static void renderMapTiles() {
     dst->dsc.header.h  = (uint32_t)dh;
     dst->dsc.data      = rgb;
     dst->dsc.data_size = (uint32_t)((size_t)dw * dh * sizeof(lv_color_t));
-    // Reused buffer at a stable dsc address → drop any stale cached decode keyed
-    // to this dsc pointer before the new widget reads it.
-    lv_img_cache_invalidate_src(&dst->dsc);
-    dst->img = lv_img_create(parent);
-    lv_img_set_src(dst->img, &dst->dsc);
-    const int sx = (int)((double)wanted[i].tx * 256.0 - cwx + k_map_canvas_w / 2);
-    const int sy = (int)((double)wanted[i].ty * 256.0 - cwy + k_map_canvas_h / 2);
-    lv_obj_set_pos(dst->img, sx, sy);
-    // Sink the tile to the back of the pan layer. JPEG tiles are opaque,
-    // so without this a tile created in a later (dirty) render pass would
-    // paint over the contact / self markers that were created earlier on
-    // the same layer — they'd vanish behind the map. Tiles never overlap
-    // each other (grid), so their relative order doesn't matter; what
-    // matters is that ALL tiles stay below ALL markers.
-    lv_obj_move_background(dst->img);
-    dst->in_use = true;
-    wanted[i].placed = true;
-    any_loaded = true;
+    // Reused buffer at a stable dsc address → placeTile drops any stale cached
+    // decode keyed to this dsc pointer before the new widget reads it.
+    placeTile(dst, i);
+    ++n_cold;
     // Progressive render: paint this tile before loading the next one, so the
     // map fills in tile-by-tile instead of all at once. BUT skip it while a
     // download is in flight: on the immersive full-screen map each lv_refr_now
@@ -38649,6 +38762,7 @@ static void renderMapTiles() {
       if (prog_painted == 0 || (uint32_t)(now_ms - prog_last_ms) >= k_map_progressive_ms) {
         lv_refr_now(NULL);
         prog_last_ms = millis();   // AFTER the paint: throttle the gap between paints, not their starts
+        paint_ms += prog_last_ms - now_ms;
         ++prog_painted;
       }
     }
@@ -38659,8 +38773,23 @@ static void renderMapTiles() {
     // download worker already does the same vTaskDelay(1) on its side).
     vTaskDelay(1);
   }
+  s_map_render.at_ms     = millis();
+  s_map_render.total_ms  = s_map_render.at_ms - t_tiles0 + markers_ms;
+  s_map_render.markers_ms = markers_ms;
+  s_map_render.read_ms   = read_ms;
+  s_map_render.decode_ms = decode_ms;
+  s_map_render.paint_ms  = paint_ms;
+  s_map_render.warm      = n_warm;
+  s_map_render.cold      = n_cold;
+  s_map_render.wanted    = n_wanted;
+  // The callers' trailing renderMapMarkers() would rebuild what was built above
+  // for this same centre and zoom: let it skip (see renderMapMarkers).
+  s_map_markers_built_ms   = millis() | 1;
+  s_map_markers_built_zoom = s_map_zoom;
+  s_map_markers_built_lat  = s_map_center_lat;
+  s_map_markers_built_lon  = s_map_center_lon;
 
-  // Diagnostics: how many of the wanted tiles ended up with a live img widget
+  // Diagnostics: how many of the wanted tiles  // Diagnostics: how many of the wanted tiles ended up with a live img widget
   // (kept from a prior pass OR freshly decoded). placed == want but a blank
   // screen ⇒ paint/z-order bug; placed < want ⇒ tiles missing from disk/decode.
   { int placed = 0; for (int i = 0; i < n_wanted; ++i) if (wanted[i].placed) ++placed;
@@ -39287,11 +39416,66 @@ static void removeMapLocation();
 // the map catches up when it is shown again (mapMarkersCatchUp) or opened
 // (onMapTabActivated renders it anyway).
 static bool s_map_markers_stale = false;
+
+// The markers' shared styles, made once. Disc colours as the app's
+// (map_screen.dart _markerColor / _ageColor): people green / amber / grey by
+// age, repeaters blue, rooms purple, sensors teal.
+struct MapMarkerStyles {
+  lv_style_t disc[6];   // 0 heard <1 h, 1 <1 day, 2 older, 3 repeater, 4 room, 5 sensor
+  lv_style_t dot[3];    // status dot: <1 h, <1 day, older
+  lv_style_t icon;
+  lv_style_t link;
+};
+static MapMarkerStyles& mapMarkerStyles() {   // non-const: LVGL 8 takes lv_style_t*
+  static MapMarkerStyles* st = nullptr;
+  if (st) return *st;
+  st = (MapMarkerStyles*)psAlloc(sizeof(MapMarkerStyles));
+  static const uint32_t kDisc[6] = { 0x22C55E, 0xF59E0B, 0x94A3B8, 0x2563EB, 0x7C3AED, 0x0F766E };
+  static const uint32_t kDot[3]  = { 0x22C55E, 0xF59E0B, 0x6B7280 };
+  for (int i = 0; i < 6; ++i) {
+    lv_style_t* s = &st->disc[i];
+    lv_style_init(s);
+    lv_style_set_bg_color(s, lv_color_hex(kDisc[i]));
+    lv_style_set_bg_opa(s, LV_OPA_COVER);
+    lv_style_set_border_color(s, lv_color_hex(0xFFFFFF));
+    lv_style_set_border_width(s, 2);
+    lv_style_set_radius(s, LV_RADIUS_CIRCLE);
+    lv_style_set_clip_corner(s, false);
+  }
+  for (int i = 0; i < 3; ++i) {
+    lv_style_t* s = &st->dot[i];
+    lv_style_init(s);
+    lv_style_set_bg_color(s, lv_color_hex(kDot[i]));
+    lv_style_set_bg_opa(s, LV_OPA_COVER);
+    lv_style_set_radius(s, LV_RADIUS_CIRCLE);
+    lv_style_set_border_color(s, lv_color_hex(0x0B1220));
+    lv_style_set_border_width(s, 1);
+  }
+  lv_style_init(&st->icon);
+  lv_style_set_text_font(&st->icon, &map_icons_14);
+  lv_style_set_text_color(&st->icon, lv_color_hex(0xFFFFFF));
+  lv_style_init(&st->link);
+  lv_style_set_line_width(&st->link, 2);
+  lv_style_set_line_color(&st->link, lv_color_hex(0x6FA8DA));
+  lv_style_set_line_opa(&st->link, LV_OPA_70);
+  lv_style_set_line_rounded(&st->link, true);
+  return *st;
+}
+
 static bool mapOnScreen() {
   return s_map_canvas && getActiveTab() == MAP_TAB_INDEX && g_lv.task && !g_lv.task->isScreenOff();
 }
 static void renderMapMarkers() {
   if (s_map_canvas && !mapOnScreen()) { s_map_markers_stale = true; return; }
+  // renderMapTiles rebuilt them a moment ago for this very centre and zoom, and
+  // nearly every caller calls this again right after it: that second rebuild
+  // (hundreds of objects freed and made again) is skipped, once.
+  const bool just_built = s_map_markers_built_ms &&
+      (uint32_t)(millis() - s_map_markers_built_ms) < 20 &&   // the same call chain, not a later change
+      s_map_markers_built_zoom == s_map_zoom &&
+      s_map_markers_built_lat == s_map_center_lat && s_map_markers_built_lon == s_map_center_lon;
+  s_map_markers_built_ms = 0;
+  if (just_built && !s_map_markers_stale) return;
   s_map_markers_stale = false;
   freeMapMarkers();
   if (!s_map_canvas) return;
@@ -39364,10 +39548,7 @@ static void renderMapMarkers() {
       lv_line_set_points(ln, s_map_link_pts[link_n], 2);
       // Solid (not dashed): LVGL 8.3's SW renderer doesn't reliably dash
       // diagonal lines — a thin, semi-transparent line reads as a "link".
-      lv_obj_set_style_line_width(ln, 2, LV_PART_MAIN);
-      lv_obj_set_style_line_color(ln, lv_color_hex(0x6FA8DA), LV_PART_MAIN);
-      lv_obj_set_style_line_opa(ln, LV_OPA_70, LV_PART_MAIN);
-      lv_obj_set_style_line_rounded(ln, true, LV_PART_MAIN);
+      lv_obj_add_style(ln, &mapMarkerStyles().link, LV_PART_MAIN);
       lv_obj_clear_flag(ln, LV_OBJ_FLAG_CLICKABLE);
       s_map_link_objs[link_n] = ln;
       ++link_n;
@@ -39426,48 +39607,39 @@ static void renderMapMarkers() {
     s_map_markers_wanted++;
     if (slot >= marker_cap + 1) continue;   // +1: slot 0 is self
 
-    // The app's colours (map_screen.dart _markerColor / _ageColor): repeaters
-    // blue, rooms purple, sensors teal; people by when they were last heard,
-    // green within the hour, amber within the day, grey after.
+    // The app's colours (mapMarkerStyles): repeaters blue, rooms purple, sensors
+    // teal; people by when they were last heard, green within the hour, amber
+    // within the day, grey after.
     const uint32_t age = (map_now_secs > c.last_advert_timestamp && c.last_advert_timestamp != 0)
                              ? map_now_secs - c.last_advert_timestamp : 0xFFFFFFFFu;
-    const uint32_t age_rgb = age <= 3600 ? 0x22C55E : age <= 86400 ? 0xF59E0B : 0x94A3B8;
-    uint32_t color = age_rgb;
-    if (c.type == ADV_TYPE_REPEATER) color = 0x2563EB;
-    else if (c.type == ADV_TYPE_ROOM) color = 0x7C3AED;
-    else if (c.type == ADV_TYPE_SENSOR) color = 0x0F766E;
 
+    // Shared styles, not per-object local ones: every local style property is a
+    // separate allocation on the object, ~20 per marker, all made again on each
+    // pan and zoom. Size and position stay per object.
+    MapMarkerStyles& ms = mapMarkerStyles();
+    const int disc = c.type == ADV_TYPE_REPEATER ? 3 : c.type == ADV_TYPE_ROOM ? 4 :
+                     c.type == ADV_TYPE_SENSOR ? 5 : age <= 3600 ? 0 : age <= 86400 ? 1 : 2;
+    const int dot  = age <= 3600 ? 0 : age <= 86400 ? 1 : 2;
     MapMarker& m = s_map_markers[slot];
     m.mesh_idx = (int)i;
     m.obj = lv_obj_create(parent);
     lv_obj_remove_style_all(m.obj);
+    lv_obj_add_style(m.obj, &ms.disc[disc], LV_PART_MAIN);
     lv_obj_set_size(m.obj, 20, 20);
     lv_obj_set_pos(m.obj, sx - 10, sy - 10);
-    lv_obj_set_style_bg_color(m.obj, lv_color_hex(color), LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(m.obj, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_set_style_border_color(m.obj, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
-    lv_obj_set_style_border_width(m.obj, 2, LV_PART_MAIN);
-    lv_obj_set_style_radius(m.obj, LV_RADIUS_CIRCLE, LV_PART_MAIN);
-    lv_obj_set_style_clip_corner(m.obj, false, LV_PART_MAIN);
     // The app's white icon for the contact's type (person, repeater, room, sensor).
     lv_obj_t* icon = lv_label_create(m.obj);
+    lv_obj_add_style(icon, &ms.icon, LV_PART_MAIN);
     lv_label_set_text(icon, mapicons::contactType(c.type));
-    lv_obj_set_style_text_font(icon, &map_icons_14, LV_PART_MAIN);
-    lv_obj_set_style_text_color(icon, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
     lv_obj_clear_flag(icon, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_center(icon);
     // And its status dot, bottom right: green heard within the hour, amber within
     // the day, grey after (the app's online / recent / stale).
     lv_obj_t* st = lv_obj_create(m.obj);
     lv_obj_remove_style_all(st);
+    lv_obj_add_style(st, &ms.dot[dot], LV_PART_MAIN);
     lv_obj_set_size(st, 8, 8);
     lv_obj_align(st, LV_ALIGN_BOTTOM_RIGHT, 3, 3);
-    lv_obj_set_style_bg_color(st, lv_color_hex(age <= 3600 ? 0x22C55E : age <= 86400 ? 0xF59E0B : 0x6B7280),
-                              LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(st, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_set_style_radius(st, LV_RADIUS_CIRCLE, LV_PART_MAIN);
-    lv_obj_set_style_border_color(st, lv_color_hex(0x0B1220), LV_PART_MAIN);
-    lv_obj_set_style_border_width(st, 1, LV_PART_MAIN);
     lv_obj_add_flag(st, LV_OBJ_FLAG_IGNORE_LAYOUT | LV_OBJ_FLAG_FLOATING);
     lv_obj_clear_flag(st, LV_OBJ_FLAG_CLICKABLE);
     // Markers are NOT clickable themselves — taps go to the canvas, whose
@@ -39480,6 +39652,7 @@ static void renderMapMarkers() {
     ++slot;
   }
   s_map_markers_drawn = slot - 1;   // slot 0 is self
+  s_map_render.markers = s_map_markers_drawn;
 
   // Selected message coordinate. Keep this separate from contact markers so it
   // remains visible even when contact markers are disabled or capped, and draw
@@ -42058,7 +42231,7 @@ static void refreshMapInfoLabel() {
         // block KB (a tile needs 128 KB contiguous; blk<128 while ps high == frag).
         const int psf = (int)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024);
         const int psb = (int)(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM) / 1024);
-        int pbufs = 0; for (int _t = 0; _t < k_map_visible_tiles_max; ++_t) if (s_map_tiles[_t].rgb565) ++pbufs;
+        int pbufs = 0; for (int _t = 0; _t < k_map_tile_slots; ++_t) if (s_map_tiles[_t].rgb565) ++pbufs;
         snprintf(zbuf, sizeof zbuf, "z%u d%d/%d p%d wr%c h%d ok%u f%u\nps%dk blk%dk",
                  (unsigned)s_map_zoom, s_tile_dec_ok, s_tile_dec_want, pbufs,
                  (char)s_tile_fetch_last_wr, (int)s_tile_fetch_last_code,
