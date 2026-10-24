@@ -45,6 +45,9 @@ class VoxFetchIo {
   virtual bool sendChannelData(int channel, uint16_t type, const uint8_t* data, size_t len) = 0;
   // Airtime of one full photo packet with the radio's current settings.
   virtual uint32_t packetAirMs() = 0;
+  // The same on radio2 (MediaMesh), 0 when it's off: packets that arrive over
+  // radio2 are timed by it, not by the main radio.
+  virtual uint32_t radio2PacketAirMs() { return 0; }
   virtual bool hasPayload(uint32_t sid) = 0;
   virtual bool savePayload(uint32_t sid, const uint8_t* data, size_t len) = 0;
   // A session's status changed (the UI redraws its bubble).
@@ -158,6 +161,9 @@ class VoxFetch {
     bool relayed = false;   // a packet came through a repeater, or didn't say
     uint8_t r2_hop[3] = {0, 0, 0};   // radio2Hop(): the last radio2 packet's last repeater
     uint8_t r2_hop_len = 0;
+    uint32_t rx_last_ms = 0;   // when the last new packet came in this burst
+    uint32_t rx_gap_ms = 0;    // the bursts' gap between packets (smoothed)
+    uint8_t rx_gaps = 0;       // how many gaps that is from
   };
 
   struct Orphan {
@@ -183,11 +189,16 @@ class VoxFetch {
               uint8_t hop_len = 0);
   void keepOrphan(const VoxWire::Packet& p, uint8_t via, bool relayed, const uint8_t* hop, uint8_t hop_len);
   void adoptOrphans(Session& s);
-  uint32_t zeroHopGap();
+  uint32_t airMs(const Session& s);
+  uint32_t zeroHopGap(uint32_t air);
+  uint32_t zeroHopGap() { return zeroHopGap(io_.packetAirMs()); }
+  uint32_t burstGap(Session& s);
+  void noteGap(Session& s, uint32_t now);
   void complete(Session& s);
   void fail(Session& s, const char* why);
   int hops(const Session& s);
-  uint32_t packetGap(bool flood, int hops);
+  uint32_t packetGap(bool flood, int hops, uint32_t air);
+  uint32_t packetGap(bool flood, int hops) { return packetGap(flood, hops, io_.packetAirMs()); }
   uint32_t waitFor(Session& s);
   void arm(Session& s, uint32_t ms);
 

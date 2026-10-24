@@ -438,6 +438,10 @@ class MeshIo : public VoxFetchIo {
     return (uint32_t)((8 + 4.25 + n_payload) * t_sym * 1000.0);
   }
 
+  uint32_t radio2PacketAirMs() override {
+    return mediamesh::radio2AirMs(2 + VoxWire::kPacketHeaderLen + VoxWire::kBytesPerPacket);
+  }
+
   bool hasPayload(uint32_t sid) override {
     return storeHas(sid, false) || storeHas(sid, true);
   }

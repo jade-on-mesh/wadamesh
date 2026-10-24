@@ -29319,6 +29319,43 @@ static uint32_t s_thumb_next_view   = 0;   // the viewer asked for another one m
 static char     s_thumb_next_title[48] = {0};
 static void voxShowStoredPhoto(uint32_t sid, const char* title);
 
+#if VOX_AV1_AVAILABLE
+// The last photo decoded (its thumbnail made, or viewed), kept decoded in
+// PSRAM: opening it, as is usual straight after it downloads, shows it at once
+// instead of reading and decoding it again. One photo, about 250 KB; let go
+// when PSRAM runs short before another decode.
+static uint32_t s_vox_last_sid = 0;
+static VoxAv1Image s_vox_last;
+static void voxLastDrop() {
+  voxAv1Free(s_vox_last.pixels);
+  s_vox_last = VoxAv1Image{};
+  s_vox_last_sid = 0;
+}
+// Takes `img`'s pixels.
+static void voxLastKeep(uint32_t sid, VoxAv1Image& img) {
+  voxLastDrop();
+  if (!sid || !img.pixels || img.format != kVoxAv1Rgb565) { voxAv1Free(img.pixels); img = VoxAv1Image{}; return; }
+  s_vox_last = img;
+  s_vox_last_sid = sid;
+  img = VoxAv1Image{};
+}
+// Before a decode: room for it first (a decode peaks near 1 MB).
+static void voxLastMakeRoom() {
+  if (s_vox_last.pixels && heap_caps_get_free_size(MALLOC_CAP_SPIRAM) < 1536u * 1024u) voxLastDrop();
+}
+static bool voxLastShow(uint32_t sid, const char* title) {
+  if (!sid || sid != s_vox_last_sid || !s_vox_last.pixels) return false;
+  const size_t bytes = (size_t)s_vox_last.width * s_vox_last.height * 2;
+  uint8_t* buf = (uint8_t*)lvglPsramAlloc(bytes);   // the viewer frees with lvglPsramFree
+  if (!buf) return false;
+  memcpy(buf, s_vox_last.pixels, bytes);
+  snprintf(s_vox_name, sizeof s_vox_name, "%s", title);
+  snprintf(s_fm_img_path, sizeof s_fm_img_path, "%s", s_vox_name);
+  fmImageShowDecoded(s_vox_name, buf, s_vox_last.width, s_vox_last.height);
+  return true;
+}
+#endif
+
 // What the open chat's layout depends on beyond its messages: thumbnails made,
 // and the photo store's index landing (answers that were "not known yet").
 static uint32_t chatThumbGen() { return s_chat_thumb_gen + VoxPhotos::layoutVersion(); }
@@ -29352,6 +29389,7 @@ static void fmVoxPhotoPollCb(lv_timer_t*) {
     return;
   }
   // A photo opened from its bubble: keep a thumbnail of it for the bubble.
+  const uint32_t viewed_sid = s_vox_view_sid;
   if (s_vox_view_sid && !VoxPhotos::thumbSize(s_vox_view_sid, nullptr, nullptr) &&
       VoxPhotos::saveThumb(s_vox_view_sid, (const uint16_t*)img.pixels, img.width, img.height))
     voxThumbLanded();
@@ -29365,13 +29403,19 @@ static void fmVoxPhotoPollCb(lv_timer_t*) {
     return;
   }
   memcpy(buf, img.pixels, bytes);
+  const int img_w = img.width, img_h = img.height;
+#if VOX_AV1_AVAILABLE
+  voxLastKeep(viewed_sid, img);   // opened again: shown at once
+#else
+  (void)viewed_sid;
   voxAv1Free(img.pixels);
+#endif
   // The viewer's per-image actions key on this path; a .vi1 name keeps them off
   // (and stops a previous JPEG's path being used by mistake).
   snprintf(s_fm_img_path, sizeof s_fm_img_path, "%s", s_vox_name);
-  fmImageShowDecoded(s_vox_name, buf, img.width, img.height);
+  fmImageShowDecoded(s_vox_name, buf, img_w, img_h);
   char msg[96];
-  snprintf(msg, sizeof msg, "AV1 %dx%d in %lu ms @ %lu MHz\nstack %lu KB, heap %lu KB", img.width, img.height,
+  snprintf(msg, sizeof msg, "AV1 %dx%d in %lu ms @ %lu MHz\nstack %lu KB, heap %lu KB", img_w, img_h,
            (unsigned long)st.decode_ms, (unsigned long)st.cpu_mhz,
            (unsigned long)((st.stack_used + 1023) / 1024), (unsigned long)((st.heap_peak + 1023) / 1024));
   if (g_lv.task) g_lv.task->showAlert(msg, 3500);
@@ -29396,6 +29440,7 @@ static void fmVoxPhotoStart(const char* name, const uint8_t* payload, size_t len
     if (g_lv.task) g_lv.task->showAlert(TR("Decoding photo..."), 1200);
     return;
   }
+  voxLastMakeRoom();
   if (!VoxAv1Job::start(payload, len)) {
     if (g_lv.task) g_lv.task->showAlert(TR("Already decoding a photo"), 1500);
     return;
@@ -29437,7 +29482,8 @@ static void voxThumbTick() {
       g_lv.task->showAlert(TR(voxAv1ResultText(r)), 2500);
     }
     s_thumb_then_view = false;
-    voxAv1Free(img.pixels);
+    if (r == kVoxAv1Ok) voxLastKeep(sid, img);   // most often the next one opened
+    else voxAv1Free(img.pixels);
     if (s_thumb_next_view) {   // another photo asked for while this ran
       const uint32_t next = s_thumb_next_view;
       s_thumb_next_view = 0;
@@ -29456,6 +29502,7 @@ static void voxThumbTick() {
   uint8_t* payload = nullptr;
   size_t len = 0;
   if (!VoxPhotos::load(sid, &payload, &len)) return;
+  voxLastMakeRoom();
   if (VoxAv1Job::start(payload, len)) s_thumb_job_sid = sid;
   free(payload);
 #endif
@@ -47299,6 +47346,11 @@ static void bubblePhotoOpen(int idx) {
 }
 
 static void voxShowStoredPhoto(uint32_t sid, const char* title) {
+#if VOX_AV1_AVAILABLE
+  // Decoded a moment ago (its thumbnail, or viewed before): no need again. Not
+  // while the viewer is waiting on a decode, which would open a second viewer.
+  if (!s_vox_poll_timer && voxLastShow(sid, title)) return;
+#endif
   uint8_t* payload = nullptr;
   size_t len = 0;
   if (!VoxPhotos::load(sid, &payload, &len)) {

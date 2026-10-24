@@ -80,7 +80,8 @@ struct Sim : VoxFetchIo {
     std::vector<int> idx = want;
     const int total = (int)((payload.size() + pb - 1) / pb);
     if (idx.empty()) for (int i = 0; i < total; i++) idx.push_back(i);
-    const uint32_t gap = on_channel ? 4 * air + 150 : 2 * air + 150;
+    const uint32_t a = via == VoxFetch::kViaRadio2 && r2air ? r2air : air;
+    const uint32_t gap = on_channel ? 4 * a + 150 : 2 * a + 150;
     uint32_t t = start;
     const bool first = bursts++ == 0;
     for (int i : idx) {
@@ -162,6 +163,8 @@ struct Sim : VoxFetchIo {
     return true;
   }
   uint32_t packetAirMs() override { return air; }
+  uint32_t r2air = 0;   // radio2's airtime per packet (0: radio2 off)
+  uint32_t radio2PacketAirMs() override { return r2air; }
   bool hasPayload(uint32_t sid) override { return store.count(sid) > 0; }
   bool savePayload(uint32_t sid, const uint8_t* d, size_t n) override {
     store[sid].assign(d, d + n);
@@ -464,6 +467,37 @@ int main() {
     const uint32_t bound = 2 * sim.air + 18 * gap + VoxFetch::stallWait(rx_gap) + 2 * sim.air + gap + 500;
     assert(sim.now - start <= bound);   // was ~13 s later: 3 gaps + 2 trips + 8 s
     printf("tail loss: complete after %lu ms\n", (unsigned long)(sim.now - start));
+  }
+
+  // 15b. The same over radio2 (MediaMesh), which is 6x faster here: the lost
+  //      tail is asked for again by radio2's timing, not the main radio's.
+  {
+    Sim sim; setup(sim, 2750); sim.drop_first = {17};
+    sim.via = VoxFetch::kViaRadio2; sim.r2air = 100;
+    VoxFetch f(sim); sim.fetch = &f;
+    f.onEnvelope(envFor(sim), sim.sender_pub, nullptr, -1, true);
+    const uint32_t start = sim.now;
+    while (!gotIt(sim, f) && sim.now - start < 120000) sim.run(50);
+    assert(gotIt(sim, f) && sim.raw_requests == 2);
+    const uint32_t gap = 2 * sim.r2air + 150;   // 350 ms between packets
+    // Out and back at the main radio's pace, the burst at radio2's; the stall
+    // noticed after 3 of radio2's (observed, doubled) gaps + 2.5 s.
+    const uint32_t bound = 2 * sim.air + 18 * gap + VoxFetch::stallWait(2 * gap) + 2 * sim.air + gap + 500;
+    assert(sim.now - start <= bound);
+    printf("tail loss over radio2: complete after %lu ms\n", (unsigned long)(sim.now - start));
+  }
+
+  // 15c. Main-mesh packets keep the main radio's timing even with radio2 on,
+  //      and a fast-arriving burst is timed by the gaps it actually came at.
+  {
+    Sim sim; setup(sim, 2750); sim.drop_first = {17};
+    sim.via = VoxFetch::kViaMain; sim.r2air = 100;
+    VoxFetch f(sim); sim.fetch = &f;
+    f.onEnvelope(envFor(sim), sim.sender_pub, nullptr, -1, true);
+    const uint32_t start = sim.now;
+    while (!gotIt(sim, f) && sim.now - start < 120000) sim.run(50);
+    assert(gotIt(sim, f) && sim.raw_requests == 2);
+    printf("tail loss on the main mesh, radio2 on: complete after %lu ms\n", (unsigned long)(sim.now - start));
   }
 
   // 16. The shared timing (lib/vox/vox_timing.dart).

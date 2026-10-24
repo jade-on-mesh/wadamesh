@@ -144,6 +144,10 @@ bool radio2HeardWithin(uint32_t window_ms);
  *  0 when they (also) use the main radio, which then sets the pace. */
 uint32_t mediaRadio2AirMs(int payload_len);
 
+/** Airtime in ms of a `payload_len`-byte packet on radio2 while it is on (rx
+ *  or rxtx), for timing what arrives over it; 0 when radio2 is off. */
+uint32_t radio2AirMs(int payload_len);
+
 // ---- per-contact / per-channel choices ---------------------------------------
 
 /** The saved choice for a contact (first 8 bytes of its public key) or a
