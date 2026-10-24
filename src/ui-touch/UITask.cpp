@@ -83352,12 +83352,23 @@ void UITask::loop() {
 #endif
     static uint32_t s_vox_voice_seen = 0;   // repaint the bubble when playback starts or ends
     if (s_vox_voice_sid != s_vox_voice_seen) { s_vox_voice_seen = s_vox_voice_sid; g_lv.dirty_timeline = true; }
-    static uint32_t s_talk_wave_seen = 0, s_talk_fill_ms = 0;   // a waveform worked out: repaint
-    if (s_talk_wave_ver != s_talk_wave_seen) { s_talk_wave_seen = s_talk_wave_ver; g_lv.dirty_timeline = true; }
+    // A talk's waveform is drawn by its bubble's draw callback (chatTalkWaveDrawCb),
+    // which asks for it each time it draws. A refresh of the open chat that
+    // doesn't change its layout keeps the bubbles as they are and redraws
+    // nothing, so a waveform worked out (or a clip that has just been kept) was
+    // never asked for again: the line stayed empty. Redraw the open chat itself.
+    static uint32_t s_talk_wave_seen = 0, s_talk_fill_ms = 0;
+    auto talkRedraw = []() {
+      LvChatPanel* cp = g_lv.ch.detail_open ? &g_lv.ch : (g_lv.dm.detail_open ? &g_lv.dm : nullptr);
+      if (cp && cp->msgs) lv_obj_invalidate(cp->msgs);
+    };
+    if (s_talk_wave_ver != s_talk_wave_seen) { s_talk_wave_seen = s_talk_wave_ver; talkRedraw(); }
     else if (s_talk_wave_retry && !s_talk_wave_busy && now - s_talk_wave_last_ms >= 1000) {
       s_talk_wave_retry = false;   // a talk is waiting for its waveform: one more pass
-      g_lv.dirty_timeline = true;
+      talkRedraw();
     }
+    static uint32_t s_talk_state_seen = 0;   // a clip kept or fetched: its talk can be drawn now
+    if (VoxPhotos::stateVersion() != s_talk_state_seen) { s_talk_state_seen = VoxPhotos::stateVersion(); talkRedraw(); }
     // A talk playing: its waveform fills in. Only the open chat's area is redrawn.
     if (s_vox_voice_sid && (uint32_t)(now - s_talk_fill_ms) >= 250) {
       s_talk_fill_ms = now;
