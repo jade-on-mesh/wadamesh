@@ -11297,8 +11297,9 @@ static bool mentionBoxMaybeShow(lv_obj_t* ta) {
   return true;
 }
 // ---- Predictive text (PREDICTIVE_TEXT.md) -----------------------------------------
-// Up to three words that finish the one being typed, over the composer; a tap puts
-// one in with a space. From a built-in list and the words you send (kept in
+// Up to three words over the composer: ones that finish or fix the word being
+// typed, or, after a space, the likely next word. A tap puts one in with a space.
+// From a built-in dictionary and the words and word pairs you send (kept in
 // /words on the internal store).
 #if CAP_TAK_EXTRAS
 #include <new>
@@ -11339,7 +11340,7 @@ static predict::Dict* wordsDict() {
       if (fs->exists("/words")) {
         File f = fs->open("/words", "r");
         if (f) {
-          const size_t n = f.size() < 6000 ? f.size() : 6000;
+          const size_t n = f.size() < predict::kSaveMax ? f.size() : predict::kSaveMax;
           char* buf = (char*)malloc(n + 1);
           if (buf) { const size_t got = f.read((uint8_t*)buf, n); buf[got] = 0; s_words->load(buf, got); free(buf); }
           f.close();
@@ -11356,9 +11357,9 @@ static void wordsSaveTick(uint32_t now) {
   s_words_dirty = false;
 #if defined(ESP32)
   fs::FS* fs = backupInternalFs();
-  char* buf = (char*)malloc(6000);
+  char* buf = (char*)malloc(predict::kSaveMax);
   if (!fs || !buf) { free(buf); return; }
-  const size_t n = s_words->save(buf, 6000);
+  const size_t n = s_words->save(buf, predict::kSaveMax);
   WdtHeavyGuard guard;
   File f = fs->open("/words", "w");
   if (f) { f.write((const uint8_t*)buf, n); f.close(); }
@@ -11419,6 +11420,14 @@ static bool wordSpaceComplete(lv_obj_t* ta) {
         !strcmp(text + caret, s_ac_done + s_ac_done_caret)) {
       s_ac_ta = nullptr;
       s_ac_suppress = true;   // so a Space now keeps the word as typed
+      // ...and from now on: a word you undo a change of is a word you use.
+      if (s_words) {
+        size_t kl;
+        const size_t ka = predict::wordAt(s_ac_typed, s_ac_typed_caret, &kl);
+        s_words->keep(s_ac_typed + ka, kl);
+        s_words_dirty = true;
+        s_words_dirty_ms = millis();
+      }
       wordSetText(ta, s_ac_typed, s_ac_typed_caret);
       return true;
     }
@@ -11431,7 +11440,7 @@ static bool wordSpaceComplete(lv_obj_t* ta) {
       strncmp(text, s_ac_text, s_ac_caret) || strcmp(text + caret, s_ac_text + s_ac_caret))
     return false;
   const size_t bl = strlen(s_ac_best);
-  if (bl <= s_ac_wl) return false;   // the word typed is already the best one
+  if (!bl || (bl == s_ac_wl && !strncmp(s_ac_best, s_ac_text + s_ac_at, bl))) return false;   // nothing to change
   char out[UITask::MAX_MSG_TEXT + 1];
   if (s_ac_at + bl + 1 + (ol - s_ac_caret) > UITask::MAX_MSG_TEXT) return false;
   size_t o = 0;
@@ -11489,19 +11498,24 @@ static bool wordBoxMaybeShow(lv_obj_t* ta) {
   if (caret < len && predict::wordChar(text[caret])) return false;   // in the middle of a word
   size_t wl;
   const size_t at = predict::wordAt(text, caret, &wl);
-  const int n = d->suggest(text + at, wl, s_word_sugg);
+  if (wl == 0 && (at == 0 || text[at - 1] != ' ')) return false;   // the next word: after a space
+  static predict::Suggestions sg;
+  d->suggest(text, at, wl, sg);
+  const int n = sg.n;
   if (n == 0) return false;
+  for (int i = 0; i < n; i++) memcpy(s_word_sugg[i], sg.w[i], predict::kWordMax);
   s_wordbox_ta = ta;
-  // What Space completes (wordSpaceComplete): the best word, for this text and caret.
+  // What Space does (wordSpaceComplete): fixes or completes a word that isn't
+  // one; a real word is left alone.
   if (s_ac_suppress) {
     s_ac_suppress = false;   // just put back by an undo: Space keeps it as typed
-  } else {
+  } else if (wl > 0 && sg.space[0]) {
     s_ac_ta = ta;
     snprintf(s_ac_text, sizeof s_ac_text, "%s", text);
     s_ac_caret = caret;
     s_ac_at = at;
     s_ac_wl = wl;
-    snprintf(s_ac_best, sizeof s_ac_best, "%s", s_word_sugg[0]);
+    snprintf(s_ac_best, sizeof s_ac_best, "%s", sg.space);
   }
   // A slim strip along the top of the composer field, as wide as the field:
   // the words in the small font, split by hairlines, the best one first.
@@ -20186,10 +20200,10 @@ static void buildKeyboardPage() {
 #endif
                  accentPopupsToggleCb);
 #if CAP_TAK_EXTRAS
-    setSwitchRow(c, "Predictive text", "Up to three words that finish the one you're typing, in a slim strip "
-                 "over the message; tap one to use it. The words you send come first.", predictOn(), predictToggleCb);
-    setSwitchRow(c, "Space completes the word", "With Predictive text on, Space types the rest of the best word, as "
-                 "on a phone. Backspace straight after puts back what you typed.", predictSpaceOn(), predictSpaceToggleCb);
+    setSwitchRow(c, "Predictive text", "Up to three words over the message that finish or fix the one you're "
+                 "typing, or come next; tap one to use it. Your own words and phrases come first.", predictOn(), predictToggleCb);
+    setSwitchRow(c, "Space completes the word", "With Predictive text on, Space fixes or finishes a word that isn't one, "
+                 "as on a phone. Backspace straight after puts back what you typed.", predictSpaceOn(), predictSpaceToggleCb);
 #endif
 #if defined(HAS_TDECK_KEYBOARD) || defined(HAS_M9_KEYBOARD)
     setSwitchRow(c, "Enter key sends message", "Off: Enter adds a new line, and Send sends.",
