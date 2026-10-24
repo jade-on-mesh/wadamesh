@@ -65,6 +65,24 @@ static void ramNote(char* out, size_t cap) {
            (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) / 1024));
 }
 
+// Why a connection failed, beyond HTTPClient's -1: whether the name resolved,
+// and what TLS said (mbedTLS's error), so a report says which of DNS, the
+// socket and the handshake it was.
+static void connectNote(WiFiClientSecure& c, const char* host, char* out, size_t cap) {
+  if (!cap) return;
+  out[0] = 0;
+#if !(defined(HAS_TDISPLAY_P4) && !TDP4_C6_HOSTED)   // the AT backend has neither
+  IPAddress ip;
+  if (!WiFi.hostByName(host, ip)) { snprintf(out, cap, "DNS failed"); return; }
+  char tls[64] = "";
+  c.lastError(tls, sizeof tls);
+  if (tls[0]) snprintf(out, cap, "TLS: %s", tls);
+  else snprintf(out, cap, "no TCP connection");
+#else
+  (void)c; (void)host;
+#endif
+}
+
 static void say(Job& j, const char* m) {
   if (j.msg && j.msg_cap) snprintf(j.msg, j.msg_cap, "%s", m);
 }
@@ -89,25 +107,36 @@ static int latest() {
   for (int hop = 0; hop < 4; hop++) {
     char host[64];
     hostOf(url, host, sizeof host);
-    WiFiClientSecure c;
-    c.setInsecure();
-    HTTPClient h;
-    setup(h, false);
-    const char* keys[] = {"Location"};
-    h.collectHeaders(keys, 1);
-    if (!h.begin(c, url)) {
-      snprintf(s_verchk_why, sizeof s_verchk_why, "bad address %s", host);
-      return -1;
+    int code = 0;
+    String loc;
+    char note[96] = "";
+    // A connection that fails outright (-1) is tried again, with a fresh client
+    // each time: on the P4 the first TLS connection after Wi-Fi comes up often
+    // doesn't make it, and one failure used to cost the whole check.
+    for (int attempt = 0; attempt < 3; attempt++) {
+      WiFiClientSecure c;
+      c.setInsecure();
+      HTTPClient h;
+      setup(h, false);
+      const char* keys[] = {"Location"};
+      h.collectHeaders(keys, 1);
+      if (!h.begin(c, url)) {
+        snprintf(s_verchk_why, sizeof s_verchk_why, "bad address %s", host);
+        return -1;
+      }
+      code = h.GET();
+      loc = h.header("Location");
+      if (code < 0) connectNote(c, host, note, sizeof note);
+      h.end();
+      if (code >= 0) break;
+      vTaskDelay(pdMS_TO_TICKS(1500 * (attempt + 1)));
     }
-    const int code = h.GET();
-    String loc = h.header("Location");
-    h.end();
     if (code != 301 && code != 302 && code != 307 && code != 308) {
       if (code < 0) {
         char ram[32];
         ramNote(ram, sizeof ram);
-        snprintf(s_verchk_why, sizeof s_verchk_why, "%s: %s (%d), %s", host,
-                 HTTPClient::errorToString(code).c_str(), code, ram);
+        snprintf(s_verchk_why, sizeof s_verchk_why, "%s: %s (%d)%s%s, %s", host,
+                 HTTPClient::errorToString(code).c_str(), code, note[0] ? ", " : "", note, ram);
       } else {
         snprintf(s_verchk_why, sizeof s_verchk_why, "%s: HTTP %d", host, code);
       }
@@ -169,7 +198,7 @@ static bool getFollowing(Job& j, const char* first, Get& g, const char* what) {
       if (!g.h->begin(*g.c, url)) { g.code = -1; break; }
       g.code = g.h->GET();
       if (g.code > 0) break;
-      vTaskDelay(pdMS_TO_TICKS(1500));   // could not connect: try again
+      vTaskDelay(pdMS_TO_TICKS(1500 * (attempt + 1)));   // could not connect: try again
     }
     if (g.code == 200) return true;
     if (g.code == 301 || g.code == 302 || g.code == 303 || g.code == 307 || g.code == 308) {
@@ -178,13 +207,15 @@ static bool getFollowing(Job& j, const char* first, Get& g, const char* what) {
       url = next;
       continue;
     }
-    char host[64], m[112];
+    char host[64], m[200];
     hostOf(url, host, sizeof host);
     if (g.code == 404) snprintf(m, sizeof m, "%s not in the release", what);
     else if (g.code < 0) {
-      char ram[32];
+      char ram[32], note[96] = "";
       ramNote(ram, sizeof ram);
-      snprintf(m, sizeof m, "%s: can't connect to %s (%d, %s)", what, host, g.code, ram);
+      if (g.c) connectNote(*g.c, host, note, sizeof note);
+      snprintf(m, sizeof m, "%s: can't connect to %s (%d%s%s, %s)", what, host, g.code,
+               note[0] ? ", " : "", note, ram);
     }
     else snprintf(m, sizeof m, "%s: HTTP %d from %s", what, g.code, host);
     say(j, m);

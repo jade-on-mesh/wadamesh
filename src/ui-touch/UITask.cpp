@@ -9127,7 +9127,7 @@ static uint64_t      s_sdinfo_free     = 0;
 static volatile int  s_verchk_latest_n = -1;     // highest published pre-alpha_N (-1 = failed)
 // Why the last check found nothing (ForkUpdate.inc fills it), shown under
 // "Couldn't reach the update server": no network, TLS, HTTP status...
-static char s_verchk_why[72] = "";
+static char s_verchk_why[200] = "";
 #if defined(ESP32) && defined(MULTI_TRANSPORT_COMPANION) && CAP_OTA
 // Wi-Fi OTA self-update — native dual-OTA boards only (V4 + standalone T-Deck). The button is
 // gated on touchHasOtaUpdateSlot() (a spare A/B slot exists), so Launcher single-slot installs and
@@ -9137,7 +9137,7 @@ static volatile bool s_ota_request = false;      // UI -> worker: download + fla
 static volatile int  s_ota_state   = 0;          // 0 idle, 1 running, 2 success, 3 error
 static volatile int  s_ota_pct     = 0;          // download/write progress 0..100
 static volatile int  s_ota_target_n = -1;        // beta_N the worker should fetch (latest, or a chosen older one)
-static char          s_ota_msg[80] = {0};        // error detail surfaced to the UI
+static char          s_ota_msg[200] = {0};       // error detail surfaced to the UI
 static bool          touchHasOtaUpdateSlot();    // fwd: spare-A/B-slot probe, defined further below
 #endif
 
@@ -9402,7 +9402,7 @@ static void otaPollTimerCb(lv_timer_t* t) {
   } else {         // error -> show why, leave the button armed to retry, fall back to manual
     Serial.printf("[OTA] update failed: %s\n", s_ota_msg[0] ? s_ota_msg : "unknown");
     if (s_ota_status_lbl) {
-      char b[112];
+      char b[280];
       snprintf(b, sizeof b, "Update failed: %s\nUse " WADA_UPDATE_SITE " instead.",
                s_ota_msg[0] ? s_ota_msg : "unknown");
       otaStatusText(b);
