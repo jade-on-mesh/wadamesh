@@ -7,6 +7,7 @@
 // Wire. Clocking is fixed at MCLK = 256×fs from the MCLK pin, so one static divider row
 // ({4096000, 16000}: pre_div 1, mult 1x, adc/dac_div 1, bclk_div 4, osr 0x10) covers us.
 #include "P4Audio.h"
+#include "../../src/helpers/PsramStatic.h"   // P4_PSRAM_BSS
 #include "P4I2c1.h"
 #include <Arduino.h>
 #include <Wire.h>
@@ -170,7 +171,7 @@ void p4AudioTone(int freq_hz, int duration_ms, int amplitude) {
   if (xSemaphoreTake(s_mtx, 0) != pdTRUE) return;
   const int total = P4A_RATE * duration_ms / 1000;
   const int fade  = P4A_RATE * 4 / 1000;             // 4 ms in/out fade kills the click
-  static int16_t buf[256 * 2];                       // stereo frames, chunked
+  P4_PSRAM_BSS static int16_t buf[256 * 2];          // stereo frames, chunked (the driver copies)
   int done = 0;
   float phase = 0.0f;
   const float step = 2.0f * (float)M_PI * (float)freq_hz / (float)P4A_RATE;
@@ -200,7 +201,7 @@ bool p4AudioStreamBegin() {
 
 bool p4AudioStreamWrite(const int16_t* samples, size_t frames) {
   if (!samples || !frames || !s_tx) return false;
-  static int16_t stereo[256 * 2];
+  P4_PSRAM_BSS static int16_t stereo[256 * 2];
   while (frames) {
     const size_t count = frames > 256 ? 256 : frames;
     for (size_t i = 0; i < count; ++i)
@@ -248,7 +249,7 @@ bool p4AudioCaptureBegin() {
 bool p4AudioCaptureRead(int16_t* mono, size_t max_samples, size_t* got, uint32_t timeout_ms) {
   *got = 0;
   if (!s_capturing || !s_rx || !mono || !max_samples) return false;
-  static int16_t stereo[256 * 2];
+  P4_PSRAM_BSS static int16_t stereo[256 * 2];
   const size_t frames = max_samples > 256 ? 256 : max_samples;
   size_t bytes = 0;
   if (i2s_channel_read(s_rx, stereo, frames * 2 * sizeof(int16_t), &bytes, pdMS_TO_TICKS(timeout_ms)) != ESP_OK)

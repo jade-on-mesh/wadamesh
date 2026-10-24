@@ -2,6 +2,7 @@
 // LoRa Update: SD file access and the engine's lifetime. See LoraUpdate.h.
 
 #include "LoraUpdate.h"
+#include "PsramStatic.h"   // P4_PSRAM_BSS
 
 #if LORA_UPDATE
 
@@ -76,8 +77,8 @@ private:
   uint8_t _open_idx = 0xFF;
 };
 
-SdFileIO s_io;
-MotaFileSource s_src(s_io);
+P4_PSRAM_BSS SdFileIO s_io;
+P4_PSRAM_BSS MotaFileSource s_src(s_io);
 mesh::ota::OtaManager* s_mgr = nullptr;   // PSRAM, while a session is open
 uint8_t s_self[4] = {};
 SendFn s_send = nullptr;

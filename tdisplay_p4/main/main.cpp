@@ -14,6 +14,7 @@
 #include "esp_heap_caps.h"
 #include "UITask.h"
 #include "target.h"                // board, radio_driver, rtc_clock, display, sensors, radio_init()
+#include "../../src/helpers/PsramStatic.h"   // P4_PSRAM_BSS
 #include <LittleFS.h>              // internal 'storage' partition, mounted as LittleFS (label lookup is
                                    // subtype-agnostic, so the ex-FAT partition converts in place -- no
                                    // partition-table change, OTA-safe). The P4's FAT-on-flash layer has
@@ -91,9 +92,9 @@ extern "C" void set_boot_phase(int phase) { g_boot_phase = phase; }
 DataStore store(LittleFS, rtc_clock);
 bool g_fs_ok = false;   // internal 'storage' (LittleFS) mounted (extern — UITask file browser)
 bool g_sd_ok = false;   // microSD mounted (extern)
-MultiTransportCompanionInterface serial_interface;
+P4_PSRAM_BSS MultiTransportCompanionInterface serial_interface;   // 11 KB: PSRAM, not internal RAM
 StdRNG fast_rng;
-SimpleMeshTables tables;
+P4_PSRAM_BSS SimpleMeshTables tables;
 UITask ui_task(&board, &serial_interface);
 // the_mesh (~42 KB, MAX_CONTACTS-dominated) lives in the 32 MB PSRAM, not scarce internal DRAM.
 static MyMesh& makeTheMesh() {
@@ -116,7 +117,7 @@ static void migrateFsCopyFile(fs::FS &src, const char *sp, fs::FS &dst, const ch
   if (!in) return;
   File out = dst.open(dp, FILE_WRITE);
   if (!out) { in.close(); return; }
-  static uint8_t buf[1024];
+  P4_PSRAM_BSS static uint8_t buf[1024];
   int n;
   while ((n = in.read(buf, sizeof buf)) > 0) out.write(buf, (size_t)n);
   out.close(); in.close();

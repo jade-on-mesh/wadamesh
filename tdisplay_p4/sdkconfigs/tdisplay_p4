@@ -114,6 +114,15 @@ CONFIG_CACHE_L2_CACHE_LINE_64B=n
 CONFIG_CACHE_L2_CACHE_LINE_128B=y
 
 
+# --- Internal RAM (about 76 KB free at runtime, largest piece about 42 KB) ---------------------
+# Static buffers may live in PSRAM: P4_PSRAM_BSS (src/helpers/PsramStatic.h) puts our largest
+# remaining ones there. (A linker fragment for the whole app layer is silently ignored here:
+# the P4 linker template has no extern_ram slot for ldgen.)
+CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y
+# The heap's and the ring buffers' code from flash (PSRAM, with XIP) instead of IRAM: ~13 KB.
+# Fine here: with CONFIG_SPIRAM_XIP_FROM_PSRAM the cache is never disabled for a flash write.
+CONFIG_HEAP_PLACE_FUNCTION_INTO_FLASH=y
+CONFIG_RINGBUF_PLACE_FUNCTIONS_INTO_FLASH=y
 # Network headroom for HTTPS (the fork's update check and install, the Reader,
 # predictive text's dictionary). IDF's default of 10 sockets is shared here by
 # the TCP companion server, the WebSocket server and its client, the web

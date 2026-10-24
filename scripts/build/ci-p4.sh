@@ -82,4 +82,19 @@ python3 -m esptool --chip esp32p4 merge_bin --flash_mode dio --flash_size 16MB -
   0x8000 "$B/partition_table/partition-table.bin" \
   0xf000 "$B/ota_data_initial.bin" \
   0x20000 "$APP"
+# Where the memory goes (flash, internal RAM, PSRAM), for ram-report/<variant>.
+ELF="$(ls "$B"/*.elf | head -1)"; MAP="$(ls "$B"/*.map | head -1)"
+if [ -n "$ELF" ] && [ -n "$MAP" ]; then
+  python3 "$ROOT/scripts/build/mem-report.py" "$ELF" "$MAP" riscv32-esp-elf- > "$ROOT/$OUT/mem-report-$NAME.txt" || true
+  python3 -m esp_idf_size "$MAP" >> "$ROOT/$OUT/mem-report-$NAME.txt" 2>/dev/null || true
+  {
+    echo; echo "===== config and placement checks ====="
+    grep -hE "SPIRAM_ALLOW_BSS|HEAP_PLACE|RINGBUF_PLACE|LWIP_MAX_SOCKETS|MBEDTLS_EXTERNAL|MBEDTLS_INTERNAL|MBEDTLS_DEFAULT_MEM|CACHE_L2_CACHE_" sdkconfig 2>/dev/null
+    LD="$(find "$B" -name sections.ld | head -1)"
+    echo "sections.ld: $LD"
+    [ -n "$LD" ] && grep -n "ext_ram\|extern_ram" "$LD" | head -40
+    [ -n "$LD" ] && grep -c "libwadamesh_app.a" "$LD"
+    grep -rn "extram_bss" "$IDF_PATH/components" --include=*.lf | head -5
+  } >> "$ROOT/$OUT/mem-report-$NAME.txt" 2>&1 || true
+fi
 ls -la "$ROOT/$OUT"

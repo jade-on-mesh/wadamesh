@@ -24,6 +24,18 @@
 #include <esp_heap_caps.h>
 #endif
 
+// The T-Display P4 only: a static the linker puts in PSRAM (.ext_ram.bss, with
+// CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY), zeroed before constructors run,
+// so it suits objects with constructors too. Elsewhere it does nothing. The P4
+// runs code from PSRAM (XIP), so PSRAM stays reachable through flash writes.
+//     P4_PSRAM_BSS static int16_t buf[512];
+#if defined(HAS_TDISPLAY_P4) && defined(ESP_PLATFORM)
+#include <esp_attr.h>
+#define P4_PSRAM_BSS EXT_RAM_BSS_ATTR
+#else
+#define P4_PSRAM_BSS
+#endif
+
 template <typename T>
 inline T& psramStatic() {
   static_assert(std::is_trivially_default_constructible<typename std::remove_all_extents<T>::type>::value,
