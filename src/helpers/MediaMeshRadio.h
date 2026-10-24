@@ -24,15 +24,19 @@
 //    radio2 is active: its drain task lifts a packet out of the radio within
 //    ~1 ms, so the scan can move on.
 //
-// Requires an ESP32 with an SX126x whose DIO1 reaches a GPIO; elsewhere
-// MEDIAMESH_RADIO stays undefined and the board keeps its stock wrapper.
+// Requires an ESP32 with an SX126x; elsewhere MEDIAMESH_RADIO stays undefined
+// and the board keeps its stock wrapper. A board whose DIO1 reaches no GPIO
+// (MESH_RADIO_DIO1_POLLED: the T-Display P4, where it sits on an I2C expander)
+// works too: the scan reads the chip's IRQ register over SPI anyway, so it
+// stands in for the interrupt itself. A finished packet it finds wakes the
+// drain task (pollRxIfNoIrq), and TX-done is read from the chip
+// (isSendComplete), where the stock polled path only ever timed sends out.
 
 #pragma once
 
 #include "MediaMeshCore.h"
 
-#if defined(ESP32) && (defined(USE_SX1262) || defined(USE_SX1268)) && !defined(MESH_RADIO_DIO1_POLLED) \
-    && !defined(MEDIAMESH_DISABLE)
+#if defined(ESP32) && (defined(USE_SX1262) || defined(USE_SX1268)) && !defined(MEDIAMESH_DISABLE)
 
 #define MEDIAMESH_RADIO 1
 
@@ -352,6 +356,12 @@ class MediaMeshRadio : public Base {
         const bool header = (irq & RADIOLIB_SX126X_IRQ_HEADER_VALID) != 0;
         const bool preamble = (irq & RADIOLIB_SX126X_IRQ_PREAMBLE_DETECTED) != 0;
         const bool waiting = (irq & RADIOLIB_SX126X_IRQ_RX_DONE) != 0;
+#if defined(MESH_RADIO_DIO1_POLLED)
+        // No DIO1 interrupt on this board: this read is it. Hand the packet to
+        // the drain task now (it lifts it out within ~1 ms), instead of
+        // leaving it for the main loop or the drain task's 250 ms safety tick.
+        if (waiting) this->pollRxIfNoIrq();
+#endif
         if (header || preamble || waiting) {
           const uint32_t now = millis();
           if (!_hold_start) _hold_start = now;
@@ -380,6 +390,21 @@ class MediaMeshRadio : public Base {
   }
 
   void wake() { if (_task) xTaskNotifyGive(_task); }
+
+  // A board without a DIO1 interrupt never sees TX-done through the wrapper:
+  // read it from the chip. (The wrapper's state then stays "sending" until
+  // onSendFinished, which every path below and the dispatcher call next.)
+  bool txDonePolled() {
+#if defined(MESH_RADIO_DIO1_POLLED)
+    if (!_tx) return false;
+    this->radioAcquire();
+    const bool done = (chip()->getIrqFlags() & RADIOLIB_SX126X_IRQ_TX_DONE) != 0;
+    this->radioRelease();
+    return done;
+#else
+    return false;
+#endif
+  }
 
   // Sends on one profile. Caller does not hold the mutex.
   bool sendOn(uint8_t profile, const uint8_t* bytes, int len) {
@@ -549,7 +574,7 @@ class MediaMeshRadio : public Base {
   }
 
   bool isSendComplete() override {
-    if (!Base::isSendComplete()) return false;
+    if (!Base::isSendComplete() && !txDonePolled()) return false;
     if (_copy_profile != 0xFF) {
       const uint8_t p = _copy_profile;
       _copy_profile = 0xFF;
