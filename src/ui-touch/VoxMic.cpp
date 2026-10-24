@@ -2,6 +2,7 @@
 #include "VoxMic.h"
 
 #include "VoxVoice.h"
+#include "../helpers/PsramStatic.h"   // P4_PSRAM_BSS
 
 #if defined(HAS_TDECK_GT911) && VOX_CODEC2_AVAILABLE
 #define VOX_MIC_TDECK 1
@@ -254,9 +255,9 @@ void captureJob(void*) {
   s_bpf = bpf;
   const size_t max_frames = ok ? (size_t)kVoxMaxRecordSeconds * 8000 / (size_t)spf : 0;
   s_frame_ms = (uint32_t)spf / 8;
-  static int16_t rx[2 * 256];         // 256 stereo frames = 16 ms
-  static int16_t pcm8[2 * 256 / 2 + 2];   // 8 kHz out of one read, stereo or mono
-  static int16_t frame[320];
+  P4_PSRAM_BSS static int16_t rx[2 * 256];         // 256 stereo frames = 16 ms
+  P4_PSRAM_BSS static int16_t pcm8[2 * 256 / 2 + 2];   // 8 kHz out of one read, stereo or mono
+  P4_PSRAM_BSS static int16_t frame[320];
   int have = 0;
   // The first kSettleMs are thrown away (the ADC's power-up thump). They also
   // tell us what the driver delivers: 16 kHz stereo is 64000 B/s, mono 32000.
@@ -506,7 +507,7 @@ bool rawStart(const char** err) {
 bool rawRead(int16_t* mono, size_t max, size_t* got, uint32_t timeout_ms) {
   *got = 0;
   if (!s_raw) return false;
-  static int16_t rx[2 * 256];
+  P4_PSRAM_BSS static int16_t rx[2 * 256];
   // Drain what the DMA held before, then measure what arrives (as captureJob does).
   while (s_raw_drain > 0) {
     size_t n = 0;

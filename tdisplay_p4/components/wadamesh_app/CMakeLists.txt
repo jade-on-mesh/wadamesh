@@ -33,8 +33,6 @@ idf_component_register(
            c6_at   # C6WifiShim facade (WiFi.* -> AT-over-SDIO; UITask + WifiRuntimeStore include it)
   # See the Tanmatsu note: whole-archive so the strong ssl_client stub defs are always present.
   WHOLE_ARCHIVE
-  # Our static buffers in PSRAM, not internal RAM (linker.lf says why).
-  LDFRAGMENTS "linker.lf"
 )
 # Our own code, but huge + LVGL-heavy — keep the first port building; don't -Werror on warnings.
 target_compile_options(${COMPONENT_LIB} PRIVATE -w
