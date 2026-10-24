@@ -16,6 +16,7 @@
 #include "VoxServe.h"
 #include "VoxVoice.h"
 #include "device_caps.h"
+#include "../helpers/PsramStatic.h"
 
 namespace VoxPhotos {
 namespace {
@@ -96,7 +97,7 @@ void storePath(uint32_t sid, bool voice, char* out, size_t cap) {
 // bits: (1 << 2k) known, (2 << 2k) present. A thumbnail's size rides along, so a
 // chat layout can make room for it without reading the file.
 struct HaveEntry { uint32_t sid; uint8_t bits; uint8_t tw, th; };
-static HaveEntry g_have[128];
+static auto& g_have = psramStatic<HaveEntry[128]>();   // PSRAM: not internal RAM
 static uint32_t g_fs_checks = 0;   // exists() calls made (About: chat open timing)
 static uint8_t g_have_next = 0;
 
@@ -161,7 +162,7 @@ static IdxEntry* g_idx_new = nullptr;
 static int g_idx_new_n = 0, g_idx_new_cap = 0;
 static uint32_t g_idx_new_gen = 0;
 struct IdxOp { uint32_t sid; uint8_t kind; bool present; uint8_t tw, th; };
-static IdxOp g_idx_ops[48];               // changes made while the pass ran, applied after it
+static auto& g_idx_ops = psramStatic<IdxOp[48]>();   // changes made while the pass ran, applied after it
 static int g_idx_ops_n = 0;
 static bool g_idx_ops_lost = false;
 static uint32_t g_layout_ver = 0;         // bubble heights may differ: lay the chat out again
@@ -863,7 +864,7 @@ uint32_t nextThumbWanted() {
 // Thumbnail pixels kept in PSRAM (24 x up to 18 KB), so redrawing a chat or
 // the Photos grid doesn't read the files again.
 struct ThumbPx { uint32_t sid; uint8_t w, h; uint16_t* px; };
-static ThumbPx g_tpx[24];
+static auto& g_tpx = psramStatic<ThumbPx[24]>();
 static uint8_t g_tpx_next = 0;
 static void thumbCacheDrop(uint32_t sid) {
   for (auto& t : g_tpx) if (t.px && t.sid == sid) { heap_caps_free(t.px); t.px = nullptr; t.sid = 0; }

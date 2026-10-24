@@ -11,6 +11,7 @@
 // length is validated against the actual buffer length before use.
 
 #include "remoteid.h"
+#include "../helpers/PsramStatic.h"
 #include <string.h>
 #include <math.h>
 
@@ -29,7 +30,7 @@ static const uint8_t ASTM_OUI[3] = { 0xFA, 0x0B, 0xBC };
 // ════════════════════════════════════════════════════════════
 // MODULE STATE
 // ════════════════════════════════════════════════════════════
-static RemoteIdTrack g_tracks[RID_MAX_TRACKS];
+static auto& g_tracks = psramStatic<RemoteIdTrack[RID_MAX_TRACKS]>();   // 1.8 KB, PSRAM: not internal RAM
 static uint8_t  g_source = RID_SRC_900;          // Decision A: 900 MHz default
 static uint32_t g_lastAlertMs[RID_MAX_TRACKS];
 static double   g_lastAlertLat[RID_MAX_TRACKS];
