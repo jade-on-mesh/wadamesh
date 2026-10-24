@@ -123,3 +123,12 @@ CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y
 # Fine here: with CONFIG_SPIRAM_XIP_FROM_PSRAM the cache is never disabled for a flash write.
 CONFIG_HEAP_PLACE_FUNCTION_INTO_FLASH=y
 CONFIG_RINGBUF_PLACE_FUNCTIONS_INTO_FLASH=y
+# Network headroom for HTTPS (the fork's update check and install, the Reader,
+# predictive text's dictionary). IDF's default of 10 sockets is shared here by
+# the TCP companion server, the WebSocket server and its client, the web
+# mirror, MQTT, the tile fetcher and DNS; with them up, an update's TLS socket
+# could fail before it connected ("connection refused (-1)"). mbedTLS's buffers
+# (~40 KB per connection) go to PSRAM: internal RAM is ~76 KB free here with its
+# largest piece ~42 KB, too little to count on for a handshake.
+CONFIG_LWIP_MAX_SOCKETS=16
+CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
